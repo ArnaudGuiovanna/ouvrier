@@ -3,10 +3,12 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 
+	"ouvrier/internal/scaffold"
 	"ouvrier/internal/tui"
 )
 
@@ -83,7 +85,7 @@ func (app *App) run(ctx context.Context, args []string) error {
 	case "version":
 		return app.runVersion(args[1:])
 	case "new":
-		return app.runNewCommand(args[1:])
+		return app.runNewCommand(ctx, args[1:])
 	default:
 		return fmt.Errorf("%w %q", ErrUnknownCommand, args[0])
 	}
@@ -101,15 +103,54 @@ func (app *App) runVersion(args []string) error {
 	return nil
 }
 
-func (app *App) runNewCommand(args []string) error {
+func (app *App) runNewCommand(ctx context.Context, args []string) error {
 	if hasHelpFlag(args) {
 		printNewHelp(app.out)
 		return nil
 	}
-	if len(args) > 0 {
-		return fmt.Errorf("%w: new does not accept positional arguments yet", ErrUsage)
+	if len(args) == 0 {
+		return app.runNew(app.in, app.out)
 	}
-	return app.runNew(app.in, app.out)
+
+	cfg, yes, err := parseNewFlags(args)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		return fmt.Errorf("%w: pass --yes to scaffold non-interactively, or run without flags for the TUI", ErrUsage)
+	}
+
+	project, err := scaffold.Generate(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("scaffold project: %w", err)
+	}
+	fmt.Fprintf(app.out, "created %s\n", project.Dir)
+	return nil
+}
+
+func parseNewFlags(args []string) (scaffold.Config, bool, error) {
+	flags := flag.NewFlagSet("new", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+
+	name := flags.String("name", "", "project name")
+	trigger := flags.String("trigger", "", "pipeline trigger")
+	model := flags.String("model", "", "LLM model ID")
+	dir := flags.String("dir", ".", "parent directory")
+	yes := flags.Bool("yes", false, "confirm non-interactive scaffold")
+
+	if err := flags.Parse(args); err != nil {
+		return scaffold.Config{}, false, fmt.Errorf("%w: %w", ErrUsage, err)
+	}
+	if flags.NArg() > 0 {
+		return scaffold.Config{}, false, fmt.Errorf("%w: new does not accept positional arguments", ErrUsage)
+	}
+
+	return scaffold.Config{
+		Name:    *name,
+		Trigger: *trigger,
+		Model:   *model,
+		Dir:     *dir,
+	}, *yes, nil
 }
 
 func hasHelpFlag(args []string) bool {

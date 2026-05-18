@@ -16,12 +16,19 @@ Commands:
 Run "ouvrier <command> --help" for command details.
 `
 
-const newHelp = `Scaffold a new Ouvrier project with the Bubble Tea wizard.
+const newHelp = `Scaffold a new Ouvrier project.
 
 Usage: ouvrier new [flags]
 
+With no flags, ouvrier opens the Bubble Tea wizard.
+
 Options:
-  -h, --help   Show this help message
+      --name string      Project name
+      --trigger string   Trigger, for example "POST /tickets"
+      --model string     Model ID, for example anthropic/claude-sonnet-4-6
+      --dir string       Parent directory for the project (default ".")
+      --yes              Confirm non-interactive scaffold
+  -h, --help             Show this help message
 `
 
 const versionHelp = `Print the ouvrier CLI version.

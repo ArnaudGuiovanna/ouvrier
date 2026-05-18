@@ -11,7 +11,9 @@ type PipeOption interface {
 }
 
 type pipeConfig struct {
-	model string
+	model  string
+	tools  []toolSpec
+	skills []skillSpec
 }
 
 type pipeNode struct {
@@ -46,6 +48,16 @@ func (n pipeNode) validateNode() error {
 	}
 	if strings.TrimSpace(n.config.model) == "" {
 		return ErrPipeMissingModel
+	}
+	for _, tool := range n.config.tools {
+		if err := tool.validateTool(); err != nil {
+			return err
+		}
+	}
+	for _, skill := range n.config.skills {
+		if err := skill.validateSkill(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
