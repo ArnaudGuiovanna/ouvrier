@@ -79,6 +79,9 @@ func compileTerminal(node Node) (runtimeplan.Terminal, error) {
 
 func compileReplyTerminal(node replyNode) runtimeplan.Terminal {
 	terminal := runtimeplan.Terminal{Kind: runtimeplan.TerminalReply}
+	if format, ok := node.format.(asyncReplyFormat); ok && format.asyncReply() {
+		terminal.Async = true
+	}
 	if format, ok := node.format.(resultSchemaCarrier); ok {
 		terminal.ResultSchema = resultSchemaFromType(format.resultSchemaType())
 	}

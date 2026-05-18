@@ -54,6 +54,30 @@ func TestNewHTTPHandlerServesDirectPOSTReply(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerServesDirectAcceptedReply(t *testing.T) {
+	handler, err := newHTTPHandler([]Node{
+		From("POST /jobs"),
+		Reply(Accepted()),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandler returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/jobs", nil))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	var body httpStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Status != "accepted" {
+		t.Fatalf("status body = %q, want accepted", body.Status)
+	}
+}
+
 func TestNewHTTPHandlerServesHTTPPathParams(t *testing.T) {
 	handler, err := newHTTPHandler([]Node{
 		From("GET /tickets/{id}"),

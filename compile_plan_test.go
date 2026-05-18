@@ -139,3 +139,21 @@ func TestCompilePlansCompilesMultiplePipelines(t *testing.T) {
 		t.Fatalf("second terminal = %q, want sink", plans[1].Terminal.Kind)
 	}
 }
+
+func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /jobs"),
+		Pipe("process job", Model("anthropic/claude-sonnet-4-6")),
+		Reply(Accepted()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	terminal := plans[0].Terminal
+	if terminal.Kind != runtimeplan.TerminalReply {
+		t.Fatalf("terminal kind = %q, want reply", terminal.Kind)
+	}
+	if !terminal.Async {
+		t.Fatal("terminal Async = false, want true")
+	}
+}

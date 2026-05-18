@@ -65,6 +65,7 @@ const (
 
 type Terminal struct {
 	Kind         TerminalKind
+	Async        bool
 	ResultSchema *ResultSchema
 }
 

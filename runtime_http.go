@@ -60,8 +60,12 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	switch r.terminal {
+	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
+		if r.plan.Terminal.Async {
+			writeJSONStatus(w, http.StatusAccepted, "accepted")
+			return
+		}
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
@@ -74,6 +78,15 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	input, err := readHTTPRequestInput(req)
 	if err != nil {
 		writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
+		return
+	}
+
+	if r.plan.Terminal.Async {
+		ctx := context.WithoutCancel(req.Context())
+		go func() {
+			_, _ = r.runtime.runPlan(ctx, r.plan, input)
+		}()
+		writeJSONStatus(w, http.StatusAccepted, "accepted")
 		return
 	}
 
@@ -90,7 +103,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	switch r.terminal {
+	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
 	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:

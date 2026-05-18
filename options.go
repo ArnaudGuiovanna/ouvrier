@@ -31,6 +31,25 @@ func (f JSONReply[T]) resultSchemaType() reflect.Type {
 	return f.schema
 }
 
+type AcceptedReply struct{}
+
+// Accepted declares an HTTP 202 reply while the pipeline continues asynchronously.
+func Accepted() AcceptedReply {
+	return AcceptedReply{}
+}
+
+func (AcceptedReply) validateReplyFormat() error {
+	return nil
+}
+
+func (AcceptedReply) asyncReply() bool {
+	return true
+}
+
+type asyncReplyFormat interface {
+	asyncReply() bool
+}
+
 type replyNode struct {
 	format ReplyFormat
 }

@@ -7,11 +7,10 @@ import (
 )
 
 type httpRoute struct {
-	method   string
-	path     string
-	terminal runtimeplan.TerminalKind
-	plan     runtimeplan.Plan
-	runtime  httpRuntime
+	method  string
+	path    string
+	plan    runtimeplan.Plan
+	runtime httpRuntime
 }
 
 func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
@@ -26,10 +25,9 @@ func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
 			return nil, fmt.Errorf("%w: only HTTP triggers are supported by this runtime slice", ErrRunNotImplemented)
 		}
 		routes = append(routes, httpRoute{
-			method:   plan.Trigger.Method,
-			path:     plan.Trigger.Path,
-			terminal: plan.Terminal.Kind,
-			plan:     plan,
+			method: plan.Trigger.Method,
+			path:   plan.Trigger.Path,
+			plan:   plan,
 		})
 	}
 	return routes, nil
