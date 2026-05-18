@@ -32,6 +32,7 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	for _, path := range []string{
 		"main.go",
 		"go.mod",
+		"go.sum",
 		"pip.yaml",
 		".env.example",
 		".gitignore",

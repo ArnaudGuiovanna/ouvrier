@@ -66,6 +66,9 @@ func Generate(ctx context.Context, cfg Config) (Project, error) {
 		".gitignore":   gitignore(),
 		"README.md":    readme(normalized),
 	}
+	if goSum := frameworkGoSum(normalized); goSum != "" {
+		files["go.sum"] = goSum
+	}
 	for name, contents := range files {
 		if err := ctx.Err(); err != nil {
 			return Project{}, err
@@ -76,6 +79,17 @@ func Generate(ctx context.Context, cfg Config) (Project, error) {
 	}
 
 	return Project{Name: normalized.Name, Dir: target}, nil
+}
+
+func frameworkGoSum(cfg Config) string {
+	if cfg.FrameworkDir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.FrameworkDir, "go.sum"))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func normalizeConfig(cfg Config) (Config, error) {

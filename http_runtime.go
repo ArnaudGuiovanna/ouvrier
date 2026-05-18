@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"ouvrier/internal/harness"
+	"ouvrier/internal/mcpclient"
 	"ouvrier/internal/provider"
 	runtimeplan "ouvrier/internal/runtime"
 	"ouvrier/internal/tools"
@@ -20,6 +21,7 @@ type httpRuntime struct {
 	provider     provider.Provider
 	providers    *provider.Registry
 	toolExecutor *tools.Executor
+	mcpConnector mcpConnector
 }
 
 func defaultHTTPRuntime() httpRuntime {
@@ -27,6 +29,7 @@ func defaultHTTPRuntime() httpRuntime {
 	return httpRuntime{
 		providers:    providers,
 		toolExecutor: tools.NewExecutor(),
+		mcpConnector: envMCPConnector{connector: mcpclient.NewEnvConnector()},
 	}
 }
 
@@ -41,12 +44,13 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 
 	current := input
 	for _, step := range plan.Steps {
-		specs, err := registerRuntimeTools(executor, step.Tools)
+		specs, closeMCP, err := rt.registerStepTools(ctx, executor, step)
 		if err != nil {
 			return "", err
 		}
 		stepProvider, err := rt.providerForModel(step.Model)
 		if err != nil {
+			_ = closeMCP()
 			return "", err
 		}
 		h, err := harness.New(stepProvider,
@@ -55,11 +59,16 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 			harness.WithTools(specs...),
 		)
 		if err != nil {
+			_ = closeMCP()
 			return "", err
 		}
 		out, err := h.Run(ctx, current)
+		closeErr := closeMCP()
 		if err != nil {
 			return "", err
+		}
+		if closeErr != nil {
+			return "", closeErr
 		}
 		if out.Status != harness.StatusCompleted {
 			return "", fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, out.Status)
@@ -81,6 +90,59 @@ func (rt httpRuntime) providerForModel(model string) (provider.Provider, error) 
 		return rt.provider, nil
 	}
 	return nil, errHTTPProviderNotConfigured
+}
+
+type mcpConnector interface {
+	Connect(context.Context, string) (mcpRuntimeSession, error)
+}
+
+type mcpRuntimeSession interface {
+	RegisterTools(context.Context, *tools.Executor) ([]provider.ToolSpec, error)
+	Close() error
+}
+
+func (rt httpRuntime) registerStepTools(ctx context.Context, executor *tools.Executor, step runtimeplan.Step) ([]provider.ToolSpec, func() error, error) {
+	specs, err := registerRuntimeTools(executor, step.Tools)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sessions := make([]mcpRuntimeSession, 0, len(step.MCPServers))
+	closeSessions := func() error {
+		var closeErr error
+		for _, session := range sessions {
+			closeErr = errors.Join(closeErr, session.Close())
+		}
+		return closeErr
+	}
+
+	for _, server := range step.MCPServers {
+		connector := rt.mcpConnector
+		if connector == nil {
+			connector = envMCPConnector{connector: mcpclient.NewEnvConnector()}
+		}
+		session, err := connector.Connect(ctx, server.Name)
+		if err != nil {
+			_ = closeSessions()
+			return nil, nil, err
+		}
+		sessions = append(sessions, session)
+		mcpSpecs, err := session.RegisterTools(ctx, executor)
+		if err != nil {
+			_ = closeSessions()
+			return nil, nil, err
+		}
+		specs = append(specs, mcpSpecs...)
+	}
+	return specs, closeSessions, nil
+}
+
+type envMCPConnector struct {
+	connector *mcpclient.EnvConnector
+}
+
+func (c envMCPConnector) Connect(ctx context.Context, serverName string) (mcpRuntimeSession, error) {
+	return c.connector.Connect(ctx, serverName)
 }
 
 func registerRuntimeTools(executor *tools.Executor, runtimeTools []runtimeplan.Tool) ([]provider.ToolSpec, error) {

@@ -1,6 +1,11 @@
 package scaffold
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 func mainGo(cfg Config) string {
 	return fmt.Sprintf(`package main
@@ -36,12 +41,45 @@ go 1.25.0
 
 require %s v0.0.0
 `, cfg.Name, cfg.FrameworkModule)
+	if requirements := frameworkRequireBlocks(cfg); requirements != "" {
+		body += "\n" + requirements
+	}
 	if cfg.FrameworkDir != "" {
 		body += fmt.Sprintf(`
 replace %s => %s
 `, cfg.FrameworkModule, cfg.FrameworkDir)
 	}
 	return body
+}
+
+func frameworkRequireBlocks(cfg Config) string {
+	if cfg.FrameworkDir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.FrameworkDir, "go.mod"))
+	if err != nil {
+		return ""
+	}
+
+	var blocks []string
+	lines := strings.Split(string(data), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		switch {
+		case strings.HasPrefix(line, "require ("):
+			var block []string
+			for ; i < len(lines); i++ {
+				block = append(block, lines[i])
+				if strings.TrimSpace(lines[i]) == ")" {
+					break
+				}
+			}
+			blocks = append(blocks, strings.Join(block, "\n"))
+		case strings.HasPrefix(line, "require "):
+			blocks = append(blocks, lines[i])
+		}
+	}
+	return strings.Join(blocks, "\n\n")
 }
 
 func pipYAML(cfg Config) string {

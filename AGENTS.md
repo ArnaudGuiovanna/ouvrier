@@ -197,7 +197,10 @@ passing before commit.
 - Implement `Tool`, `Describe`, and `Param`.
 - Implement `Skill` loading, frontmatter validation, and system prompt injection.
 - Generate user-project embed code for skills and support files.
-- Implement MCP client support.
+- Implement MCP client support with the official Go SDK:
+  `github.com/modelcontextprotocol/go-sdk/mcp`. Do not implement a protocol
+  client by hand unless the SDK blocks a required v0.1 capability and the
+  exception is documented.
 - Implement Bash sandbox with explicit platform limitations.
 
 ### M4 - Composition And Concurrency

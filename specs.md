@@ -394,6 +394,11 @@ ovr.Pipe("...", ovr.MCP("moodle-mcp"))
 - L'URL du MCP server est dans `.env` : `MOODLE_MCP_URL=https://...`
 - Authentification optionnelle via `MOODLE_MCP_TOKEN`
 - Le framework agit comme client MCP standard
+- L'implémentation Go utilise le SDK officiel
+  `github.com/modelcontextprotocol/go-sdk/mcp` comme base protocolaire. Ouvrier
+  peut l'encapsuler pour imposer `ToolExecutor`, `PermissionPolicy`, `Sandbox`,
+  `EventStream` et `StateStore`, mais ne maintient pas un client MCP maison pour
+  les transports et méthodes de base.
 
 ### 5.4 Bash — shell sandboxé
 

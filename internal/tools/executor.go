@@ -29,6 +29,7 @@ type registeredTool struct {
 	name     string
 	fn       reflect.Value
 	typ      reflect.Type
+	handler  Handler
 	metadata Metadata
 }
 
@@ -70,6 +71,32 @@ func (e *Executor) Register(name string, fn any, options ...RegisterOption) erro
 	return nil
 }
 
+func (e *Executor) RegisterHandler(name string, handler Handler, options ...RegisterOption) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("%w: name is required", ErrInvalidTool)
+	}
+	if handler == nil {
+		return fmt.Errorf("%w: %q handler is required", ErrInvalidTool, name)
+	}
+	tool := registeredTool{
+		name:     name,
+		handler:  handler,
+		metadata: Metadata{Effect: policy.EffectSideEffecting},
+	}
+	for _, option := range options {
+		if option == nil {
+			return fmt.Errorf("%w: nil register option", ErrInvalidTool)
+		}
+		option(&tool)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.tools[name] = tool
+	return nil
+}
+
 func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result provider.ToolResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -95,6 +122,14 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 			err = nil
 		}
 	}()
+
+	if tool.handler != nil {
+		result, err := tool.handler.Execute(ctx, call)
+		if err != nil {
+			return errorResult(call, err), nil
+		}
+		return result, nil
+	}
 
 	args, err := buildCallArgs(ctx, tool.typ, call.Arguments)
 	if err != nil {
