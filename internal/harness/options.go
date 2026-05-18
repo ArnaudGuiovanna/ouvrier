@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 
+	"ouvrier/internal/provider"
 	"ouvrier/internal/tools"
 )
 
@@ -16,6 +17,7 @@ type config struct {
 	systemPrompt  string
 	maxIterations int
 	toolExecutor  *tools.Executor
+	tools         []provider.ToolSpec
 }
 
 func defaultConfig() config {
@@ -55,6 +57,13 @@ func WithToolExecutor(executor *tools.Executor) Option {
 			return errors.New("tool executor is required")
 		}
 		cfg.toolExecutor = executor
+		return nil
+	}
+}
+
+func WithTools(specs ...provider.ToolSpec) Option {
+	return func(cfg *config) error {
+		cfg.tools = append([]provider.ToolSpec(nil), specs...)
 		return nil
 	}
 }

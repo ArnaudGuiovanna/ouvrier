@@ -15,11 +15,25 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		Kind:  runtimeplan.StepPipe,
 		Goal:  pipe.goal,
 		Model: pipe.config.model,
+		Tools: runtimeToolsFromPipe(pipe.config.tools),
 	}
 	if pipe.config.output != nil {
 		step.ResultSchema = resultSchemaFromType(pipe.config.output.typ)
 	}
 	return step, nil
+}
+
+func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {
+	out := make([]runtimeplan.Tool, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, runtimeplan.Tool{
+			Name:        tool.name,
+			Description: tool.description,
+			InputSchema: toolInputSchema(tool),
+			GoFunc:      tool.fn,
+		})
+	}
+	return out
 }
 
 func compileTerminal(node Node) (runtimeplan.Terminal, error) {

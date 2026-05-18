@@ -1,6 +1,7 @@
 package ovr
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -63,6 +64,42 @@ func TestCompilePlansCompilesHTTPPipeOutput(t *testing.T) {
 	}
 	if plan.Terminal.ResultSchema.Type != reflect.TypeFor[planReply]() {
 		t.Fatalf("terminal ResultSchema type = %v, want planReply", plan.Terminal.ResultSchema.Type)
+	}
+}
+
+func TestCompilePlansCompilesPipeTools(t *testing.T) {
+	lookup := func(ctx context.Context, args struct {
+		Query string `json:"query"`
+	}) (planReply, error) {
+		return planReply{}, nil
+	}
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("lookup", lookup,
+				Describe("Lookup ticket data."),
+				Param("query", "Search query."),
+			),
+		),
+		Reply(JSON[planReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	tools := plans[0].Steps[0].Tools
+	if len(tools) != 1 {
+		t.Fatalf("tools = %d, want 1", len(tools))
+	}
+	if tools[0].Name != "lookup" || tools[0].Description != "Lookup ticket data." {
+		t.Fatalf("tool = %+v", tools[0])
+	}
+	if tools[0].GoFunc == nil {
+		t.Fatal("tool GoFunc is nil")
+	}
+	if string(tools[0].InputSchema) == "" {
+		t.Fatal("tool InputSchema is empty")
 	}
 }
 

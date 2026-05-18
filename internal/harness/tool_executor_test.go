@@ -43,6 +43,7 @@ func TestRunExecutesToolCallsThroughExecutor(t *testing.T) {
 	h, err := harness.New(p,
 		harness.WithModel("anthropic/claude-sonnet-4-6"),
 		harness.WithToolExecutor(executor),
+		harness.WithTools(provider.ToolSpec{Name: "lookup", Description: "Lookup data."}),
 	)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -57,6 +58,9 @@ func TestRunExecutesToolCallsThroughExecutor(t *testing.T) {
 	}
 	if len(p.requests) != 2 {
 		t.Fatalf("provider calls = %d, want 2", len(p.requests))
+	}
+	if len(p.requests[0].Tools) != 1 || p.requests[0].Tools[0].Name != "lookup" {
+		t.Fatalf("provider tools = %+v, want lookup", p.requests[0].Tools)
 	}
 
 	second := p.requests[1]

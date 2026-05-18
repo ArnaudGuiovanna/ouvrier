@@ -63,3 +63,45 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 		t.Fatalf("provider input = %q", scripted.requests[0].Messages[0].Text())
 	}
 }
+
+func TestNewHTTPHandlerPassesPipeToolsToHarnessRuntime(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: "classified", StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("lookup_ticket", func(ctx context.Context, args struct {
+				ID string `json:"id"`
+			}) (string, error) {
+				return "ticket", nil
+			}, Describe("Lookup ticket."), Param("id", "Ticket ID.")),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"id":"T-1"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	tools := scripted.requests[0].Tools
+	if len(tools) != 1 {
+		t.Fatalf("provider tools = %d, want 1", len(tools))
+	}
+	if tools[0].Name != "lookup_ticket" || tools[0].Description != "Lookup ticket." {
+		t.Fatalf("tool spec = %+v", tools[0])
+	}
+	if len(tools[0].InputSchema) == 0 {
+		t.Fatal("tool input schema is empty")
+	}
+}

@@ -1,6 +1,9 @@
 package runtime
 
-import "reflect"
+import (
+	"encoding/json"
+	"reflect"
+)
 
 type TriggerKind string
 
@@ -30,7 +33,15 @@ type Step struct {
 	Kind         StepKind
 	Goal         string
 	Model        string
+	Tools        []Tool
 	ResultSchema *ResultSchema
+}
+
+type Tool struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+	GoFunc      any
 }
 
 type TerminalKind string

@@ -15,6 +15,7 @@ type Harness struct {
 	systemPrompt  string
 	maxIterations int
 	toolExecutor  *tools.Executor
+	tools         []provider.ToolSpec
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -36,6 +37,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		systemPrompt:  cfg.systemPrompt,
 		maxIterations: cfg.maxIterations,
 		toolExecutor:  cfg.toolExecutor,
+		tools:         append([]provider.ToolSpec(nil), cfg.tools...),
 	}, nil
 }
 
@@ -56,6 +58,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			Model:    h.model,
 			System:   h.systemPrompt,
 			Messages: append([]provider.Message(nil), messages...),
+			Tools:    append([]provider.ToolSpec(nil), h.tools...),
 		})
 		if err != nil {
 			out.Status = StatusFailed
