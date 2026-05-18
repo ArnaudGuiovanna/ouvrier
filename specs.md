@@ -762,26 +762,38 @@ Les hooks peuvent enrichir, bloquer ou observer selon leur type, mais tout bloca
 
 ## 9. Providers LLM
 
-### 9.1 Provider supporté en v0.1
+### 9.1 Providers supportés en v0.1
 
-**Anthropic Claude uniquement**, via endpoint `/v1/messages`.
+Ouvrier v0.1 supporte les principaux providers nécessaires aux microservices
+agentiques naturels :
 
-Modèles supportés en v0.1 :
+- `anthropic/*`
+- `openai/*`
+- `ollama/*`
+- `mistral/*`
+- `gemini/*`
+- `vllm/*`
 
-- `anthropic/claude-opus-4-7`
+Le routage se fait par préfixe de modèle. Exemple :
+
 - `anthropic/claude-sonnet-4-6`
-- `anthropic/claude-haiku-4-5`
+- `openai/gpt-5.1`
+- `ollama/llama3.3`
+- `mistral/ministral-14b`
+- `gemini/gemini-2.5-pro`
+- `vllm/qwen3`
 
 ### 9.2 Architecture provider
 
-Une interface `provider.Provider` permet d'ajouter d'autres providers ultérieurement (OpenAI, Google, Ollama). Pas implémenté en v0.1 mais structure préparée.
+Une interface `provider.Provider` permet d'ajouter d'autres providers
+ultérieurement sans modifier le harnais.
 
-Le provider Anthropic v0.1 doit supporter :
+Chaque provider v0.1 doit supporter, autant que son API le permet :
 
-- Messages API réelle
+- API réelle du provider
 - tool use avec JSON Schema
 - tool choice pour résultat final typé (`ovr_final_result`)
-- `cache_control` pour prompt caching
+- prompt caching quand le provider expose une primitive compatible
 - streaming interne des événements LLM vers `EventStream`
 - max tokens par appel
 - classification d'erreurs : transient, permanent, rate limit, auth, validation
@@ -790,7 +802,16 @@ Le provider Anthropic v0.1 doit supporter :
 
 ### 9.3 Authentification
 
-Lecture de `ANTHROPIC_API_KEY` depuis `.env`. Pas de support de profils multiples en v0.1.
+Lecture depuis l'environnement ou `.env` généré par le projet :
+
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`
+- `MISTRAL_API_KEY`, `MISTRAL_BASE_URL`
+- `GEMINI_API_KEY`, `GEMINI_BASE_URL`
+- `OLLAMA_BASE_URL`
+- `VLLM_API_KEY`, `VLLM_BASE_URL`
+
+Pas de support de profils multiples en v0.1.
 
 ---
 
@@ -949,7 +970,6 @@ Documentées explicitement dans la doc utilisateur :
 Listée pour clarifier ce qui est **hors scope** de la v0.1.
 
 - DAG complets (fan-out / fan-in / branching conditionnel non-linéaire)
-- Providers LLM additionnels (OpenAI, Google Gemini, Ollama)
 - Transport distribué multi-process (NATS, gRPC, K8s operator)
 - Marketplace de pipelines réutilisables
 - UI web pour non-codeurs (générant du Go derrière)

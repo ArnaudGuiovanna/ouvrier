@@ -127,26 +127,75 @@ The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
 
 ## v0.1 Backlog
 
+### Current Implementation Snapshot
+
+Status date: 2026-05-18.
+
+Estimated v0.1 completion: **38%**.
+
+This is a pragmatic estimate, not a release metric. The core runtime/harness
+foundation is now usable for narrow HTTP + LLM + Go/MCP tool slices, but v0.1
+is not yet production-complete because schema enforcement, retries,
+observability/admin, SubAgent/Task, deployment, streams, and full CLI workflows
+are still incomplete.
+
+| Area | Estimate | Current state |
+| --- | ---: | --- |
+| M0 Product/API groundwork | 70% | Public primitives and harness direction are mostly settled; `Parallel`, `Map`, `SubAgent`, final module path, and retry semantics still need final API hardening. |
+| M1 Runtime core | 60% | Compiled plans, validation, HTTP routes, graceful shutdown, async accepted replies, and worker pools exist. Cron runtime, path-param extraction, timeouts, and non-HTTP transports remain. |
+| M2 SOTA agent harness | 45% | Session, EventStream package, StateStore memory/SQLite, PermissionPolicy, Sandbox, ToolExecutor, providers, and basic tool loop exist. HookBus, strict ResultSchema validation/repair, full budget accounting, retry/backoff, and SubAgent/Task remain. |
+| M3 Capabilities | 55% | Go tools, permission metadata, skill declaration, and official MCP SDK integration exist. Skill loading/runtime prompt injection and Bash sandbox remain incomplete. |
+| M4 Composition/concurrency | 15% | Trigger `WorkerPool` exists. `Parallel`, `Map`, `PartialOK`, `SubAgent`, and `MaxParallel` remain. |
+| M5 Outputs | 30% | `Reply(JSON[T]())`, `Reply(Accepted())`, `Push`, and `Sink` compile. SSE and real outbound push/queue/file/log sinks remain. |
+| M6 Observability/admin | 10% | Event and state foundations exist. Admin endpoints, trace viewer, spans, redaction, metrics, and OTel export remain. |
+| M7 CLI/TUI | 15% | Minimal CLI/TUI/scaffold exists with Bubble Tea. Most `add`, `show`, `dev`, `build`, `status`, `logs`, and `trace` workflows remain. |
+| M8 Deployment | 8% | Scaffold contains deploy config shape. Real static build, SSH deploy, Docker deploy, rollback, and health checks remain. |
+| M9 Streams/webhooks | 8% | Webhook/stream declarations exist. HMAC verification, runtime stream consumers, idempotent trigger handling, backpressure, DLQ, Kafka/NATS/Redis remain. |
+| M10 Examples/docs | 10% | Specs/backlog are maintained. Reference examples, README, API reference, and PDF corrections remain. |
+| M11 Quality gates | 35% | Unit tests are broad and `go test ./...` / `go vet ./...` pass. Race tests, staticcheck, security tests, golden tests, and integration/dev/deploy tests remain. |
+
+Recommended next strict order:
+
+1. Finish `ResultSchema`: real JSON Schema generation, strict output
+   validation, observable schema violation persistence, and bounded repair.
+2. Wire `EventStream` and `HookBus` into the harness path; no trace/admin view
+   should read from ad hoc state.
+3. Implement retry/backoff and idempotency behavior without duplicating side
+   effects.
+4. Implement full budget enforcement: iterations, tokens, cost, wallclock, and
+   child budgets.
+5. Implement governed `SubAgent/Task` with child sessions, inherited policies,
+   `MaxParallel`, cancellation, and ordered outcomes.
+6. Add admin/health/status/traces on top of `EventStream` + `StateStore`.
+7. Then continue CLI depth, deployment, streams/webhooks, examples, and docs.
+
 ### Immediate Implementation Order
 
 The next implementation work must follow this order. Do not advance CLI,
 deployment, streams, or broad integrations ahead of these foundations.
 
-1. Build `internal/runtime` plan compilation: `Plan`, `Trigger`, `Step`,
-   `Terminal`, strict validation, and the multi-pipeline strategy for `Run`.
-2. Tighten public pipeline validation: terminal must be unique and last,
+1. Done: build `internal/runtime` plan compilation: `Plan`, `Trigger`,
+   `Step`, `Terminal`, strict validation, and the multi-pipeline strategy for
+   `Run`.
+2. Done: tighten public pipeline validation: terminal must be unique and last,
    trigger/output compatibility must be checked, and no node may be ignored.
-3. Implement `Output[T]()` and the first `ResultSchema` contract.
-4. Introduce structured `Session`.
-5. Introduce append-only `EventStream`.
-6. Introduce `StateStore` abstraction with memory and embedded SQLite backends.
-7. Implement real Go-only `ToolExecutor`.
-8. Prove the loop with a mock provider that calls a real Go tool through
+3. Partial: implement `Output[T]()` and the first `ResultSchema` contract.
+   Type capture exists; strict JSON Schema generation, runtime validation,
+   violation recording, and repair remain.
+4. Done: introduce structured `Session`.
+5. Partial: introduce append-only `EventStream`. The package exists and is
+   tested; harness/admin integration remains.
+6. Done: introduce `StateStore` abstraction with memory and embedded SQLite
+   backends.
+7. Done: implement real Go-only `ToolExecutor`.
+8. Done: prove the loop with a mock provider that calls a real Go tool through
    `ToolExecutor`.
-9. Connect `runtime_http` to the compiled runtime/harness path so a simple HTTP
-   Pipe no longer returns a fake `501` for implemented cases.
-10. Only then continue with Anthropic real provider, sandbox hardening, MCP,
-    SubAgent/Task, admin endpoints, CLI depth, deployment, and streams.
+9. Done: connect `runtime_http` to the compiled runtime/harness path so a
+   simple HTTP Pipe no longer returns a fake `501` for implemented cases.
+10. In progress: primary providers, sandbox hardening, official MCP SDK,
+    async replies, worker pools, and SQLite StateStore have started. Next
+    priority is ResultSchema + EventStream/HookBus wiring before admin,
+    SubAgent/Task, CLI depth, deployment, and streams.
 
 Each step must be TDD-backed and leave `go test ./...` and `go vet ./...`
 passing before commit.
@@ -186,8 +235,9 @@ passing before commit.
   boundaries.
 - Implement `ToolExecutor` for Go tools, MCP tools, Bash tools, sandbox file
   tools, and SubAgent tools.
-- Implement Anthropic Messages provider with tool use, `cache_control`,
-  provider metadata, error classification, and cost/tokens.
+- Implement primary providers with tool use, provider metadata, error
+  classification, and usage/cost accounting where the upstream API allows it:
+  Anthropic, OpenAI, Ollama, Mistral, Gemini, and vLLM.
 - Implement the real tool-use loop with budgets: max iterations, tokens, cost,
   wallclock, and child-task budgets.
 - Implement retry/backoff without duplicating side effects: retry only
