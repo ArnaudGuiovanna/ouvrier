@@ -10,7 +10,8 @@ type httpRoute struct {
 	method   string
 	path     string
 	terminal runtimeplan.TerminalKind
-	hasPipe  bool
+	plan     runtimeplan.Plan
+	runtime  httpRuntime
 }
 
 func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
@@ -28,7 +29,7 @@ func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
 			method:   plan.Trigger.Method,
 			path:     plan.Trigger.Path,
 			terminal: plan.Terminal.Kind,
-			hasPipe:  len(plan.Steps) > 0,
+			plan:     plan,
 		})
 	}
 	return routes, nil

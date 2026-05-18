@@ -112,7 +112,7 @@ func TestNewHTTPHandlerServesMultipleHTTPPipelines(t *testing.T) {
 	}
 }
 
-func TestNewHTTPHandlerReturnsExplicitStatusBeforePipeExecutionExists(t *testing.T) {
+func TestNewHTTPHandlerReturnsProviderStatusWhenPipeProviderMissing(t *testing.T) {
 	handler, err := newHTTPHandler([]Node{
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
@@ -125,8 +125,15 @@ func TestNewHTTPHandlerReturnsExplicitStatusBeforePipeExecutionExists(t *testing
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/tickets", nil))
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotImplemented)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	var body httpStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Status != "provider_not_configured" {
+		t.Fatalf("status body = %q, want provider_not_configured", body.Status)
 	}
 }
 
