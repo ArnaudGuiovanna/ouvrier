@@ -48,6 +48,42 @@ user code.
   it must not create opaque magic.
 - Secrets must never be embedded into binaries or logged.
 
+## SOTA Harness Invariant
+
+Ouvrier v0.1 must ship a SOTA agent harness. This is non-negotiable for the
+current version, not a roadmap item.
+
+The public mental model remains `From -> Pipe -> ... -> Reply/Push/Sink`, but
+every Pipe must execute through a production-grade internal harness with these
+ten components:
+
+1. `Harness` - the coordinator for one Pipe execution.
+2. `Session` - per-execution state, messages, lineage, budgets, trace IDs, and
+   cancellation.
+3. `ToolExecutor` - the only path for running Go tools, MCP tools, Bash,
+   sandbox file operations, and SubAgent tasks.
+4. `Sandbox` - isolated workspace/process/env/network boundary for risky
+   capabilities, with fail-fast if requested guarantees cannot be enforced.
+5. `PermissionPolicy` - deterministic authorization for filesystem, env,
+   network, process, side effects, MCP, and SubAgent calls.
+6. `HookBus` - internal extension points around prompts, LLM calls, tool calls,
+   schema validation, budgets, and subagent completion.
+7. `EventStream` - append-only event source for traces, logs, SSE, admin
+   endpoints, and the dev trace viewer.
+8. `StateStore` - execution/session history, idempotency, traces, and schema
+   violations. Memory backend is required in v0.1; durable long-term memory is
+   not required.
+9. `ResultSchema` - JSON Schema generation and strict validation for
+   `Output[T]()` and typed replies, with observable repair attempts when
+   enabled.
+10. `SubAgent/Task` - governed child pipeline execution with child sessions,
+    inherited budgets, cancellation propagation, `MaxParallel`, and ordered
+    outcomes.
+
+No tool call may bypass `ToolExecutor`. No privileged action may bypass
+`PermissionPolicy`. No user-visible trace/log/admin output may bypass secret
+redaction. No v0.1 acceptance should treat a fake tool-result loop as complete.
+
 ## TUI Requirement
 
 The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
@@ -70,6 +106,10 @@ The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
 - Decide final Go module path.
 - Define public contracts for `Node`, `From`, `Pipe`, `Run`, `Reply`, `Push`,
   `Sink`, `Parallel`, `Map`, and `SubAgent`.
+- Define the SOTA harness contracts and internal package boundaries:
+  `internal/runtime`, `internal/harness`, `internal/tools`,
+  `internal/sandbox`, `internal/policy`, `internal/events`, `internal/state`,
+  `internal/schema`, and `internal/provider`.
 - Define retry, side-effect, idempotency, and error semantics.
 - Define model ID policy and provider naming.
 
@@ -82,15 +122,26 @@ The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
 - Implement `Run(addr string, nodes ...Node) error`.
 - Implement context propagation, timeouts, graceful shutdown.
 
-### M2 - Agent Harness
+### M2 - SOTA Agent Harness
 
-- Implement Anthropic Messages provider.
-- Implement tool-use loop.
-- Implement Go tool registration and reflection schema generation.
-- Implement `Output[T]()` and JSON schema validation.
-- Implement budgets: max iterations, tokens, cost, wallclock.
-- Implement retry/backoff and transient/permanent error classification.
-- Implement Anthropic prompt caching with `cache_control`.
+- Implement structured `Session` and child-session lineage.
+- Implement append-only `EventStream` and synchronous `HookBus`.
+- Implement `StateStore` memory backend for executions, sessions, traces,
+  idempotency keys, and schema violations.
+- Implement `ResultSchema`, `Output[T]()` and strict JSON validation.
+- Implement `PermissionPolicy` with secure defaults and auditable decisions.
+- Implement `Sandbox` abstraction for filesystem, env, process, and network
+  boundaries.
+- Implement `ToolExecutor` for Go tools, MCP tools, Bash tools, sandbox file
+  tools, and SubAgent tools.
+- Implement Anthropic Messages provider with tool use, `cache_control`,
+  provider metadata, error classification, and cost/tokens.
+- Implement the real tool-use loop with budgets: max iterations, tokens, cost,
+  wallclock, and child-task budgets.
+- Implement retry/backoff without duplicating side effects: retry only
+  read-only/idempotent tool work or provider calls before side effects.
+- Implement `SubAgent/Task` execution with `MaxParallel`, inherited budgets,
+  cancellation, and ordered outcomes.
 
 ### M3 - Capabilities
 
@@ -177,9 +228,15 @@ The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
 ### M11 - Quality Gates
 
 - Unit tests for runtime.
+- Unit tests for every SOTA harness component.
 - Integration tests for CLI scaffold/build/dev.
 - Mock-provider tests for harness behavior.
 - Security tests for admin auth, webhook signatures, and secret redaction.
+- Security tests for sandbox escape, permission deny, env leakage, and retry
+  without duplicate side effects.
+- Race tests for runtime, state store, event stream, tool executor, and
+  subagent/task concurrency.
+- Golden tests for examples and docs/API drift.
 - `gofmt` required.
 - `go vet` required.
 - `staticcheck` required.

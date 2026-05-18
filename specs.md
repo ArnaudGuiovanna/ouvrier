@@ -40,11 +40,25 @@ Le framework est composé de trois éléments distincts :
 
 1. **Le runtime** : la bibliothèque Go importée par le projet utilisateur. Expose les primitives `From`, `Pipe`, `Run`, `Reply`, `Push`, `Sink`, etc.
 2. **La CLI** : un binaire `ouvrier` installé sur la machine du développeur. Scaffolde, build, déploie, monitore.
-3. **Le harnais agentique** : l'infrastructure interne qui exécute un Pipe (tool-use loop, gestion LLM, sandbox, retry, observabilité).
+3. **Le harnais agentique SOTA** : l'infrastructure interne qui exécute un Pipe. Il doit être comparable dans ses garanties de runtime aux harnais modernes de type Flue, Claude Code SDK ou Codex : session, tools réels, sandbox, permissions, hooks, events, state, schema, subagents.
+
+### 2.1.1 Packages internes du harnais
+
+Le modèle public reste simple (`From -> Pipe -> Reply/Push/Sink`), mais le runtime interne est découpé en packages maintenables :
+
+- `internal/runtime` — compile les déclarations `Node` en plan exécutable, crée les exécutions, enchaîne Pipes, `Parallel`, `Map`, sorties.
+- `internal/harness` — orchestre l'exécution d'un Pipe : session, budgets, boucle LLM/tools, retry, résultat final.
+- `internal/tools` — registry et `ToolExecutor` unique pour Go tools, MCP tools, Bash, fichiers sandboxés, SubAgent.
+- `internal/sandbox` — workspace, filesystem, env, process, réseau ; fail-fast si une garantie demandée ne peut pas être appliquée.
+- `internal/policy` — `PermissionPolicy` déterministe pour filesystem, env, réseau, process, side effects, MCP et SubAgent.
+- `internal/events` — `HookBus` et `EventStream`, source unique des traces, logs, SSE, admin et dev viewer.
+- `internal/state` — `StateStore` pour historique d'exécution, sessions runtime, idempotence, traces, violations de schéma.
+- `internal/schema` — `ResultSchema`, génération JSON Schema depuis Go, validation stricte et repair borné.
+- `internal/provider` — frontière LLM : Anthropic Messages, tool use, prompt caching, coûts, classification d'erreurs.
 
 ### 2.2 Nom de package
 
-- Module Go : `github.com/yourorg/ouvrier`
+- Module Go : `ouvrier` en développement local, chemin public final à figer avant release. Le placeholder `github.com/yourorg/ouvrier` est interdit en v0.1 livrable.
 - Package importé : `ovr` (déclaration `package ovr` à l'intérieur)
 - Binaire CLI : `ouvrier`
 
@@ -101,6 +115,7 @@ Une étape du pipeline. Un agent autonome défini par un goal en langage naturel
 **Options disponibles** :
 
 - `ovr.Model("anthropic/claude-sonnet-4-6")` — modèle LLM, toujours explicite, jamais d'alias
+- `ovr.Output[T]()` — schéma de résultat typé du Pipe, validé par `ResultSchema`
 - `ovr.Tool("name", goFunc)` — fonction Go enregistrée comme tool
 - `ovr.Skill("dossier-name")` — référence un dossier `./skills/dossier-name/SKILL.md`
 - `ovr.MCP("server-name")` — connecte un MCP server externe (URL dans .env)
@@ -109,14 +124,21 @@ Une étape du pipeline. Un agent autonome défini par un goal en langage naturel
 - `ovr.Retry(3, ovr.ExponentialBackoff())` — politique de retry
 - `ovr.NoCache()` — désactive le prompt caching pour ce Pipe
 - `ovr.SequentialTools()` — force le LLM à appeler les tools en série
+- `ovr.MaxCostUSD(5.00)` — budget coût du Pipe
+- `ovr.MaxTokens(500_000)` — budget tokens du Pipe
+- `ovr.PermissionPolicy(policy)` — politique avancée optionnelle, sinon défaut sécurisé
 
 **Comportement** :
 
 - Le Pipe reçoit l'outcome du Pipe précédent (ou le payload du trigger pour le premier)
-- Le LLM raisonne via une tool-use loop interne
+- Le Pipe démarre toujours une `Session` interne rattachée à l'exécution de pipeline
+- Le LLM raisonne via le harnais SOTA interne (`Harness`) et sa tool-use loop
+- Tous les tool calls passent par `ToolExecutor`, `PermissionPolicy`, `HookBus`, `EventStream` et `StateStore`
 - Le Pipe produit son outcome qui alimente le Pipe suivant
 - Sans `Output[T]()`, la sortie est un `map[string]any` non typé
 - Avec `Output[T]()`, le runtime valide la sortie contre le schéma T
+- En cas de violation de schéma, le harnais peut tenter un repair LLM borné par budget ; toute violation est enregistrée dans `StateStore` et `EventStream`
+- Une erreur, un timeout, une permission refusée ou un budget dépassé produit un outcome structuré et observable
 
 ### 3.3 Run — le démarrage
 
@@ -124,14 +146,29 @@ Démarre le serveur HTTP, enregistre les crons, lance les workers de stream. Tou
 
 **Signature** : `ovr.Run(addr string, nodes ...Node) error`
 
+**API avancée** :
+
+```go
+runner := ovr.NewRunner(
+    ovr.WithStateStore(store),
+    ovr.WithPermissionPolicy(policy),
+    ovr.WithHooks(hooks),
+)
+err := runner.Run(":8080", nodes...)
+```
+
 **Comportement** :
 
 - `addr` : adresse d'écoute HTTP (exemple `:8080`)
 - `nodes` : liste de noeuds qui composent le pipeline (From + Pipes + Reply/Push/Sink)
+- Compile les `nodes` en plan exécutable via `internal/runtime`
+- Crée une exécution avec `ExecID`, `SessionID`, `EventStream`, `StateStore`, budgets et policy par défaut
 - Démarre le serveur HTTP avec routes auto-générées
 - Lance les crons et streams en background goroutines
 - Bloque jusqu'à `SIGTERM` / `SIGINT`
 - Retourne `nil` en shutdown propre, erreur sinon
+- `ovr.Run` utilise un runner par défaut sécurisé : state mémoire, permission policy restrictive, hooks vides, event stream local
+- Le runner avancé ne doit jamais permettre de contourner `ToolExecutor`, `PermissionPolicy`, secret redaction ou `ResultSchema`
 
 ### 3.4 Reply, Push, Sink — la sortie
 
@@ -207,24 +244,33 @@ ovr.From("POST /webhooks", ovr.WorkerPool(20))
 
 ### 4.5 SubAgent — pipeline comme tool
 
-Un pipeline peut être exposé comme tool à un autre Pipe. Le LLM parent décide quand l'invoquer.
+Un pipeline peut être exposé comme tool à un autre Pipe. Le LLM parent décide quand l'invoquer, mais l'exécution se fait comme une `Task` gouvernée par le harnais.
 
 ```go
 var translator = ovr.Pipeline(
-    ovr.Pipe("Traduit le texte", ...),
+    ovr.Pipe("Traduit le texte",
+        ovr.Model("anthropic/claude-haiku-4-5"),
+        ovr.Output[Translation](),
+    ),
 )
 
 ovr.Pipe("Rédige un email multilingue",
+    ovr.Model("anthropic/claude-sonnet-4-6"),
     ovr.SubAgent("translate", translator),
 )
 ```
 
 **Comportement par défaut** :
 
-- Le LLM parent décide d'invoquer (mode `Auto`)
-- Parallel tool calling activé
+- `SubAgent` est un tool adapter exécuté par `ToolExecutor`
+- Chaque invocation crée une session enfant avec `ParentSessionID`
+- Les budgets tokens/coût/wallclock sont hérités et bornés depuis la session parent
+- Cancellation parent → cancellation enfants
+- Profondeur maximale et détection de cycle obligatoires
 - Cap dur de 5 invocations parallèles maximum
 - Override possible avec `ovr.MaxParallel(N)`
+- Les outcomes sont retournés dans l'ordre des appels ; `PartialOK()` peut tolérer certains échecs
+- Tous les événements enfants sont rattachés à la trace parent
 
 ---
 
@@ -253,6 +299,20 @@ ovr.Pipe("...", ovr.Tool("list_learners", ListLearners))
 
 - `ovr.Describe("description pour le LLM")` — surcharge la description inférée
 - `ovr.Param("name", "description")` — décrit un paramètre spécifique
+- `ovr.ReadOnly()` — le tool n'a pas de side effect et peut être retry/parallélisé
+- `ovr.SideEffecting(...)` — le tool modifie un système externe (DB, email, webhook, fichier, etc.)
+- `ovr.Idempotent("key-expression")` — side effect rejouable sans duplication
+- `ovr.RequiresApproval()` — interdit en production sans policy explicite
+- `ovr.ToolTimeout("10s")` — timeout du tool
+
+**Harnais** :
+
+- Le framework génère un JSON Schema d'input via reflection
+- Les arguments LLM sont validés avant l'appel Go
+- Tout appel passe par `ToolExecutor`, `PermissionPolicy`, `HookBus`, `EventStream` et `StateStore`
+- Un panic de tool est converti en erreur structurée
+- Les retries de tools ne sont autorisés que pour `ReadOnly()` ou `Idempotent(...)`
+- Les tools sans classification explicite sont traités comme side-effecting non idempotents : pas de parallel tool calling automatique, pas de retry tool
 
 ### 5.2 Skill — expertise en Markdown
 
@@ -284,8 +344,10 @@ Retourne...
 
 - Le frontmatter `name` et `description` est obligatoire
 - Le corps Markdown est injecté dans le system prompt du LLM
-- Les fichiers de support (`scripts/`, `references/`) peuvent être chargés à la demande via filesystem tool
+- Les fichiers de support (`scripts/`, `references/`) peuvent être chargés à la demande via filesystem tool sandboxé
+- Tout accès aux fichiers de support passe par `Sandbox` et `PermissionPolicy`
 - Les SKILL.md sont scannés au boot et embarqués dans le binaire via `go:embed`
+- Une Skill ne peut pas accéder directement aux secrets ; seules les capabilities déclarées et autorisées sont visibles
 
 ### 5.3 MCP — Model Context Protocol
 
@@ -315,6 +377,11 @@ ovr.Pipe("Analyse les logs",
 - Pas d'accès en dehors du sandbox
 - Timeout par défaut 30s par commande
 - Environnement minimal (pas d'accès aux variables d'env du processus parent sauf liste blanche)
+- Réseau refusé par défaut
+- stdout/stderr bornés et tronqués avec événement observable
+- Process group tué au timeout
+- Fail-fast au boot si la plateforme ne permet pas de garantir l'isolation demandée
+- En Docker distroless, `Bash` exige une image/runtime compatible ou échoue explicitement ; le binaire Ouvrier reste statique, mais la capability Bash dépend du runtime cible
 
 ---
 
@@ -515,47 +582,136 @@ healthcheck:
 
 Le harnais est l'infrastructure invisible qui exécute un Pipe. L'utilisateur ne l'écrit jamais. Il fournit :
 
-### 8.1 Tool-use loop
+### 8.1 Contrat SOTA non négociable
+
+Le harnais Ouvrier v0.1 doit inclure dix composants internes obligatoires :
+
+1. **Harness** — coordinateur d'un Pipe : prompt, provider, tools, schema, budgets, retry, events.
+2. **Session** — état par exécution : `ExecID`, `SessionID`, `ParentSessionID`, messages, inputs/outputs, budgets, trace IDs, cancellation.
+3. **ToolExecutor** — seule porte d'exécution des Go tools, MCP tools, Bash, fichiers sandboxés et SubAgent tasks.
+4. **Sandbox** — isolation filesystem/env/process/réseau pour capabilities risquées.
+5. **PermissionPolicy** — autorisation déterministe pour chaque action privilégiée.
+6. **HookBus** — hooks internes autour des prompts, LLM calls, tool calls, schémas, budgets, subagents.
+7. **EventStream** — flux append-only d'événements structurés.
+8. **StateStore** — historique d'exécution, sessions runtime, traces, idempotence, violations de schéma.
+9. **ResultSchema** — génération JSON Schema, validation stricte, repair borné.
+10. **SubAgent/Task** — sous-pipelines gouvernés par sessions enfants et budgets hérités.
+
+### 8.2 Session
+
+- Une `Session` est créée pour chaque exécution de Pipe
+- Une exécution de pipeline a un `ExecID` stable
+- Une session enfant est créée pour chaque `SubAgent` / `Task`
+- Les messages LLM, tool calls, tool results, budgets, status et erreurs sont snapshotés
+- `context.Context` est propagé partout
+- Timeout, cancellation et shutdown propre arrêtent LLM, tools et tasks enfants
+- Les secrets sont redacted avant logs, events, state et admin API
+
+### 8.3 Tool-use loop
 
 - Itération entre le LLM et les tools jusqu'à atteindre le goal
+- Les tools exposés au provider viennent exclusivement du `ToolExecutor`
+- Les sorties finales typées utilisent `ResultSchema` ; pour Anthropic, le runtime peut exposer un tool interne forcé `ovr_final_result`
 - Max iterations configurable (défaut 25)
 - Max tokens configurable (défaut 500_000)
 - Max coût USD configurable (défaut 5.00)
+- Max wallclock configurable (défaut 10 minutes par exécution)
 - Si limite atteinte → outcome partiel avec statut `truncated`
 
-### 8.2 Parallel tool calling
+### 8.4 ToolExecutor et parallel tool calling
 
-- Activé par défaut pour les modèles qui le supportent (Claude 3+, GPT-4+)
-- Désactivable avec `ovr.SequentialTools()`
-- Tools en parallèle exécutés en goroutines, attente de tous
+- Tous les tool calls passent par `ToolExecutor`
+- Les arguments sont validés contre le JSON Schema avant appel
+- Les permissions sont vérifiées avant chaque appel
+- Les hooks `BeforeTool` / `AfterTool` sont émis autour de chaque appel
+- Les événements `tool_call` / `tool_result` sont enregistrés
+- Parallel tool calling est autorisé uniquement pour tools `ReadOnly()` ou `Idempotent(...)`
+- Tools sans classification → exécution séquentielle, pas de retry tool automatique
+- Cap global et par Pipe pour parallélisme
+- Panic, timeout et validation error sont convertis en erreurs structurées
 
-### 8.3 Prompt caching
+### 8.5 PermissionPolicy
 
-- Hash de la partie statique du prompt (system + tools + skill) calculé au boot
-- Cache key envoyé au provider LLM
+- Défaut sécurisé : deny filesystem hors workspace, env non whitelistée, réseau, process, side effects non déclarés
+- Autorisations déclaratives : read file, write file, exec, network host, env var, MCP server, side effect
+- Mode dev explicite, jamais équivalent à production
+- Décisions auditables dans `EventStream`
+- Les admin endpoints, hooks et outils MCP ne bypassent jamais la policy
+
+### 8.6 Sandbox
+
+- Workspace root obligatoire pour `Bash`, fichiers support de Skills, MCP local et tools filesystem
+- Résolution realpath pour bloquer path traversal et symlinks hors workspace
+- Env minimal + allowlist
+- Timeout dur par commande/process
+- stdout/stderr bornés
+- Réseau off par défaut si enforceable ; sinon fail-fast ou limitation documentée explicitement
+- Tests Linux-gated pour garanties OS spécifiques
+
+### 8.7 HookBus et EventStream
+
+Événements minimum :
+
+- `pipeline_started`, `pipeline_completed`, `pipeline_failed`
+- `pipe_started`, `pipe_completed`, `pipe_failed`
+- `session_started`, `session_saved`, `session_cancelled`
+- `llm_call_started`, `llm_call_completed`, `llm_call_failed`
+- `tool_call_started`, `tool_call_completed`, `tool_call_failed`
+- `permission_decision`
+- `schema_validation_passed`, `schema_validation_failed`
+- `budget_exceeded`
+- `task_started`, `task_completed`, `task_failed`
+
+Hooks minimum :
+
+- `SessionStart`, `SessionEnd`
+- `BeforeLLM`, `AfterLLM`
+- `BeforeTool`, `AfterTool`
+- `SchemaViolation`
+- `BudgetExceeded`
+- `SubAgentStop`
+
+Les hooks peuvent enrichir, bloquer ou observer selon leur type, mais tout blocage doit produire une erreur structurée et un événement.
+
+### 8.8 StateStore
+
+- Backend mémoire obligatoire en v0.1
+- Stocke executions, sessions, snapshots, traces, idempotency keys, schema violations
+- Accès concurrent sûr
+- TTL / bornes mémoire configurables
+- Les endpoints admin et le trace viewer lisent depuis `StateStore`
+- La mémoire conversationnelle long-terme et les beliefs persistants restent hors scope v0.1 ; l'historique runtime nécessaire au harnais est dans scope
+
+### 8.9 ResultSchema
+
+- `ovr.Output[T]()` définit le contrat de sortie d'un Pipe
+- `ovr.Reply(ovr.JSON[T]())` définit la sérialisation HTTP finale
+- JSON Schema généré depuis les types Go et tags `json`
+- Validation stricte des outputs
+- Tentative de repair LLM optionnelle, bornée par budget, observable
+- Violations comptabilisées et consultables dans admin/status/dev viewer
+
+### 8.10 Retry et erreurs
+
+- Erreurs transitoires provider (5xx, network, rate limit) → retry avec backoff exponentiel avant side effects
+- Erreurs permanentes provider (4xx, auth, validation) → fail immédiat
+- Tools `ReadOnly()` ou `Idempotent(...)` peuvent être retry selon policy
+- Tools side-effecting non idempotents ne sont jamais retry automatiquement
+- Le journal des tool call IDs empêche la duplication quand une idempotency key existe
+- 3 retries provider par défaut, override avec `ovr.Retry(N, backoff)`
+
+### 8.11 Prompt caching
+
+- Hash local de la partie statique du prompt (system + tools + skill + schema) calculé au boot
+- Pour Anthropic, le runtime utilise `cache_control` sur les blocs compatibles plutôt qu'une clé propriétaire arbitraire
 - Désactivable avec `ovr.NoCache()`
 
-### 8.4 Retry et erreurs
+### 8.12 Observabilité
 
-- Erreurs transitoires (5xx, network, rate limit) → retry avec backoff exponentiel
-- Erreurs permanentes (4xx, validation) → fail immédiat
-- 3 retries par défaut, override avec `ovr.Retry(N, backoff)`
-
-### 8.5 Observabilité
-
-- OpenTelemetry instrumenté automatiquement
-- Un span par Pipe, un span par tool call, un span par LLM call
-- Attributs : tokens input / output, cost USD, latency ms
+- OpenTelemetry instrumenté à partir de `EventStream`
+- Un span par pipeline, Pipe, session, LLM call, tool call, subagent task
+- Attributs : tokens input/output, cost USD, latency ms, model, tool name, permission decision, schema status
 - Exportable vers Datadog, Grafana, Honeycomb, etc.
-
-### 8.6 Budgets globaux
-
-Par exécution de pipeline :
-
-- Max tokens : 500_000 par défaut
-- Max coût : 5.00 USD par défaut
-- Max wallclock : 10 minutes par défaut
-- Override possible via options de `Run` ou par Pipe
 
 ---
 
@@ -574,6 +730,18 @@ Modèles supportés en v0.1 :
 ### 9.2 Architecture provider
 
 Une interface `provider.Provider` permet d'ajouter d'autres providers ultérieurement (OpenAI, Google, Ollama). Pas implémenté en v0.1 mais structure préparée.
+
+Le provider Anthropic v0.1 doit supporter :
+
+- Messages API réelle
+- tool use avec JSON Schema
+- tool choice pour résultat final typé (`ovr_final_result`)
+- `cache_control` pour prompt caching
+- streaming interne des événements LLM vers `EventStream`
+- max tokens par appel
+- classification d'erreurs : transient, permanent, rate limit, auth, validation
+- usage tokens input/output et coût estimé
+- metadata de trace sans secrets
 
 ### 9.3 Authentification
 
@@ -599,6 +767,18 @@ Deux métriques essentielles en v0 :
 - Compteur : violations de schéma
 - Liste des dernières violations avec contexte
 
+Ces métriques sont dérivées de `EventStream` et `StateStore`, pas de compteurs ad hoc séparés.
+
+**Métriques harnais SOTA** :
+
+- sessions démarrées / complétées / annulées
+- tool calls autorisés / refusés
+- tool calls retry / non retry pour side effects
+- sandbox violations
+- hook failures
+- subagent tasks démarrées / terminées / échouées
+- budgets dépassés par type (tokens, coût, wallclock, iterations)
+
 ### 10.2 Endpoints admin
 
 Exposés automatiquement sur le serveur du déployé, protégés par `PIP_ADMIN_TOKEN` :
@@ -617,6 +797,9 @@ En mode `ouvrier dev`, `GET /dev` expose une UI web autonome :
 - Liste des exécutions live avec Gantt chart
 - Détail d'une exécution : input, output, tool calls par Pipe
 - Coût LLM par exécution et cumulé
+- Sessions parent/enfant et SubAgent tasks
+- Décisions de permissions et violations de sandbox
+- Violations de schéma et repairs
 
 ---
 
@@ -649,6 +832,20 @@ En mode `ouvrier dev`, `GET /dev` expose une UI web autonome :
 - Pas d'accès filesystem en dehors du workspace
 - Variables d'environnement filtrées (whitelist)
 - Pas d'accès réseau par défaut (override possible)
+- Résolution realpath obligatoire pour bloquer `..` et symlinks hors workspace
+- Timeout dur par commande, kill process group au timeout
+- stdout/stderr bornés et redacted
+- Toute ouverture réseau doit être explicitement autorisée par `PermissionPolicy`
+- Si l'isolation demandée n'est pas garantie par la plateforme, le runtime échoue au boot plutôt que de dégrader silencieusement
+
+### 11.5 Permissions et side effects
+
+- Toute action privilégiée passe par `PermissionPolicy`
+- Les tools sont classés : `ReadOnly`, `Idempotent`, `SideEffecting`, `RequiresApproval`
+- Sans classification, un tool est traité comme side-effecting non idempotent
+- Les retries automatiques sont interdits pour side effects non idempotents
+- Les décisions de permissions sont auditables mais ne contiennent jamais de secrets
+- Les hooks peuvent bloquer une action, mais doivent produire une erreur structurée et un événement
 
 ---
 
@@ -712,7 +909,7 @@ Listée pour clarifier ce qui est **hors scope** de la v0.1.
 - Marketplace de pipelines réutilisables
 - UI web pour non-codeurs (générant du Go derrière)
 - Pipeline as MCP server (`ExposeAsMCP`)
-- Persistence des belief / sessions (au-delà de l'idempotency en mémoire)
+- Mémoire long-terme / beliefs persistants au-delà du `StateStore` runtime v0.1
 - Mode stateless serverless (Cloudflare Workers, Lambda)
 - DSL textuel séparé (`.agent` files)
 - Loader YAML alternatif au Go
@@ -725,11 +922,13 @@ Listée pour clarifier ce qui est **hors scope** de la v0.1.
 Le framework est considéré comme livrable v0.1 si :
 
 1. `ouvrier new` génère un projet qui compile et tourne en `ouvrier dev` sans erreur
-2. Un pipeline à 3 Pipes (avec Tool, Skill, MCP) s'exécute de bout en bout
+2. Un pipeline à 3 Pipes (avec Tool, Skill, MCP mock et SubAgent) s'exécute de bout en bout via le harnais SOTA
 3. Le binaire `ouvrier deploy ssh` arrive en production avec health check OK
-4. Le trace viewer affiche les exécutions et les coûts
+4. Le trace viewer affiche exécutions, sessions, tool calls, permissions, coûts, schémas et SubAgent tasks
 5. La documentation utilisateur (le PDF) suffit à un dev junior pour démarrer seul
 6. Les deux exemples de référence (Moodle FSRS + tickets triage) tournent
+7. Aucun Pipe ne contourne `Session`, `ToolExecutor`, `PermissionPolicy`, `EventStream`, `StateStore` ou `ResultSchema`
+8. Les tests sécurité couvrent admin auth, HMAC webhook, sandbox escape, permission deny, redaction secrets et retry sans double side effect
 
 ---
 
@@ -751,7 +950,12 @@ Le framework est considéré comme livrable v0.1 si :
 ### 16.3 Tests
 
 - Tests unitaires pour le runtime (`*_test.go`)
+- Tests unitaires pour chaque composant du harnais SOTA (`internal/harness`, `internal/tools`, `internal/sandbox`, `internal/policy`, `internal/events`, `internal/state`, `internal/schema`)
 - Tests d'intégration pour la CLI (génération de projets test, build, dev)
+- Tests mock-provider couvrant la boucle LLM/tool/schema/retry/budget
+- Tests sécurité : auth admin, HMAC webhook, sandbox escape, permission deny, redaction secrets
+- Tests `go test -race` sur runtime, state store, event stream, tool executor et subagents
+- Golden tests sur exemples et documentation pour éviter la dérive API
 - Pas de tests E2E avec déploiement réel en v0.1
 
 ---
@@ -773,7 +977,8 @@ Le framework est considéré comme livrable v0.1 si :
 - **Unix pipes** : modèle de composition séquentielle
 - **Anthropic Agent Skills** : format des SKILL.md (octobre 2025)
 - **Model Context Protocol** : standard ouvert pour les tools
-- **Flue framework** (TypeScript) : modèle de harnais et déploiement
+- **Flue framework** (TypeScript) : modèle SOTA de harnais headless, sessions, sandbox, tasks, typed results
+- **Claude Code SDK** : hooks, permissions, MCP, subagents, sessions et tool ecosystem comme baseline de production
 - **Charm Bracelet** : librairie TUI Go
 - **Aguiovanna.fr** : DA et tonalité
 
