@@ -44,6 +44,18 @@ func TestValidateAcceptsWebhookPushTerminal(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsMultiplePipelines(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+		ovr.From("POST /events"),
+		ovr.Sink(ovr.Log()),
+	)
+	if err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
 func TestValidateRequiresFirstNodeFrom(t *testing.T) {
 	err := ovr.Validate(
 		ovr.Pipe("classify ticket", ovr.Model("anthropic/claude-sonnet-4-6")),
@@ -72,5 +84,26 @@ func TestValidateRequiresPipeModel(t *testing.T) {
 	)
 	if !errors.Is(err, ovr.ErrPipeMissingModel) {
 		t.Fatalf("Validate error = %v, want ErrPipeMissingModel", err)
+	}
+}
+
+func TestValidateRequiresTerminalToBeLastBeforeNextPipeline(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+		ovr.Pipe("ignored pipe", ovr.Model("anthropic/claude-sonnet-4-6")),
+	)
+	if !errors.Is(err, ovr.ErrTerminalNotLast) {
+		t.Fatalf("Validate error = %v, want ErrTerminalNotLast", err)
+	}
+}
+
+func TestValidateRejectsReplyForNonHTTPTrigger(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From(ovr.Cron("0 6 * * *")),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if !errors.Is(err, ovr.ErrIncompatibleTerminal) {
+		t.Fatalf("Validate error = %v, want ErrIncompatibleTerminal", err)
 	}
 }

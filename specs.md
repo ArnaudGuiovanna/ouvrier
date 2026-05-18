@@ -953,6 +953,25 @@ Listée pour clarifier ce qui est **hors scope** de la v0.1.
 
 ## 15. Critères de succès v0.1
 
+### 15.1 Ordre strict d'implémentation
+
+L'ordre suivant est obligatoire pour éviter d'empiler des stubs autour d'un coeur agentique incomplet :
+
+1. Créer `internal/runtime` et compiler les déclarations en `Plan`, `Trigger`, `Step`, `Terminal`
+2. Durcir la validation publique : terminal unique et dernier, compatibilité trigger/sortie, aucun node ignoré
+3. Implémenter `ovr.Output[T]()` et le premier contrat `ResultSchema`
+4. Introduire `Session`
+5. Introduire `EventStream`
+6. Introduire `StateStore` mémoire
+7. Implémenter un `ToolExecutor` Go-only réel
+8. Prouver la loop avec un provider mock qui appelle un vrai Go tool via `ToolExecutor`
+9. Brancher `runtime_http` sur le chemin runtime/harness compilé, pour ne plus retourner `501` sur les cas implémentés
+10. Ensuite seulement : provider Anthropic réel, sandbox renforcée, MCP, SubAgent/Task, admin endpoints, CLI avancée, déploiement, streams
+
+Chaque étape doit être couverte par des tests ciblés et laisser `go test ./...` et `go vet ./...` verts avant commit.
+
+### 15.2 Critères de livraison
+
 Le framework est considéré comme livrable v0.1 si :
 
 1. `ouvrier new` génère un projet qui compile et tourne en `ouvrier dev` sans erreur

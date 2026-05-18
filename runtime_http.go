@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	runtimeplan "ouvrier/internal/runtime"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -51,9 +53,9 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 	}
 
 	switch r.terminal {
-	case nodeKindReply:
+	case runtimeplan.TerminalReply:
 		writeJSONStatus(w, http.StatusOK, "ok")
-	case nodeKindPush, nodeKindSink:
+	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	default:
 		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")

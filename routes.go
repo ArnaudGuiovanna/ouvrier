@@ -1,50 +1,35 @@
 package ovr
 
-import "fmt"
+import (
+	"fmt"
+
+	runtimeplan "ouvrier/internal/runtime"
+)
 
 type httpRoute struct {
 	method   string
 	path     string
-	terminal nodeKind
+	terminal runtimeplan.TerminalKind
 	hasPipe  bool
 }
 
 func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
-	if err := validatePipeline(nodes); err != nil {
+	plans, err := compilePlans(nodes)
+	if err != nil {
 		return nil, err
 	}
 
-	trigger, ok := httpTriggerFromNode(nodes[0])
-	if !ok {
-		return nil, fmt.Errorf("%w: only HTTP triggers are supported by this runtime slice", ErrRunNotImplemented)
-	}
-
-	route := httpRoute{
-		method: trigger.method,
-		path:   trigger.path,
-	}
-	for _, node := range nodes[1:] {
-		switch node.nodeKind() {
-		case nodeKindPipe:
-			route.hasPipe = true
-		case nodeKindReply, nodeKindPush, nodeKindSink:
-			route.terminal = node.nodeKind()
-			return []httpRoute{route}, nil
+	routes := make([]httpRoute, 0, len(plans))
+	for _, plan := range plans {
+		if plan.Trigger.Kind != runtimeplan.TriggerHTTP {
+			return nil, fmt.Errorf("%w: only HTTP triggers are supported by this runtime slice", ErrRunNotImplemented)
 		}
+		routes = append(routes, httpRoute{
+			method:   plan.Trigger.Method,
+			path:     plan.Trigger.Path,
+			terminal: plan.Terminal.Kind,
+			hasPipe:  len(plan.Steps) > 0,
+		})
 	}
-
-	return nil, ErrTerminalMissing
-}
-
-func httpTriggerFromNode(node Node) (httpTrigger, bool) {
-	switch node := node.(type) {
-	case fromNode:
-		trigger, ok := node.source.(httpTrigger)
-		return trigger, ok
-	case *fromNode:
-		trigger, ok := node.source.(httpTrigger)
-		return trigger, ok
-	default:
-		return httpTrigger{}, false
-	}
+	return routes, nil
 }

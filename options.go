@@ -27,6 +27,10 @@ func (f JSONReply[T]) validateReplyFormat() error {
 	return nil
 }
 
+func (f JSONReply[T]) resultSchemaType() reflect.Type {
+	return f.schema
+}
+
 type replyNode struct {
 	format ReplyFormat
 }

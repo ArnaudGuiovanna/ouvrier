@@ -2,7 +2,6 @@ package ovr
 
 import (
 	"errors"
-	"fmt"
 )
 
 var (
@@ -12,6 +11,12 @@ var (
 	ErrFirstNodeNotFrom = errors.New("first node must be From")
 	// ErrTerminalMissing means the pipeline has no Reply, Push, or Sink node.
 	ErrTerminalMissing = errors.New("pipeline must include Reply, Push, or Sink")
+	// ErrTerminalNotLast means a pipeline has nodes after its terminal before the next From.
+	ErrTerminalNotLast = errors.New("terminal node must be last in its pipeline")
+	// ErrMultipleTerminals means a pipeline has more than one terminal node.
+	ErrMultipleTerminals = errors.New("pipeline must include exactly one terminal")
+	// ErrIncompatibleTerminal means the terminal cannot be used with the trigger kind.
+	ErrIncompatibleTerminal = errors.New("terminal is incompatible with trigger")
 	// ErrPipeMissingModel means a Pipe node was declared without Model.
 	ErrPipeMissingModel = errors.New("pipe must include Model")
 	// ErrInvalidNode means a node was nil, unsupported, or otherwise invalid.
@@ -24,29 +29,6 @@ func Validate(nodes ...Node) error {
 }
 
 func validatePipeline(nodes []Node) error {
-	if len(nodes) == 0 {
-		return ErrPipelineEmpty
-	}
-	if nodes[0] == nil || nodes[0].nodeKind() != nodeKindFrom {
-		return ErrFirstNodeNotFrom
-	}
-
-	hasTerminal := false
-	for i, node := range nodes {
-		if node == nil {
-			return fmt.Errorf("node %d: %w", i, ErrInvalidNode)
-		}
-		if err := node.validateNode(); err != nil {
-			return fmt.Errorf("node %d: %w", i, err)
-		}
-		switch node.nodeKind() {
-		case nodeKindReply, nodeKindPush, nodeKindSink:
-			hasTerminal = true
-		}
-	}
-
-	if !hasTerminal {
-		return ErrTerminalMissing
-	}
-	return nil
+	_, err := compilePlans(nodes)
+	return err
 }

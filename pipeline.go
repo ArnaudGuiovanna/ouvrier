@@ -12,8 +12,10 @@ type PipeOption interface {
 
 type pipeConfig struct {
 	model  string
+	output *outputSpec
 	tools  []toolSpec
 	skills []skillSpec
+	err    error
 }
 
 type pipeNode struct {
@@ -42,6 +44,9 @@ func (n pipeNode) nodeKind() nodeKind {
 func (n pipeNode) validateNode() error {
 	if n.err != nil {
 		return n.err
+	}
+	if n.config.err != nil {
+		return n.config.err
 	}
 	if n.goal == "" {
 		return fmt.Errorf("%w: Pipe goal is required", ErrInvalidNode)
@@ -73,4 +78,10 @@ func Model(id string) PipeOption {
 
 func (o modelOption) applyPipe(config *pipeConfig) {
 	config.model = o.id
+}
+
+func (c *pipeConfig) setErr(err error) {
+	if c.err == nil {
+		c.err = err
+	}
 }

@@ -88,6 +88,30 @@ func TestNewHTTPHandlerServesDirectSinkAsAccepted(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerServesMultipleHTTPPipelines(t *testing.T) {
+	handler, err := newHTTPHandler([]Node{
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+		From("POST /events"),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandler returned error: %v", err)
+	}
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", health.Code, http.StatusOK)
+	}
+
+	events := httptest.NewRecorder()
+	handler.ServeHTTP(events, httptest.NewRequest(http.MethodPost, "/events", nil))
+	if events.Code != http.StatusAccepted {
+		t.Fatalf("events status = %d, want %d", events.Code, http.StatusAccepted)
+	}
+}
+
 func TestNewHTTPHandlerReturnsExplicitStatusBeforePipeExecutionExists(t *testing.T) {
 	handler, err := newHTTPHandler([]Node{
 		From("POST /tickets"),

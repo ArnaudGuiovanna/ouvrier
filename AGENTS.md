@@ -125,6 +125,30 @@ The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
 
 ## v0.1 Backlog
 
+### Immediate Implementation Order
+
+The next implementation work must follow this order. Do not advance CLI,
+deployment, streams, or broad integrations ahead of these foundations.
+
+1. Build `internal/runtime` plan compilation: `Plan`, `Trigger`, `Step`,
+   `Terminal`, strict validation, and the multi-pipeline strategy for `Run`.
+2. Tighten public pipeline validation: terminal must be unique and last,
+   trigger/output compatibility must be checked, and no node may be ignored.
+3. Implement `Output[T]()` and the first `ResultSchema` contract.
+4. Introduce structured `Session`.
+5. Introduce append-only `EventStream`.
+6. Introduce memory `StateStore`.
+7. Implement real Go-only `ToolExecutor`.
+8. Prove the loop with a mock provider that calls a real Go tool through
+   `ToolExecutor`.
+9. Connect `runtime_http` to the compiled runtime/harness path so a simple HTTP
+   Pipe no longer returns a fake `501` for implemented cases.
+10. Only then continue with Anthropic real provider, sandbox hardening, MCP,
+    SubAgent/Task, admin endpoints, CLI depth, deployment, and streams.
+
+Each step must be TDD-backed and leave `go test ./...` and `go vet ./...`
+passing before commit.
+
 ### M0 - Product And API Groundwork
 
 - Fix contradictions between `specs.md` and the PDF.
