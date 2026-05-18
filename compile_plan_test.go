@@ -142,7 +142,7 @@ func TestCompilePlansCompilesMultiplePipelines(t *testing.T) {
 
 func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
 	plans, err := compilePlans([]Node{
-		From("POST /jobs"),
+		From("POST /jobs", WorkerPool(2)),
 		Pipe("process job", Model("anthropic/claude-sonnet-4-6")),
 		Reply(Accepted()),
 	})
@@ -155,5 +155,8 @@ func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
 	}
 	if !terminal.Async {
 		t.Fatal("terminal Async = false, want true")
+	}
+	if plans[0].Trigger.WorkerPool != 2 {
+		t.Fatalf("worker pool = %d, want 2", plans[0].Trigger.WorkerPool)
 	}
 }

@@ -17,12 +17,13 @@ const (
 )
 
 type Trigger struct {
-	Kind   TriggerKind
-	Method string
-	Path   string
-	Expr   string
-	Value  string
-	URI    string
+	Kind       TriggerKind
+	Method     string
+	Path       string
+	Expr       string
+	Value      string
+	URI        string
+	WorkerPool int
 }
 
 type StepKind string

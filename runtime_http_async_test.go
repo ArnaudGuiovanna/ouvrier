@@ -72,3 +72,29 @@ func TestNewHTTPHandlerRepliesAcceptedBeforePipelineCompletes(t *testing.T) {
 	}
 	close(scripted.release)
 }
+
+func TestNewHTTPHandlerRejectsAcceptedRequestWhenWorkerPoolFull(t *testing.T) {
+	scripted := newBlockingProvider()
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /jobs", WorkerPool(1)),
+		Pipe("process job", Model("anthropic/claude-sonnet-4-6")),
+		Reply(Accepted()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(`{"id":"J-1"}`)))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d", first.Code, http.StatusAccepted)
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(`{"id":"J-2"}`)))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want %d", second.Code, http.StatusTooManyRequests)
+	}
+
+	close(scripted.release)
+}

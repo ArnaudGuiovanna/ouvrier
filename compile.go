@@ -47,6 +47,7 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 	if err != nil {
 		return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", start, err)
 	}
+	trigger.WorkerPool = from.config.workerPool
 
 	plan := runtimeplan.Plan{Trigger: trigger}
 	for i := start + 1; i < len(nodes); i++ {

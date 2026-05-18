@@ -84,7 +84,33 @@ type FromOption interface {
 	applyFrom(*fromConfig)
 }
 
-type fromConfig struct{}
+type fromConfig struct {
+	workerPool int
+	err        error
+}
+
+type workerPoolOption struct {
+	limit int
+}
+
+// WorkerPool bounds concurrent trigger executions for a pipeline.
+func WorkerPool(limit int) FromOption {
+	return workerPoolOption{limit: limit}
+}
+
+func (o workerPoolOption) applyFrom(config *fromConfig) {
+	if o.limit <= 0 {
+		config.setErr(fmt.Errorf("%w: WorkerPool must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.workerPool = o.limit
+}
+
+func (c *fromConfig) setErr(err error) {
+	if c.err == nil {
+		c.err = err
+	}
+}
 
 type fromNode struct {
 	source triggerSource
@@ -123,6 +149,9 @@ func (n fromNode) nodeKind() nodeKind {
 func (n fromNode) validateNode() error {
 	if n.err != nil {
 		return n.err
+	}
+	if n.config.err != nil {
+		return n.config.err
 	}
 	if n.source == nil {
 		return fmt.Errorf("%w: From source is required", ErrInvalidNode)

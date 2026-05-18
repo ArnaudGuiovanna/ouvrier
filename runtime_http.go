@@ -82,13 +82,24 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if r.plan.Terminal.Async {
+		if !r.tryAcquireWorker() {
+			writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+			return
+		}
 		ctx := context.WithoutCancel(req.Context())
 		go func() {
+			defer r.releaseWorker()
 			_, _ = r.runtime.runPlan(ctx, r.plan, input)
 		}()
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 		return
 	}
+
+	if !r.tryAcquireWorker() {
+		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+		return
+	}
+	defer r.releaseWorker()
 
 	output, err := r.runtime.runPlan(req.Context(), r.plan, input)
 	if err != nil {
@@ -111,6 +122,25 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	default:
 		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
 	}
+}
+
+func (r httpRoute) tryAcquireWorker() bool {
+	if r.workerPool == nil {
+		return true
+	}
+	select {
+	case r.workerPool <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r httpRoute) releaseWorker() {
+	if r.workerPool == nil {
+		return
+	}
+	<-r.workerPool
 }
 
 func readHTTPRequestInput(req *http.Request) (string, error) {
