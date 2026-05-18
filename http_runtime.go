@@ -35,6 +35,22 @@ func defaultHTTPRuntime() httpRuntime {
 	}
 }
 
+func defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
+	rt := defaultHTTPRuntime()
+	store, err := state.NewStoreFromEnv()
+	if err != nil {
+		return httpRuntime{}, nil, err
+	}
+	rt.stateStore = store
+	return rt, func() error {
+		closer, ok := store.(interface{ Close() error })
+		if !ok {
+			return nil
+		}
+		return closer.Close()
+	}, nil
+}
+
 func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input string) (string, error) {
 	if len(plan.Steps) == 0 {
 		return input, nil

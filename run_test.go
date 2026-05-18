@@ -16,6 +16,8 @@ func TestRunValidatesPipelineBeforeStartingRuntime(t *testing.T) {
 }
 
 func TestRunAttemptsToListenForValidHTTPPipeline(t *testing.T) {
+	t.Setenv("OUVRIER_STATE_BACKEND", "memory")
+
 	err := ovr.Run(
 		"127.0.0.1:bad-port",
 		ovr.From("GET /health"),
