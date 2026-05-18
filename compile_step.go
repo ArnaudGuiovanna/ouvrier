@@ -27,10 +27,14 @@ func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {
 	out := make([]runtimeplan.Tool, 0, len(tools))
 	for _, tool := range tools {
 		out = append(out, runtimeplan.Tool{
-			Name:        tool.name,
-			Description: tool.description,
-			InputSchema: toolInputSchema(tool),
-			GoFunc:      tool.fn,
+			Name:             tool.name,
+			Description:      tool.description,
+			InputSchema:      toolInputSchema(tool),
+			GoFunc:           tool.fn,
+			Effect:           tool.effect,
+			IdempotencyKey:   tool.idempotencyKey,
+			SideEffects:      append([]string(nil), tool.sideEffects...),
+			RequiresApproval: tool.requiresApproval,
 		})
 	}
 	return out

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"ouvrier/internal/policy"
 	runtimeplan "ouvrier/internal/runtime"
 )
 
@@ -80,6 +81,7 @@ func TestCompilePlansCompilesPipeTools(t *testing.T) {
 			Tool("lookup", lookup,
 				Describe("Lookup ticket data."),
 				Param("query", "Search query."),
+				ReadOnly(),
 			),
 		),
 		Reply(JSON[planReply]()),
@@ -100,6 +102,9 @@ func TestCompilePlansCompilesPipeTools(t *testing.T) {
 	}
 	if string(tools[0].InputSchema) == "" {
 		t.Fatal("tool InputSchema is empty")
+	}
+	if tools[0].Effect != policy.EffectReadOnly {
+		t.Fatalf("tool Effect = %q, want read_only", tools[0].Effect)
 	}
 }
 

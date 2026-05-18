@@ -3,6 +3,8 @@ package runtime
 import (
 	"encoding/json"
 	"reflect"
+
+	"ouvrier/internal/policy"
 )
 
 type TriggerKind string
@@ -38,10 +40,14 @@ type Step struct {
 }
 
 type Tool struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-	GoFunc      any
+	Name             string
+	Description      string
+	InputSchema      json.RawMessage
+	GoFunc           any
+	Effect           policy.Effect
+	IdempotencyKey   string
+	SideEffects      []string
+	RequiresApproval bool
 }
 
 type TerminalKind string

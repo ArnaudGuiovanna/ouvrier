@@ -12,10 +12,11 @@ import (
 )
 
 type httpScriptedProvider struct {
-	name     string
-	requests []provider.Request
-	response provider.Response
-	err      error
+	name      string
+	requests  []provider.Request
+	responses []provider.Response
+	response  provider.Response
+	err       error
 }
 
 func (p *httpScriptedProvider) Name() string {
@@ -29,6 +30,13 @@ func (p *httpScriptedProvider) Complete(ctx context.Context, req provider.Reques
 	p.requests = append(p.requests, req)
 	if p.err != nil {
 		return provider.Response{}, p.err
+	}
+	if len(p.responses) > 0 {
+		index := len(p.requests) - 1
+		if index >= len(p.responses) {
+			index = len(p.responses) - 1
+		}
+		return p.responses[index], nil
 	}
 	return p.response, nil
 }

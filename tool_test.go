@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"ouvrier/internal/policy"
 )
 
 type toolReply struct {
@@ -72,6 +74,46 @@ func TestToolOptionStoresMetadataOnPipeConfig(t *testing.T) {
 	}
 }
 
+func TestToolOptionStoresExecutionClassification(t *testing.T) {
+	node := Pipe("inspect learners",
+		Model("anthropic/claude-sonnet-4-6"),
+		Tool("list_learners", listLearners, ReadOnly()),
+		Tool("audit_learner", auditLearner,
+			Idempotent("learner.id"),
+			RequiresApproval(),
+		),
+		Tool("email_learner", auditLearner, SideEffecting("email")),
+	)
+
+	pipe, ok := node.(pipeNode)
+	if !ok {
+		t.Fatalf("Pipe returned %T, want pipeNode", node)
+	}
+	if got, want := len(pipe.config.tools), 3; got != want {
+		t.Fatalf("tool count = %d, want %d", got, want)
+	}
+	if pipe.config.tools[0].effect != policy.EffectReadOnly {
+		t.Fatalf("first effect = %q, want read_only", pipe.config.tools[0].effect)
+	}
+	second := pipe.config.tools[1]
+	if second.effect != policy.EffectIdempotent {
+		t.Fatalf("second effect = %q, want idempotent", second.effect)
+	}
+	if second.idempotencyKey != "learner.id" {
+		t.Fatalf("idempotency key = %q, want learner.id", second.idempotencyKey)
+	}
+	if !second.requiresApproval {
+		t.Fatal("requiresApproval = false, want true")
+	}
+	third := pipe.config.tools[2]
+	if third.effect != policy.EffectSideEffecting {
+		t.Fatalf("third effect = %q, want side_effecting", third.effect)
+	}
+	if len(third.sideEffects) != 1 || third.sideEffects[0] != "email" {
+		t.Fatalf("side effects = %+v, want email", third.sideEffects)
+	}
+}
+
 func TestToolOptionRejectsInvalidToolDeclarations(t *testing.T) {
 	var nilTool func(context.Context) error
 
@@ -89,6 +131,7 @@ func TestToolOptionRejectsInvalidToolDeclarations(t *testing.T) {
 		{name: "empty describe", opt: Tool("empty_describe", listLearners, Describe(" "))},
 		{name: "empty param name", opt: Tool("empty_param", listLearners, Param(" ", "description"))},
 		{name: "empty param description", opt: Tool("empty_param_description", listLearners, Param("days", " "))},
+		{name: "empty idempotency key", opt: Tool("empty_idempotency", auditLearner, Idempotent(" "))},
 	}
 
 	for _, tt := range tests {

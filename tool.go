@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	"ouvrier/internal/policy"
 )
 
 // ToolOption configures a Go tool registered on a Pipe.
@@ -13,12 +15,16 @@ type ToolOption interface {
 }
 
 type toolSpec struct {
-	name        string
-	fn          any
-	fnType      reflect.Type
-	description string
-	params      map[string]string
-	err         error
+	name             string
+	fn               any
+	fnType           reflect.Type
+	description      string
+	params           map[string]string
+	effect           policy.Effect
+	idempotencyKey   string
+	sideEffects      []string
+	requiresApproval bool
+	err              error
 }
 
 type toolPipeOption struct {
@@ -28,8 +34,9 @@ type toolPipeOption struct {
 // Tool registers a Go function as an agent tool for a Pipe.
 func Tool(name string, goFunc any, options ...ToolOption) PipeOption {
 	spec := toolSpec{
-		name: strings.TrimSpace(name),
-		fn:   goFunc,
+		name:   strings.TrimSpace(name),
+		fn:     goFunc,
+		effect: policy.EffectSideEffecting,
 	}
 	if goFunc != nil {
 		if typ := reflect.TypeOf(goFunc); typ.Kind() == reflect.Func {
@@ -46,6 +53,74 @@ func Tool(name string, goFunc any, options ...ToolOption) PipeOption {
 	}
 
 	return toolPipeOption{spec: spec}
+}
+
+type readOnlyOption struct{}
+
+// ReadOnly marks a Tool as side-effect free and eligible for safe retry/parallel policies.
+func ReadOnly() ToolOption {
+	return readOnlyOption{}
+}
+
+func (readOnlyOption) applyTool(spec *toolSpec) {
+	spec.effect = policy.EffectReadOnly
+	spec.idempotencyKey = ""
+	spec.sideEffects = nil
+}
+
+type sideEffectingOption struct {
+	labels []string
+}
+
+// SideEffecting marks a Tool as mutating external state.
+func SideEffecting(labels ...string) ToolOption {
+	return sideEffectingOption{labels: cleanToolLabels(labels)}
+}
+
+func (o sideEffectingOption) applyTool(spec *toolSpec) {
+	spec.effect = policy.EffectSideEffecting
+	spec.idempotencyKey = ""
+	spec.sideEffects = append([]string(nil), o.labels...)
+}
+
+type idempotentOption struct {
+	keyExpression string
+}
+
+// Idempotent marks a side-effecting Tool as replay-safe for a stable key expression.
+func Idempotent(keyExpression string) ToolOption {
+	return idempotentOption{keyExpression: strings.TrimSpace(keyExpression)}
+}
+
+func (o idempotentOption) applyTool(spec *toolSpec) {
+	if o.keyExpression == "" {
+		spec.setErr(fmt.Errorf("%w: Tool idempotency key is required", ErrInvalidNode))
+		return
+	}
+	spec.effect = policy.EffectIdempotent
+	spec.idempotencyKey = o.keyExpression
+}
+
+type requiresApprovalOption struct{}
+
+// RequiresApproval marks a Tool as blocked unless an explicit policy allows it.
+func RequiresApproval() ToolOption {
+	return requiresApprovalOption{}
+}
+
+func (requiresApprovalOption) applyTool(spec *toolSpec) {
+	spec.requiresApproval = true
+}
+
+func cleanToolLabels(labels []string) []string {
+	cleaned := make([]string, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label != "" {
+			cleaned = append(cleaned, label)
+		}
+	}
+	return cleaned
 }
 
 func (o toolPipeOption) applyPipe(config *pipeConfig) {

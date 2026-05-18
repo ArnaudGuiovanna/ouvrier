@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 )
 
@@ -19,21 +20,35 @@ var (
 )
 
 type Executor struct {
-	mu    sync.RWMutex
-	tools map[string]registeredTool
+	mu     sync.RWMutex
+	tools  map[string]registeredTool
+	policy policy.PermissionPolicy
 }
 
 type registeredTool struct {
-	name string
-	fn   reflect.Value
-	typ  reflect.Type
+	name     string
+	fn       reflect.Value
+	typ      reflect.Type
+	metadata Metadata
 }
 
-func NewExecutor() *Executor {
-	return &Executor{tools: make(map[string]registeredTool)}
+func NewExecutor(options ...Option) *Executor {
+	executor := &Executor{
+		tools:  make(map[string]registeredTool),
+		policy: policy.NewDefaultPolicy(),
+	}
+	for _, option := range options {
+		if option != nil {
+			option(executor)
+		}
+	}
+	if executor.policy == nil {
+		executor.policy = policy.NewDefaultPolicy()
+	}
+	return executor
 }
 
-func (e *Executor) Register(name string, fn any) error {
+func (e *Executor) Register(name string, fn any, options ...RegisterOption) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("%w: name is required", ErrInvalidTool)
@@ -41,6 +56,12 @@ func (e *Executor) Register(name string, fn any) error {
 	tool, err := newRegisteredTool(name, fn)
 	if err != nil {
 		return err
+	}
+	for _, option := range options {
+		if option == nil {
+			return fmt.Errorf("%w: nil register option", ErrInvalidTool)
+		}
+		option(&tool)
 	}
 
 	e.mu.Lock()
@@ -63,6 +84,9 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	tool, ok := e.lookup(call.Name)
 	if !ok {
 		return provider.ToolResult{}, fmt.Errorf("%w: %s", ErrToolNotFound, call.Name)
+	}
+	if result, allowed, err := e.authorizeToolCall(ctx, tool, call); err != nil || !allowed {
+		return result, err
 	}
 
 	defer func() {
@@ -97,7 +121,12 @@ func newRegisteredTool(name string, fn any) (registeredTool, error) {
 	if err := validateSignature(name, value.Type()); err != nil {
 		return registeredTool{}, err
 	}
-	return registeredTool{name: name, fn: value, typ: value.Type()}, nil
+	return registeredTool{
+		name:     name,
+		fn:       value,
+		typ:      value.Type(),
+		metadata: Metadata{Effect: policy.EffectSideEffecting},
+	}, nil
 }
 
 func validateSignature(name string, typ reflect.Type) error {

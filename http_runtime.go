@@ -87,7 +87,12 @@ func registerRuntimeTools(executor *tools.Executor, runtimeTools []runtimeplan.T
 	specs := make([]provider.ToolSpec, 0, len(runtimeTools))
 	for _, tool := range runtimeTools {
 		if tool.GoFunc != nil {
-			if err := executor.Register(tool.Name, tool.GoFunc); err != nil {
+			if err := executor.Register(tool.Name, tool.GoFunc, tools.WithMetadata(tools.Metadata{
+				Effect:           tool.Effect,
+				IdempotencyKey:   tool.IdempotencyKey,
+				SideEffects:      tool.SideEffects,
+				RequiresApproval: tool.RequiresApproval,
+			})); err != nil {
 				return nil, err
 			}
 		}
