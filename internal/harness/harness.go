@@ -6,6 +6,7 @@ import (
 
 	"ouvrier/internal/provider"
 	runtimecore "ouvrier/internal/runtime"
+	"ouvrier/internal/tools"
 )
 
 type Harness struct {
@@ -13,6 +14,7 @@ type Harness struct {
 	model         string
 	systemPrompt  string
 	maxIterations int
+	toolExecutor  *tools.Executor
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -33,6 +35,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		model:         cfg.model,
 		systemPrompt:  cfg.systemPrompt,
 		maxIterations: cfg.maxIterations,
+		toolExecutor:  cfg.toolExecutor,
 	}, nil
 }
 
@@ -71,7 +74,12 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		out.ToolCalls = append(out.ToolCalls, resp.ToolCalls...)
 		messages = append(messages, provider.AssistantToolCalls(resp.Text, resp.ToolCalls...))
 		for _, call := range resp.ToolCalls {
-			messages = append(messages, provider.ToolResultText(call, "tool execution is not implemented in this harness slice", true))
+			result, err := h.toolExecutor.Execute(ctx, call)
+			if err != nil {
+				messages = append(messages, provider.ToolResultText(call, err.Error(), true))
+				continue
+			}
+			messages = append(messages, provider.ToolResultMessage(result))
 		}
 	}
 

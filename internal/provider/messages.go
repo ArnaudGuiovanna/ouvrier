@@ -50,16 +50,21 @@ func AssistantToolCalls(text string, calls ...ToolCall) Message {
 
 func ToolResultText(call ToolCall, text string, isError bool) Message {
 	content, _ := json.Marshal(text)
+	return ToolResultMessage(ToolResult{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Content:    content,
+		IsError:    isError,
+	})
+}
+
+func ToolResultMessage(result ToolResult) Message {
+	copied := result
 	return Message{
 		Role: RoleTool,
 		Blocks: []Block{{
-			Type: BlockToolResult,
-			ToolResult: &ToolResult{
-				ToolCallID: call.ID,
-				Name:       call.Name,
-				Content:    content,
-				IsError:    isError,
-			},
+			Type:       BlockToolResult,
+			ToolResult: &copied,
 		}},
 	}
 }

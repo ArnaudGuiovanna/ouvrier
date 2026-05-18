@@ -3,6 +3,8 @@ package harness
 import (
 	"errors"
 	"strings"
+
+	"ouvrier/internal/tools"
 )
 
 const DefaultMaxIterations = 25
@@ -13,10 +15,14 @@ type config struct {
 	model         string
 	systemPrompt  string
 	maxIterations int
+	toolExecutor  *tools.Executor
 }
 
 func defaultConfig() config {
-	return config{maxIterations: DefaultMaxIterations}
+	return config{
+		maxIterations: DefaultMaxIterations,
+		toolExecutor:  tools.NewExecutor(),
+	}
 }
 
 func WithModel(model string) Option {
@@ -39,6 +45,16 @@ func WithMaxIterations(max int) Option {
 			return errors.New("max iterations must be greater than zero")
 		}
 		cfg.maxIterations = max
+		return nil
+	}
+}
+
+func WithToolExecutor(executor *tools.Executor) Option {
+	return func(cfg *config) error {
+		if executor == nil {
+			return errors.New("tool executor is required")
+		}
+		cfg.toolExecutor = executor
 		return nil
 	}
 }
