@@ -12,12 +12,16 @@ import (
 )
 
 type httpScriptedProvider struct {
+	name     string
 	requests []provider.Request
 	response provider.Response
 	err      error
 }
 
 func (p *httpScriptedProvider) Name() string {
+	if p.name != "" {
+		return p.name
+	}
 	return "scripted"
 }
 

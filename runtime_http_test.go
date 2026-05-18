@@ -113,6 +113,8 @@ func TestNewHTTPHandlerServesMultipleHTTPPipelines(t *testing.T) {
 }
 
 func TestNewHTTPHandlerReturnsProviderStatusWhenPipeProviderMissing(t *testing.T) {
+	clearProviderEnv(t)
+
 	handler, err := newHTTPHandler([]Node{
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),

@@ -18,19 +18,21 @@ var (
 
 type httpRuntime struct {
 	provider     provider.Provider
+	providers    *provider.Registry
 	toolExecutor *tools.Executor
 }
 
 func defaultHTTPRuntime() httpRuntime {
-	return httpRuntime{toolExecutor: tools.NewExecutor()}
+	providers, _ := providerRegistryFromEnv()
+	return httpRuntime{
+		providers:    providers,
+		toolExecutor: tools.NewExecutor(),
+	}
 }
 
 func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input string) (string, error) {
 	if len(plan.Steps) == 0 {
 		return input, nil
-	}
-	if rt.provider == nil {
-		return "", errHTTPProviderNotConfigured
 	}
 	executor := rt.toolExecutor
 	if executor == nil {
@@ -43,7 +45,11 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 		if err != nil {
 			return "", err
 		}
-		h, err := harness.New(rt.provider,
+		stepProvider, err := rt.providerForModel(step.Model)
+		if err != nil {
+			return "", err
+		}
+		h, err := harness.New(stepProvider,
 			harness.WithModel(step.Model),
 			harness.WithToolExecutor(executor),
 			harness.WithTools(specs...),
@@ -61,6 +67,20 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 		current = out.Text
 	}
 	return current, nil
+}
+
+func (rt httpRuntime) providerForModel(model string) (provider.Provider, error) {
+	if rt.providers != nil {
+		p, err := rt.providers.ForModel(model)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errHTTPProviderNotConfigured, err)
+		}
+		return p, nil
+	}
+	if rt.provider != nil {
+		return rt.provider, nil
+	}
+	return nil, errHTTPProviderNotConfigured
 }
 
 func registerRuntimeTools(executor *tools.Executor, runtimeTools []runtimeplan.Tool) ([]provider.ToolSpec, error) {
