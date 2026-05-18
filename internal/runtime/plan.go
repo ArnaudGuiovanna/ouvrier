@@ -36,6 +36,7 @@ type Step struct {
 	Goal         string
 	Model        string
 	Tools        []Tool
+	MCPServers   []MCPServer
 	ResultSchema *ResultSchema
 }
 
@@ -48,6 +49,10 @@ type Tool struct {
 	IdempotencyKey   string
 	SideEffects      []string
 	RequiresApproval bool
+}
+
+type MCPServer struct {
+	Name string
 }
 
 type TerminalKind string

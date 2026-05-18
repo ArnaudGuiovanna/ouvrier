@@ -83,6 +83,7 @@ func TestCompilePlansCompilesPipeTools(t *testing.T) {
 				Param("query", "Search query."),
 				ReadOnly(),
 			),
+			MCP("moodle-mcp"),
 		),
 		Reply(JSON[planReply]()),
 	})
@@ -105,6 +106,10 @@ func TestCompilePlansCompilesPipeTools(t *testing.T) {
 	}
 	if tools[0].Effect != policy.EffectReadOnly {
 		t.Fatalf("tool Effect = %q, want read_only", tools[0].Effect)
+	}
+	mcpServers := plans[0].Steps[0].MCPServers
+	if len(mcpServers) != 1 || mcpServers[0].Name != "moodle-mcp" {
+		t.Fatalf("MCP servers = %+v, want moodle-mcp", mcpServers)
 	}
 }
 

@@ -11,11 +11,12 @@ type PipeOption interface {
 }
 
 type pipeConfig struct {
-	model  string
-	output *outputSpec
-	tools  []toolSpec
-	skills []skillSpec
-	err    error
+	model      string
+	output     *outputSpec
+	tools      []toolSpec
+	skills     []skillSpec
+	mcpServers []mcpSpec
+	err        error
 }
 
 type pipeNode struct {
@@ -61,6 +62,11 @@ func (n pipeNode) validateNode() error {
 	}
 	for _, skill := range n.config.skills {
 		if err := skill.validateSkill(); err != nil {
+			return err
+		}
+	}
+	for _, mcpServer := range n.config.mcpServers {
+		if err := mcpServer.validateMCP(); err != nil {
 			return err
 		}
 	}

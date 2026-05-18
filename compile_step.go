@@ -12,15 +12,24 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		return runtimeplan.Step{}, ErrInvalidNode
 	}
 	step := runtimeplan.Step{
-		Kind:  runtimeplan.StepPipe,
-		Goal:  pipe.goal,
-		Model: pipe.config.model,
-		Tools: runtimeToolsFromPipe(pipe.config.tools),
+		Kind:       runtimeplan.StepPipe,
+		Goal:       pipe.goal,
+		Model:      pipe.config.model,
+		Tools:      runtimeToolsFromPipe(pipe.config.tools),
+		MCPServers: runtimeMCPServersFromPipe(pipe.config.mcpServers),
 	}
 	if pipe.config.output != nil {
 		step.ResultSchema = resultSchemaFromType(pipe.config.output.typ)
 	}
 	return step, nil
+}
+
+func runtimeMCPServersFromPipe(servers []mcpSpec) []runtimeplan.MCPServer {
+	out := make([]runtimeplan.MCPServer, 0, len(servers))
+	for _, server := range servers {
+		out = append(out, runtimeplan.MCPServer{Name: server.name})
+	}
+	return out
 }
 
 func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {
