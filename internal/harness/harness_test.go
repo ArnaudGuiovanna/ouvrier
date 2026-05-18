@@ -7,6 +7,7 @@ import (
 
 	"ouvrier/internal/harness"
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 )
 
 type scriptedProvider struct {
@@ -153,5 +154,78 @@ func TestRunReturnsFailedOutcomeOnProviderError(t *testing.T) {
 	}
 	if out.Iterations != 1 {
 		t.Fatalf("Iterations = %d, want 1 attempted provider call", out.Iterations)
+	}
+}
+
+func TestRunPersistsSessionAndExecutionWhenStateStoreConfigured(t *testing.T) {
+	store := state.NewMemoryStore()
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	execution, ok, err := store.Execution(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Execution returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Execution ok = false, want true")
+	}
+	if execution.Status != state.ExecutionCompleted || execution.CompletedAt.IsZero() {
+		t.Fatalf("Execution = %+v", execution)
+	}
+
+	session, ok, err := store.Session(context.Background(), out.Session.SessionID)
+	if err != nil {
+		t.Fatalf("Session returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Session ok = false, want true")
+	}
+	if session.ExecID != out.Session.ExecID || session.TraceID != out.Session.TraceID {
+		t.Fatalf("Session = %+v, want trace for %+v", session, out.Session)
+	}
+}
+
+func TestRunMarksExecutionFailedOnProviderError(t *testing.T) {
+	store := state.NewMemoryStore()
+	boom := errors.New("provider exploded")
+	p := &scriptedProvider{err: boom}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run error = %v, want provider error", err)
+	}
+
+	execution, ok, err := store.Execution(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Execution returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Execution ok = false, want true")
+	}
+	if execution.Status != state.ExecutionFailed || execution.CompletedAt.IsZero() {
+		t.Fatalf("Execution = %+v", execution)
 	}
 }

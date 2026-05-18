@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 	"ouvrier/internal/tools"
 )
 
@@ -18,6 +19,7 @@ type config struct {
 	maxIterations int
 	toolExecutor  *tools.Executor
 	tools         []provider.ToolSpec
+	stateStore    state.Store
 }
 
 func defaultConfig() config {
@@ -64,6 +66,16 @@ func WithToolExecutor(executor *tools.Executor) Option {
 func WithTools(specs ...provider.ToolSpec) Option {
 	return func(cfg *config) error {
 		cfg.tools = append([]provider.ToolSpec(nil), specs...)
+		return nil
+	}
+}
+
+func WithStateStore(store state.Store) Option {
+	return func(cfg *config) error {
+		if store == nil {
+			return errors.New("state store is required")
+		}
+		cfg.stateStore = store
 		return nil
 	}
 }

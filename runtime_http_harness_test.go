@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 )
 
 type httpScriptedProvider struct {
@@ -73,6 +74,46 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 	}
 	if scripted.requests[0].Messages[0].Text() != `{"title":"broken"}` {
 		t.Fatalf("provider input = %q", scripted.requests[0].Messages[0].Text())
+	}
+}
+
+func TestNewHTTPHandlerPersistsHarnessStateWhenConfigured(t *testing.T) {
+	store := state.NewMemoryStore()
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: "classified", StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	sessions, err := store.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions returned error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	execution, ok, err := store.Execution(context.Background(), sessions[0].ExecID)
+	if err != nil {
+		t.Fatalf("Execution returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Execution ok = false, want true")
+	}
+	if execution.Status != state.ExecutionCompleted {
+		t.Fatalf("execution status = %q, want completed", execution.Status)
 	}
 }
 

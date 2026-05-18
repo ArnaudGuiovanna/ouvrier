@@ -1,6 +1,22 @@
 package state
 
-import "time"
+import (
+	"context"
+	"time"
+
+	runtimecore "ouvrier/internal/runtime"
+)
+
+type Store interface {
+	SaveExecution(context.Context, Execution) error
+	Execution(context.Context, string) (Execution, bool, error)
+	SaveSession(context.Context, runtimecore.Session) error
+	Session(context.Context, string) (runtimecore.Session, bool, error)
+	Sessions(context.Context) ([]runtimecore.Session, error)
+	ReserveIdempotency(context.Context, string, string) (string, bool, error)
+	AddSchemaViolation(context.Context, SchemaViolation) (SchemaViolation, error)
+	SchemaViolations(context.Context, string) ([]SchemaViolation, error)
+}
 
 type ExecutionStatus string
 
@@ -8,6 +24,7 @@ const (
 	ExecutionRunning   ExecutionStatus = "running"
 	ExecutionCompleted ExecutionStatus = "completed"
 	ExecutionFailed    ExecutionStatus = "failed"
+	ExecutionTruncated ExecutionStatus = "truncated"
 )
 
 type Execution struct {

@@ -3,9 +3,11 @@ package harness
 import (
 	"context"
 	"errors"
+	"time"
 
 	"ouvrier/internal/provider"
 	runtimecore "ouvrier/internal/runtime"
+	"ouvrier/internal/state"
 	"ouvrier/internal/tools"
 )
 
@@ -16,6 +18,7 @@ type Harness struct {
 	maxIterations int
 	toolExecutor  *tools.Executor
 	tools         []provider.ToolSpec
+	stateStore    state.Store
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -38,6 +41,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		maxIterations: cfg.maxIterations,
 		toolExecutor:  cfg.toolExecutor,
 		tools:         append([]provider.ToolSpec(nil), cfg.tools...),
+		stateStore:    cfg.stateStore,
 	}, nil
 }
 
@@ -51,6 +55,10 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 
 	messages := []provider.Message{provider.UserText(input)}
 	out := Outcome{Session: session}
+	if err := h.startExecution(ctx, session); err != nil {
+		out.Status = StatusFailed
+		return out, err
+	}
 
 	for out.Iterations < h.maxIterations {
 		out.Iterations++
@@ -62,7 +70,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		})
 		if err != nil {
 			out.Status = StatusFailed
-			return out, err
+			return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))
 		}
 
 		out.Usage.Add(resp.Usage)
@@ -71,7 +79,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		}
 		if len(resp.ToolCalls) == 0 {
 			out.Status = StatusCompleted
-			return out, nil
+			return out, h.finishExecution(ctx, session, out.Status)
 		}
 
 		out.ToolCalls = append(out.ToolCalls, resp.ToolCalls...)
@@ -87,5 +95,49 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 	}
 
 	out.Status = StatusTruncated
-	return out, nil
+	return out, h.finishExecution(ctx, session, out.Status)
+}
+
+func (h *Harness) startExecution(ctx context.Context, session runtimecore.Session) error {
+	if h.stateStore == nil {
+		return nil
+	}
+	execution := state.Execution{
+		ExecID:    session.ExecID,
+		TraceID:   session.TraceID,
+		Status:    state.ExecutionRunning,
+		StartedAt: session.StartedAt,
+	}
+	if err := h.stateStore.SaveExecution(ctx, execution); err != nil {
+		return err
+	}
+	if err := h.stateStore.SaveSession(ctx, session); err != nil {
+		markErr := h.finishExecution(ctx, session, StatusFailed)
+		return errors.Join(err, markErr)
+	}
+	return nil
+}
+
+func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Session, status Status) error {
+	if h.stateStore == nil {
+		return nil
+	}
+	return h.stateStore.SaveExecution(ctx, state.Execution{
+		ExecID:      session.ExecID,
+		TraceID:     session.TraceID,
+		Status:      executionStatus(status),
+		StartedAt:   session.StartedAt,
+		CompletedAt: time.Now().UTC(),
+	})
+}
+
+func executionStatus(status Status) state.ExecutionStatus {
+	switch status {
+	case StatusCompleted:
+		return state.ExecutionCompleted
+	case StatusTruncated:
+		return state.ExecutionTruncated
+	default:
+		return state.ExecutionFailed
+	}
 }

@@ -89,8 +89,10 @@ internal harness with these ten components:
 7. `EventStream` - append-only event source for traces, logs, SSE, admin
    endpoints, and the dev trace viewer.
 8. `StateStore` - execution/session history, idempotency, traces, and schema
-   violations. Memory backend is required in v0.1; durable long-term memory is
-   not required.
+   violations. Memory remains the lightweight test backend. The durable v0.1
+   default is embedded SQLite through `modernc.org/sqlite`, behind the same
+   `Store` interface. PostgreSQL may be added later without changing harness
+   contracts.
 9. `ResultSchema` - JSON Schema generation and strict validation for
    `Output[T]()` and typed replies, with observable repair attempts when
    enabled.
@@ -137,7 +139,7 @@ deployment, streams, or broad integrations ahead of these foundations.
 3. Implement `Output[T]()` and the first `ResultSchema` contract.
 4. Introduce structured `Session`.
 5. Introduce append-only `EventStream`.
-6. Introduce memory `StateStore`.
+6. Introduce `StateStore` abstraction with memory and embedded SQLite backends.
 7. Implement real Go-only `ToolExecutor`.
 8. Prove the loop with a mock provider that calls a real Go tool through
    `ToolExecutor`.
@@ -175,8 +177,9 @@ passing before commit.
 
 - Implement structured `Session` and child-session lineage.
 - Implement append-only `EventStream` and synchronous `HookBus`.
-- Implement `StateStore` memory backend for executions, sessions, traces,
-  idempotency keys, and schema violations.
+- Implement `StateStore` backends for executions, sessions, traces,
+  idempotency keys, and schema violations: memory for tests and embedded
+  SQLite as the durable single-binary default.
 - Implement `ResultSchema`, `Output[T]()` and strict JSON validation.
 - Implement `PermissionPolicy` with secure defaults and auditable decisions.
 - Implement `Sandbox` abstraction for filesystem, env, process, and network

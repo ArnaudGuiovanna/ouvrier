@@ -9,6 +9,7 @@ import (
 	"ouvrier/internal/mcpclient"
 	"ouvrier/internal/provider"
 	runtimeplan "ouvrier/internal/runtime"
+	"ouvrier/internal/state"
 	"ouvrier/internal/tools"
 )
 
@@ -22,6 +23,7 @@ type httpRuntime struct {
 	providers    *provider.Registry
 	toolExecutor *tools.Executor
 	mcpConnector mcpConnector
+	stateStore   state.Store
 }
 
 func defaultHTTPRuntime() httpRuntime {
@@ -53,11 +55,15 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 			_ = closeMCP()
 			return "", err
 		}
-		h, err := harness.New(stepProvider,
+		harnessOptions := []harness.Option{
 			harness.WithModel(step.Model),
 			harness.WithToolExecutor(executor),
 			harness.WithTools(specs...),
-		)
+		}
+		if rt.stateStore != nil {
+			harnessOptions = append(harnessOptions, harness.WithStateStore(rt.stateStore))
+		}
+		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {
 			_ = closeMCP()
 			return "", err

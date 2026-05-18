@@ -714,7 +714,13 @@ Les hooks peuvent enrichir, bloquer ou observer selon leur type, mais tout bloca
 
 ### 8.8 StateStore
 
-- Backend mémoire obligatoire en v0.1
+- Backend mémoire obligatoire pour les tests et l'exécution éphémère
+- Backend SQLite embarqué obligatoire en v0.1 pour le mode durable par défaut
+- SQLite utilise `modernc.org/sqlite` pour conserver un binaire Go sans `cgo`
+- PostgreSQL reste une option future derrière la même abstraction `StateStore`
+- Configuration par défaut :
+  - `OUVRIER_STATE_BACKEND=sqlite`
+  - `OUVRIER_STATE_PATH=.ouvrier/state.db`
 - Stocke executions, sessions, snapshots, traces, idempotency keys, schema violations
 - Accès concurrent sûr
 - TTL / bornes mémoire configurables
@@ -967,7 +973,7 @@ L'ordre suivant est obligatoire pour éviter d'empiler des stubs autour d'un coe
 3. Implémenter `ovr.Output[T]()` et le premier contrat `ResultSchema`
 4. Introduire `Session`
 5. Introduire `EventStream`
-6. Introduire `StateStore` mémoire
+6. Introduire l'abstraction `StateStore` avec backends mémoire et SQLite embarqué
 7. Implémenter un `ToolExecutor` Go-only réel
 8. Prouver la loop avec un provider mock qui appelle un vrai Go tool via `ToolExecutor`
 9. Brancher `runtime_http` sur le chemin runtime/harness compilé, pour ne plus retourner `501` sur les cas implémentés
