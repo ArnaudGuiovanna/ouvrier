@@ -22,6 +22,22 @@ L'agent est une primitive de premier ordre, comme l'objet l'est en POO. Le frame
 From → Pipe → Pipe → Pipe → Reply / Push / Sink
 ```
 
+Invariant produit : **trigger, goal, tools, outcome**. Un développeur doit pouvoir rester à ce niveau mental pour 90% des usages. Le harnais agentique SOTA est une commodité fournie par Ouvrier : il est toujours actif par défaut, mais il ne doit pas rendre la syntaxe nominale plus complexe.
+
+La syntaxe par défaut doit rester proche de :
+
+```go
+ovr.Run(":8080",
+    ovr.From("POST /tickets"),
+    ovr.Pipe("Triage le ticket",
+        ovr.Model("anthropic/claude-sonnet-4-6"),
+        ovr.Tool("load_ticket", LoadTicket),
+        ovr.Output[Triage](),
+    ),
+    ovr.Reply(ovr.JSON[Triage]()),
+)
+```
+
 ### 1.3 Tagline
 
 **Workers for your APIs.**
@@ -55,6 +71,22 @@ Le modèle public reste simple (`From -> Pipe -> Reply/Push/Sink`), mais le runt
 - `internal/state` — `StateStore` pour historique d'exécution, sessions runtime, idempotence, traces, violations de schéma.
 - `internal/schema` — `ResultSchema`, génération JSON Schema depuis Go, validation stricte et repair borné.
 - `internal/provider` — frontière LLM : Anthropic Messages, tool use, prompt caching, coûts, classification d'erreurs.
+
+Ces packages ne sont pas l'API utilisateur normale. L'utilisateur décrit un trigger, des goals, des tools et un outcome ; Ouvrier fournit le harnais automatiquement.
+
+### 2.1.2 Surfaces avancées opt-in
+
+Certains points du harnais sont configurables publiquement pour les usages avancés, sans devenir obligatoires :
+
+- `ovr.NewRunner(...)` — configuration runtime avancée
+- `ovr.WithStateStore(...)` — backend state store personnalisé
+- `ovr.WithPermissionPolicy(...)` — policy production spécifique
+- `ovr.WithHooks(...)` — hooks internes observables/testables
+- `ovr.Sandbox(...)`, `ovr.AllowEnv(...)`, `ovr.AllowNetwork(...)` — sandbox explicite
+- `ovr.ReadOnly()`, `ovr.SideEffecting(...)`, `ovr.Idempotent(...)` — classification des tools
+- `ovr.Pipeline(...)`, `ovr.SubAgent(...)`, `ovr.MaxParallel(...)` — tâches enfants gouvernées
+
+Les implémentations concrètes de `Harness`, `Session`, `ToolExecutor`, `EventStream`, `StateStore` et `ResultSchema` restent internes. Elles ne doivent être exposées directement que si un besoin produit réel apparaît.
 
 ### 2.2 Nom de package
 
@@ -596,6 +628,8 @@ Le harnais Ouvrier v0.1 doit inclure dix composants internes obligatoires :
 8. **StateStore** — historique d'exécution, sessions runtime, traces, idempotence, violations de schéma.
 9. **ResultSchema** — génération JSON Schema, validation stricte, repair borné.
 10. **SubAgent/Task** — sous-pipelines gouvernés par sessions enfants et budgets hérités.
+
+Ces composants sont obligatoires pour l'implémentation, mais ils ne sont pas tous des primitives publiques. Le chemin nominal reste `From`, `Pipe`, `Tool`, `Skill`, `Output`, `Reply/Push/Sink`. Le harnais est automatique par défaut ; les surfaces avancées servent uniquement aux utilisateurs qui veulent remplacer un store, durcir une policy, ajouter des hooks, configurer une sandbox ou gouverner des subagents.
 
 ### 8.2 Session
 

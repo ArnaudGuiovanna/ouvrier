@@ -53,9 +53,27 @@ user code.
 Ouvrier v0.1 must ship a SOTA agent harness. This is non-negotiable for the
 current version, not a roadmap item.
 
-The public mental model remains `From -> Pipe -> ... -> Reply/Push/Sink`, but
-every Pipe must execute through a production-grade internal harness with these
-ten components:
+The public mental model must remain simple: trigger, goal, tools, outcome.
+The agent and its harness are a convenience provided by Ouvrier, not complexity
+that every user must manage.
+
+The default syntax must stay close to:
+
+```go
+ovr.Run(":8080",
+    ovr.From("POST /tickets"),
+    ovr.Pipe("Triage le ticket",
+        ovr.Model("anthropic/claude-sonnet-4-6"),
+        ovr.Tool("load_ticket", LoadTicket),
+        ovr.Output[Triage](),
+    ),
+    ovr.Reply(ovr.JSON[Triage]()),
+)
+```
+
+Users should not have to instantiate or understand the ten harness components
+for normal use. Every Pipe must still execute through a production-grade
+internal harness with these ten components:
 
 1. `Harness` - the coordinator for one Pipe execution.
 2. `Session` - per-execution state, messages, lineage, budgets, trace IDs, and
@@ -83,6 +101,13 @@ ten components:
 No tool call may bypass `ToolExecutor`. No privileged action may bypass
 `PermissionPolicy`. No user-visible trace/log/admin output may bypass secret
 redaction. No v0.1 acceptance should treat a fake tool-result loop as complete.
+
+Advanced users may opt into selected public configuration surfaces such as
+`NewRunner`, `WithStateStore`, `WithPermissionPolicy`, `WithHooks`, `Sandbox`,
+`ReadOnly`, `SideEffecting`, `Idempotent`, `SubAgent`, `Pipeline`, and
+`MaxParallel`. The concrete `Harness`, `Session`, `ToolExecutor`,
+`EventStream`, and `ResultSchema` implementations should remain internal unless
+there is a clear product reason to expose them later.
 
 ## TUI Requirement
 
