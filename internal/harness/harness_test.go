@@ -63,6 +63,15 @@ func TestRunCompletesWithProviderText(t *testing.T) {
 	if out.Iterations != 1 {
 		t.Fatalf("Iterations = %d, want 1", out.Iterations)
 	}
+	if out.Session.SessionID == "" || out.Session.ExecID == "" || out.Session.TraceID == "" {
+		t.Fatalf("Session IDs were not initialized: %+v", out.Session)
+	}
+	if out.Session.Model != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("Session model = %q", out.Session.Model)
+	}
+	if out.Session.Budget.MaxIterations != harness.DefaultMaxIterations {
+		t.Fatalf("Session max iterations = %d", out.Session.Budget.MaxIterations)
+	}
 	if out.Usage.InputTokens != 3 || out.Usage.OutputTokens != 5 || out.Usage.CostUSD != 0.01 {
 		t.Fatalf("Usage = %+v, want aggregated response usage", out.Usage)
 	}

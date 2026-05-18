@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"ouvrier/internal/provider"
+	runtimecore "ouvrier/internal/runtime"
 )
 
 type Harness struct {
@@ -36,8 +37,15 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 }
 
 func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
+	session, err := runtimecore.NewSession(h.model,
+		runtimecore.WithSessionBudget(runtimecore.Budget{MaxIterations: h.maxIterations}),
+	)
+	if err != nil {
+		return Outcome{Status: StatusFailed}, err
+	}
+
 	messages := []provider.Message{provider.UserText(input)}
-	out := Outcome{}
+	out := Outcome{Session: session}
 
 	for out.Iterations < h.maxIterations {
 		out.Iterations++
