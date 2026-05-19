@@ -3,6 +3,7 @@ package harness_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"ouvrier/internal/harness"
 	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 	"ouvrier/internal/tools"
 )
 
@@ -265,6 +267,67 @@ func TestRunEmitsPermissionDecisionForDeniedToolCall(t *testing.T) {
 	result := last.Blocks[0].ToolResult
 	if result == nil || !result.IsError {
 		t.Fatalf("tool result = %+v, want permission error result", result)
+	}
+}
+
+func TestRunSkipsDuplicateIdempotentToolCall(t *testing.T) {
+	store := state.NewMemoryStore()
+	calls := []provider.ToolCall{
+		{ID: "call_1", Name: "publish", Arguments: []byte(`{"ticket":{"id":"T-1"}}`)},
+		{ID: "call_2", Name: "publish", Arguments: []byte(`{"ticket":{"id":"T-1"}}`)},
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need publish", StopReason: provider.StopToolUse, ToolCalls: calls},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	called := 0
+	executor := tools.NewExecutor()
+	if err := executor.Register("publish", func(ctx context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		called++
+		return args.Ticket.ID, nil
+	}, tools.WithMetadata(tools.Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithToolExecutor(executor),
+		harness.WithStateStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want exactly one side effect", called)
+	}
+
+	messages := p.requests[1].Messages
+	firstResult := messages[len(messages)-2].Blocks[0].ToolResult
+	secondResult := messages[len(messages)-1].Blocks[0].ToolResult
+	if firstResult == nil || firstResult.IsError {
+		t.Fatalf("first tool result = %+v, want success", firstResult)
+	}
+	if secondResult == nil || !secondResult.IsError {
+		t.Fatalf("second tool result = %+v, want duplicate idempotency error", secondResult)
+	}
+	if !strings.Contains(string(secondResult.Content), "idempotency key") {
+		t.Fatalf("second content = %s, want idempotency error", secondResult.Content)
 	}
 }
 

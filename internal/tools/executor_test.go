@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 )
 
 type lookupArgs struct {
@@ -243,6 +245,88 @@ func TestExecutorValidatesArgumentsAgainstInputSchema(t *testing.T) {
 				t.Fatalf("content = %s, want schema validation error", result.Content)
 			}
 		})
+	}
+}
+
+func TestExecutorSkipsDuplicateIdempotentToolCall(t *testing.T) {
+	store := state.NewMemoryStore()
+	ctx := ContextWithIdempotencyStore(context.Background(), store, "exec_1")
+	called := 0
+	executor := NewExecutor()
+	err := executor.Register("publish", func(ctx context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		called++
+		return args.Ticket.ID, nil
+	}, WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "publish",
+		Arguments: []byte(`{"ticket":{"id":"T-1"}}`),
+	}
+
+	first, err := executor.Execute(ctx, call)
+	if err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if first.IsError {
+		t.Fatalf("first IsError = true, content=%s", first.Content)
+	}
+	second, err := executor.Execute(ctx, call)
+	if err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+	if !second.IsError {
+		t.Fatalf("second IsError = false, want duplicate idempotency error")
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want exactly one tool execution", called)
+	}
+	if !strings.Contains(string(second.Content), "idempotency key") {
+		t.Fatalf("second content = %s, want idempotency error", second.Content)
+	}
+}
+
+func TestExecutorRejectsUnresolvableIdempotencyKey(t *testing.T) {
+	store := state.NewMemoryStore()
+	ctx := ContextWithIdempotencyStore(context.Background(), store, "exec_1")
+	called := false
+	executor := NewExecutor()
+	err := executor.Register("publish", func(ctx context.Context, args lookupArgs) (lookupResult, error) {
+		called = true
+		return lookupResult{Answer: args.Query}, nil
+	}, WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := executor.Execute(ctx, provider.ToolCall{
+		ID:        "call_1",
+		Name:      "publish",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("IsError = false, want idempotency error result")
+	}
+	if called {
+		t.Fatal("tool was called despite unresolvable idempotency key")
+	}
+	if !strings.Contains(string(result.Content), "resolve idempotency key") {
+		t.Fatalf("content = %s, want key resolution error", result.Content)
 	}
 }
 

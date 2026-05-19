@@ -83,6 +83,9 @@ func (h *Harness) executeSingleToolCall(ctx context.Context, session runtimecore
 
 func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, call provider.ToolCall) toolCallOutcome {
 	toolCtx := contextWithExecution(ctx, session, h.budgetLedger)
+	if h.stateStore != nil {
+		toolCtx = tools.ContextWithIdempotencyStore(toolCtx, h.stateStore, session.ExecID)
+	}
 	toolCtx = tools.ContextWithPermissionDecisionObserver(toolCtx, func(ctx context.Context, audit tools.PermissionDecisionAudit) error {
 		return h.emitPermissionDecision(ctx, session, audit)
 	})

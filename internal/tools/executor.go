@@ -147,6 +147,9 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
 		return errorResult(call, err), nil
 	}
+	if err := reserveIdempotency(ctx, tool, call.Arguments); err != nil {
+		return errorResult(call, err), nil
+	}
 	args, err := buildCallArgs(ctx, tool.typ, tool.metadata, call.Arguments)
 	if err != nil {
 		return errorResult(call, err), nil
