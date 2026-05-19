@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"ouvrier/internal/events"
 	"ouvrier/internal/harness"
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 	"ouvrier/internal/tools"
 )
@@ -128,6 +130,141 @@ func TestRunPassesSessionThroughToolContext(t *testing.T) {
 	}
 	if out.Status != harness.StatusCompleted {
 		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+}
+
+func TestRunEmitsPermissionDecisionForAllowedToolCallThroughEventStreamAndHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventPermissionDecision, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "lookup",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need lookup", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	executor := tools.NewExecutor()
+	if err := executor.Register("lookup", func(ctx context.Context, args harnessLookupArgs) (harnessLookupResult, error) {
+		return harnessLookupResult{Answer: "workers"}, nil
+	}, tools.WithMetadata(tools.Metadata{Effect: policy.EffectReadOnly})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithToolExecutor(executor),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+
+	event, ok := findEvent(stream.List(), events.EventPermissionDecision)
+	if !ok {
+		t.Fatalf("events = %+v, want permission decision event", stream.List())
+	}
+	if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["tool"] != "lookup" ||
+		event.Payload["tool_call_id"] != "call_1" ||
+		event.Payload["allowed"] != true ||
+		event.Payload["effect"] != string(policy.EffectReadOnly) ||
+		event.Payload["checked"] != true {
+		t.Fatalf("event payload = %+v, want allowed lookup decision with hook enrichment", event.Payload)
+	}
+	if _, ok := event.Payload["arguments"]; ok {
+		t.Fatalf("event payload = %+v, must not include tool arguments", event.Payload)
+	}
+}
+
+func TestRunEmitsPermissionDecisionForDeniedToolCall(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_publish", Name: "publish", Arguments: []byte(`{"token":"secret"}`)}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need publish", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	called := false
+	executor := tools.NewExecutor()
+	if err := executor.Register("publish", func(ctx context.Context) error {
+		called = true
+		return nil
+	}, tools.WithMetadata(tools.Metadata{
+		Effect:           policy.EffectSideEffecting,
+		SideEffects:      []string{"email"},
+		RequiresApproval: true,
+	})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithToolExecutor(executor),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if called {
+		t.Fatal("tool function was called after permission denial")
+	}
+
+	event, ok := findEvent(stream.List(), events.EventPermissionDecision)
+	if !ok {
+		t.Fatalf("events = %+v, want permission decision event", stream.List())
+	}
+	if event.Payload["tool"] != "publish" ||
+		event.Payload["tool_call_id"] != "call_publish" ||
+		event.Payload["allowed"] != false ||
+		event.Payload["requires_approval"] != true ||
+		event.Payload["effect"] != string(policy.EffectSideEffecting) {
+		t.Fatalf("event payload = %+v, want denied publish decision", event.Payload)
+	}
+	if event.Payload["reason"] == "" {
+		t.Fatalf("event payload = %+v, want denial reason", event.Payload)
+	}
+	if _, ok := event.Payload["arguments"]; ok {
+		t.Fatalf("event payload = %+v, must not include tool arguments", event.Payload)
+	}
+
+	last := p.requests[1].Messages[len(p.requests[1].Messages)-1]
+	result := last.Blocks[0].ToolResult
+	if result == nil || !result.IsError {
+		t.Fatalf("tool result = %+v, want permission error result", result)
 	}
 }
 

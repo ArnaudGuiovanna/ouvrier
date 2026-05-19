@@ -6,8 +6,10 @@ import (
 	"sync"
 
 	"ouvrier/internal/events"
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 	runtimecore "ouvrier/internal/runtime"
+	"ouvrier/internal/tools"
 )
 
 type toolCallOutcome struct {
@@ -80,7 +82,11 @@ func (h *Harness) executeSingleToolCall(ctx context.Context, session runtimecore
 }
 
 func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, call provider.ToolCall) toolCallOutcome {
-	result, err := h.toolExecutor.Execute(contextWithExecution(ctx, session, h.budgetLedger), call)
+	toolCtx := contextWithExecution(ctx, session, h.budgetLedger)
+	toolCtx = tools.ContextWithPermissionDecisionObserver(toolCtx, func(ctx context.Context, audit tools.PermissionDecisionAudit) error {
+		return h.emitPermissionDecision(ctx, session, audit)
+	})
+	result, err := h.toolExecutor.Execute(toolCtx, call)
 	if err != nil {
 		if payload, ok := h.wallClockBudgetPayload(ctx); ok {
 			return toolCallOutcome{budgetPayload: payload}
@@ -115,4 +121,35 @@ func (h *Harness) emitBeforeToolCall(ctx context.Context, session runtimecore.Se
 	return h.emit(ctx, session, events.EventBeforeTool, map[string]any{
 		"tool": call.Name,
 	})
+}
+
+func (h *Harness) emitPermissionDecision(ctx context.Context, session runtimecore.Session, audit tools.PermissionDecisionAudit) error {
+	allowed := audit.Decision.Allowed && audit.Err == nil
+	payload := map[string]any{
+		"action":            string(audit.Action.Kind),
+		"tool":              audit.Action.ToolName,
+		"tool_call_id":      audit.Action.ToolCallID,
+		"allowed":           allowed,
+		"effect":            string(normalizePermissionEffect(audit.Action.Effect)),
+		"requires_approval": audit.Action.RequiresApproval,
+	}
+	if audit.Action.IdempotencyKey != "" {
+		payload["idempotency_key_declared"] = true
+	}
+	if len(audit.Action.SideEffects) > 0 {
+		payload["side_effects"] = append([]string(nil), audit.Action.SideEffects...)
+	}
+	if audit.Err != nil {
+		payload["error"] = audit.Err.Error()
+	} else if !audit.Decision.Allowed && audit.Decision.Reason != "" {
+		payload["reason"] = audit.Decision.Reason
+	}
+	return h.emit(ctx, session, events.EventPermissionDecision, payload)
+}
+
+func normalizePermissionEffect(effect policy.Effect) policy.Effect {
+	if effect == "" {
+		return policy.EffectSideEffecting
+	}
+	return effect
 }
