@@ -353,7 +353,7 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 	}
 	defer route.releaseWorker()
 
-	output, err := rt.runPlan(req.Context(), route.plan, input)
+	result, err := rt.runPlanResult(req.Context(), route.plan, input)
 	if err != nil {
 		switch {
 		case errors.Is(err, errHTTPProviderNotConfigured):
@@ -365,10 +365,11 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 		}
 		return
 	}
-	if err := validateTerminalReplyOutput(route.plan, output); err != nil {
+	if err := rt.validateObservedTerminalReplyOutput(req.Context(), route.plan, result); err != nil {
 		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 		return
 	}
+	output := result.Output
 
 	switch route.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:

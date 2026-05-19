@@ -26,6 +26,7 @@ type httpRuntime struct {
 	mcpConnector mcpConnector
 	stateStore   state.Store
 	eventStream  *events.EventStream
+	hookBus      *events.HookBus
 	adminToken   string
 	adminRoutes  []httpRoute
 }
@@ -58,7 +59,12 @@ func defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 }
 
 func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input string) (string, error) {
-	return rt.runSteps(ctx, plan.Steps, input, planRunScope{})
+	result, err := rt.runPlanResult(ctx, plan, input)
+	return result.Output, err
+}
+
+func (rt httpRuntime) runPlanResult(ctx context.Context, plan runtimeplan.Plan, input string) (planRunResult, error) {
+	return rt.runStepsResult(ctx, plan.Steps, input, planRunScope{})
 }
 
 type planRunScope struct {
@@ -66,9 +72,21 @@ type planRunScope struct {
 	budgetLedger  *harness.BudgetLedger
 }
 
+type planRunResult struct {
+	Output     string
+	Session    runtimeplan.Session
+	HasSession bool
+}
+
 func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, input string, scope planRunScope) (string, error) {
+	result, err := rt.runStepsResult(ctx, steps, input, scope)
+	return result.Output, err
+}
+
+func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.Step, input string, scope planRunScope) (planRunResult, error) {
+	result := planRunResult{Output: input}
 	if len(steps) == 0 {
-		return input, nil
+		return result, nil
 	}
 	executor := tools.NewExecutor()
 	if rt.toolExecutor != nil {
@@ -79,12 +97,12 @@ func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, in
 	for _, step := range steps {
 		specs, closeMCP, err := rt.registerStepTools(ctx, executor, step)
 		if err != nil {
-			return "", err
+			return result, err
 		}
 		stepProvider, err := rt.providerForModel(step.Model)
 		if err != nil {
 			_ = closeMCP()
-			return "", err
+			return result, err
 		}
 		harnessOptions := []harness.Option{
 			harness.WithModel(step.Model),
@@ -96,6 +114,9 @@ func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, in
 		}
 		if rt.eventStream != nil {
 			harnessOptions = append(harnessOptions, harness.WithEventStream(rt.eventStream))
+		}
+		if rt.hookBus != nil {
+			harnessOptions = append(harnessOptions, harness.WithHookBus(rt.hookBus))
 		}
 		if step.ResultSchema != nil {
 			harnessOptions = append(harnessOptions, harness.WithResultSchema(step.ResultSchema))
@@ -115,22 +136,27 @@ func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, in
 		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {
 			_ = closeMCP()
-			return "", err
+			return result, err
 		}
 		out, err := h.Run(ctx, current)
+		result.Session = out.Session
+		result.HasSession = out.Session.SessionID != ""
 		closeErr := closeMCP()
 		if err != nil {
-			return "", err
+			result.Output = out.Text
+			return result, err
 		}
 		if closeErr != nil {
-			return "", closeErr
+			return result, closeErr
 		}
 		if out.Status != harness.StatusCompleted {
-			return "", fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, out.Status)
+			result.Output = out.Text
+			return result, fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, out.Status)
 		}
 		current = out.Text
+		result.Output = current
 	}
-	return current, nil
+	return result, nil
 }
 
 func (rt httpRuntime) providerForModel(model string) (provider.Provider, error) {

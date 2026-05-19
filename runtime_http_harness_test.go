@@ -306,6 +306,180 @@ func TestNewHTTPHandlerValidatesTerminalReplySchemaWithoutPipeOutput(t *testing.
 	}
 }
 
+func TestNewHTTPHandlerRecordsTerminalReplySchemaViolationWithoutPipeOutput(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	violations, err := store.SchemaViolations(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(violations))
+	}
+	if violations[0].SessionID == "" || violations[0].ExecID == "" {
+		t.Fatalf("violation = %+v, want session identifiers", violations[0])
+	}
+	if violations[0].SchemaName != "ovr.httpTestReply" {
+		t.Fatalf("schema name = %q, want ovr.httpTestReply", violations[0].SchemaName)
+	}
+	event, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaViolation)
+	if !ok {
+		t.Fatalf("events = %+v, want schema violation event", stream.List())
+	}
+	if event.SessionID != violations[0].SessionID || event.ExecID != violations[0].ExecID {
+		t.Fatalf("event = %+v, want violation identifiers %+v", event, violations[0])
+	}
+}
+
+func TestNewHTTPHandlerEmitsTerminalReplySchemaValidationPassedWithoutPipeOutput(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	event, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaValidationPassed)
+	if !ok {
+		t.Fatalf("events = %+v, want schema validation passed event", stream.List())
+	}
+	if event.SessionID == "" || event.ExecID == "" || event.TraceID == "" {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["schema"] != "ovr.httpTestReply" {
+		t.Fatalf("event payload = %+v, want schema ovr.httpTestReply", event.Payload)
+	}
+	if _, ok := event.Payload["output"]; ok {
+		t.Fatalf("event payload = %+v, must not include raw output", event.Payload)
+	}
+}
+
+func TestNewHTTPHandlerPassesTerminalReplySchemaEventThroughHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventSchemaValidationPassed, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, eventStream: stream, hookBus: hooks})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	event, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaValidationPassed)
+	if !ok {
+		t.Fatalf("events = %+v, want schema validation passed event", stream.List())
+	}
+	if event.Payload["checked"] != true {
+		t.Fatalf("event payload = %+v, want hook enrichment", event.Payload)
+	}
+}
+
+func TestNewHTTPHandlerPassesPipeSchemaEventsThroughHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventSchemaValidationPassed, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Output[httpTestReply](),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, eventStream: stream, hookBus: hooks})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var matches []events.Event
+	for _, event := range stream.List() {
+		if event.Kind == events.EventSchemaValidationPassed {
+			matches = append(matches, event)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("schema validation passed events = %d, want 1; events=%+v", len(matches), stream.List())
+	}
+	if matches[0].Payload["checked"] != true {
+		t.Fatalf("event payload = %+v, want hook enrichment", matches[0].Payload)
+	}
+}
+
 func TestNewHTTPHandlerPassesPipeToolsToHarnessRuntime(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
@@ -346,6 +520,15 @@ func TestNewHTTPHandlerPassesPipeToolsToHarnessRuntime(t *testing.T) {
 	if len(tools[0].InputSchema) == 0 {
 		t.Fatal("tool input schema is empty")
 	}
+}
+
+func findRuntimeHTTPEvent(recorded []events.Event, kind events.EventKind) (events.Event, bool) {
+	for _, event := range recorded {
+		if event.Kind == kind {
+			return event, true
+		}
+	}
+	return events.Event{}, false
 }
 
 type httpSubAgentReply struct {

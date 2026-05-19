@@ -18,6 +18,7 @@ import (
 	"ouvrier/internal/events"
 	runtimeplan "ouvrier/internal/runtime"
 	"ouvrier/internal/schema"
+	"ouvrier/internal/state"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -132,7 +133,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	}
 	defer r.releaseWorker()
 
-	output, err := r.runtime.runPlan(req.Context(), r.plan, input)
+	result, err := r.runtime.runPlanResult(req.Context(), r.plan, input)
 	if err != nil {
 		switch {
 		case errors.Is(err, errHTTPProviderNotConfigured):
@@ -144,10 +145,11 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := validateTerminalReplyOutput(r.plan, output); err != nil {
+	if err := r.runtime.validateObservedTerminalReplyOutput(req.Context(), r.plan, result); err != nil {
 		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 		return
 	}
+	output := result.Output
 
 	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
@@ -268,6 +270,80 @@ func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
 		return nil
 	}
 	return schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(output))
+}
+
+func (rt httpRuntime) validateObservedTerminalReplyOutput(ctx context.Context, plan runtimeplan.Plan, result planRunResult) error {
+	if terminalReplySchemaAlreadyValidated(plan) {
+		return nil
+	}
+	if plan.Terminal.Kind != runtimeplan.TerminalReply || plan.Terminal.ResultSchema == nil {
+		return nil
+	}
+	if err := schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(result.Output)); err != nil {
+		recordErr := rt.recordTerminalSchemaViolation(ctx, plan.Terminal.ResultSchema, result, err)
+		return errors.Join(err, recordErr)
+	}
+	return rt.emitRuntimeEvent(ctx, result, events.EventSchemaValidationPassed, map[string]any{
+		"schema": plan.Terminal.ResultSchema.Name,
+	})
+}
+
+func terminalReplySchemaAlreadyValidated(plan runtimeplan.Plan) bool {
+	if plan.Terminal.Kind != runtimeplan.TerminalReply || plan.Terminal.ResultSchema == nil || len(plan.Steps) == 0 {
+		return false
+	}
+	lastStep := plan.Steps[len(plan.Steps)-1]
+	if lastStep.ResultSchema == nil {
+		return false
+	}
+	return lastStep.ResultSchema.Name == plan.Terminal.ResultSchema.Name
+}
+
+func (rt httpRuntime) recordTerminalSchemaViolation(ctx context.Context, contract *runtimeplan.ResultSchema, result planRunResult, validationErr error) error {
+	violation := state.SchemaViolation{
+		SchemaName: contract.Name,
+		Error:      validationErr.Error(),
+	}
+	if result.HasSession {
+		violation.ExecID = result.Session.ExecID
+		violation.SessionID = result.Session.SessionID
+	}
+	var err error
+	if rt.stateStore != nil {
+		_, err = rt.stateStore.AddSchemaViolation(ctx, violation)
+	}
+	emitErr := rt.emitRuntimeEvent(ctx, result, events.EventSchemaViolation, map[string]any{
+		"schema": contract.Name,
+		"error":  validationErr.Error(),
+	})
+	return errors.Join(err, emitErr)
+}
+
+func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult, kind events.EventKind, payload map[string]any) error {
+	if rt.eventStream == nil && rt.hookBus == nil {
+		return nil
+	}
+	event := events.Event{
+		Kind:    kind,
+		Payload: payload,
+	}
+	if result.HasSession {
+		event.ExecID = result.Session.ExecID
+		event.SessionID = result.Session.SessionID
+		event.TraceID = result.Session.TraceID
+	}
+	if rt.hookBus != nil {
+		var err error
+		event, err = rt.hookBus.Emit(ctx, event)
+		if err != nil {
+			return err
+		}
+	}
+	if rt.eventStream == nil {
+		return nil
+	}
+	_, err := rt.eventStream.Append(ctx, event)
+	return err
 }
 
 func applyPushTerminal(ctx context.Context, terminal runtimeplan.Terminal, output string) error {
