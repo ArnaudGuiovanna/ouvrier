@@ -26,6 +26,8 @@ type config struct {
 	model           string
 	systemPrompt    string
 	budget          runtimecore.Budget
+	budgetSet       bool
+	parentSession   *runtimecore.Session
 	toolExecutor    *tools.Executor
 	tools           []provider.ToolSpec
 	stateStore      state.Store
@@ -69,6 +71,7 @@ func WithMaxIterations(max int) Option {
 			return errors.New("max iterations must be greater than zero")
 		}
 		cfg.budget.MaxIterations = max
+		cfg.budgetSet = true
 		return nil
 	}
 }
@@ -100,6 +103,21 @@ func WithBudget(budget runtimecore.Budget) Option {
 			budget.MaxWallClock = cfg.budget.MaxWallClock
 		}
 		cfg.budget = budget
+		cfg.budgetSet = true
+		return nil
+	}
+}
+
+func WithParentSession(parent runtimecore.Session) Option {
+	return func(cfg *config) error {
+		if parent.ExecID == "" || parent.SessionID == "" || parent.TraceID == "" {
+			return errors.New("parent session must include exec, session, and trace IDs")
+		}
+		parentCopy := parent
+		cfg.parentSession = &parentCopy
+		if !cfg.budgetSet {
+			cfg.budget = parent.Budget
+		}
 		return nil
 	}
 }

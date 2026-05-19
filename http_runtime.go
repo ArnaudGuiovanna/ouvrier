@@ -57,7 +57,15 @@ func defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 }
 
 func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input string) (string, error) {
-	if len(plan.Steps) == 0 {
+	return rt.runSteps(ctx, plan.Steps, input, planRunScope{})
+}
+
+type planRunScope struct {
+	parentSession *runtimeplan.Session
+}
+
+func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, input string, scope planRunScope) (string, error) {
+	if len(steps) == 0 {
 		return input, nil
 	}
 	executor := rt.toolExecutor
@@ -66,7 +74,7 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 	}
 
 	current := input
-	for _, step := range plan.Steps {
+	for _, step := range steps {
 		specs, closeMCP, err := rt.registerStepTools(ctx, executor, step)
 		if err != nil {
 			return "", err
@@ -89,6 +97,9 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 		}
 		if step.ResultSchema != nil {
 			harnessOptions = append(harnessOptions, harness.WithResultSchema(step.ResultSchema))
+		}
+		if scope.parentSession != nil {
+			harnessOptions = append(harnessOptions, harness.WithParentSession(*scope.parentSession))
 		}
 		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {
@@ -139,6 +150,11 @@ func (rt httpRuntime) registerStepTools(ctx context.Context, executor *tools.Exe
 	if err != nil {
 		return nil, nil, err
 	}
+	subAgentSpecs, err := registerRuntimeSubAgents(rt, executor, step.SubAgents)
+	if err != nil {
+		return nil, nil, err
+	}
+	specs = append(specs, subAgentSpecs...)
 
 	sessions := make([]mcpRuntimeSession, 0, len(step.MCPServers))
 	closeSessions := func() error {

@@ -504,6 +504,96 @@ func TestRunPersistsSessionAndExecutionWhenStateStoreConfigured(t *testing.T) {
 	}
 }
 
+func TestRunWithParentSessionCreatesChildWithoutFinishingExecution(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	parent, err := runtimecore.NewSession("anthropic/claude-sonnet-4-6",
+		runtimecore.WithSessionIDs("exec_parent", "sess_parent", "trace_parent"),
+		runtimecore.WithSessionBudget(runtimecore.Budget{
+			MaxIterations: 9,
+			MaxTokens:     90,
+			MaxCostUSD:    0.90,
+			MaxWallClock:  time.Minute,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	if err := store.SaveExecution(context.Background(), state.Execution{
+		ExecID:    parent.ExecID,
+		TraceID:   parent.TraceID,
+		Status:    state.ExecutionRunning,
+		StartedAt: parent.StartedAt,
+	}); err != nil {
+		t.Fatalf("SaveExecution returned error: %v", err)
+	}
+
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "child done",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-haiku-4-5"),
+		harness.WithParentSession(parent),
+		harness.WithStateStore(store),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if out.Session.ExecID != parent.ExecID || out.Session.TraceID != parent.TraceID {
+		t.Fatalf("child session = %+v, want parent exec/trace", out.Session)
+	}
+	if out.Session.ParentSessionID != parent.SessionID {
+		t.Fatalf("ParentSessionID = %q, want %q", out.Session.ParentSessionID, parent.SessionID)
+	}
+	if out.Session.Budget != parent.Budget {
+		t.Fatalf("child budget = %+v, want inherited %+v", out.Session.Budget, parent.Budget)
+	}
+
+	execution, ok, err := store.Execution(context.Background(), parent.ExecID)
+	if err != nil {
+		t.Fatalf("Execution returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Execution ok = false, want true")
+	}
+	if execution.Status != state.ExecutionRunning || !execution.CompletedAt.IsZero() {
+		t.Fatalf("execution = %+v, want child run to leave root execution running", execution)
+	}
+
+	child, ok, err := store.Session(context.Background(), out.Session.SessionID)
+	if err != nil {
+		t.Fatalf("Session returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Session ok = false, want stored child session")
+	}
+	if child.ParentSessionID != parent.SessionID {
+		t.Fatalf("stored child = %+v, want parent lineage", child)
+	}
+	event, ok := findEvent(stream.List(), events.EventSessionStart)
+	if !ok {
+		t.Fatalf("events = %+v, want child session start", stream.List())
+	}
+	if event.ExecID != parent.ExecID || event.TraceID != parent.TraceID || event.SessionID != out.Session.SessionID {
+		t.Fatalf("event = %+v, want child session identifiers", event)
+	}
+}
+
 func TestRunMarksExecutionFailedOnProviderError(t *testing.T) {
 	store := state.NewMemoryStore()
 	boom := errors.New("provider exploded")

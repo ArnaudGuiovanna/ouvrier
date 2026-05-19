@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"ouvrier/internal/events"
 	"ouvrier/internal/provider"
 	"ouvrier/internal/state"
 )
@@ -221,5 +222,130 @@ func TestNewHTTPHandlerPassesPipeToolsToHarnessRuntime(t *testing.T) {
 	}
 	if len(tools[0].InputSchema) == 0 {
 		t.Fatal("tool input schema is empty")
+	}
+}
+
+type httpSubAgentReply struct {
+	Text string `json:"text"`
+}
+
+func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{
+				Text:       "need translation",
+				StopReason: provider.StopToolUse,
+				ToolCalls: []provider.ToolCall{{
+					ID:        "call_translate",
+					Name:      "translate",
+					Arguments: []byte(`{"input":"hello"}`),
+				}},
+			},
+			{
+				Text:       `{"text":"bonjour"}`,
+				StopReason: provider.StopEndTurn,
+			},
+			{
+				Text:       `{"status":"ok"}`,
+				StopReason: provider.StopEndTurn,
+			},
+		},
+	}
+	translator := Pipeline(
+		Pipe("translate text",
+			Model("anthropic/claude-haiku-4-5"),
+			Output[httpSubAgentReply](),
+		),
+	)
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /emails"),
+		Pipe("draft multilingual email",
+			Model("anthropic/claude-sonnet-4-6"),
+			SubAgent("translate", translator, MaxParallel(2)),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/emails", strings.NewReader(`{"body":"hello"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(scripted.requests) != 3 {
+		t.Fatalf("provider calls = %d, want root, child, root", len(scripted.requests))
+	}
+	if len(scripted.requests[0].Tools) != 1 || scripted.requests[0].Tools[0].Name != "translate" {
+		t.Fatalf("root tools = %+v, want translate subagent", scripted.requests[0].Tools)
+	}
+	if scripted.requests[1].Model != "anthropic/claude-haiku-4-5" {
+		t.Fatalf("child model = %q, want haiku", scripted.requests[1].Model)
+	}
+	if scripted.requests[1].Messages[0].Text() != "hello" {
+		t.Fatalf("child input = %q, want hello", scripted.requests[1].Messages[0].Text())
+	}
+
+	lastRoot := scripted.requests[2]
+	if lastRoot.Model != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("final root model = %q, want sonnet", lastRoot.Model)
+	}
+	toolResult := lastRoot.Messages[len(lastRoot.Messages)-1].Blocks[0].ToolResult
+	if toolResult == nil || toolResult.IsError || !strings.Contains(string(toolResult.Content), "bonjour") {
+		t.Fatalf("tool result = %+v, want successful child output", toolResult)
+	}
+
+	sessions, err := store.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions returned error: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %d, want root and child", len(sessions))
+	}
+	var rootSessionID, execID, traceID string
+	for _, session := range sessions {
+		if session.ParentSessionID == "" {
+			rootSessionID = session.SessionID
+			execID = session.ExecID
+			traceID = session.TraceID
+			break
+		}
+	}
+	if rootSessionID == "" {
+		t.Fatalf("sessions = %+v, want root session", sessions)
+	}
+	var child bool
+	for _, session := range sessions {
+		if session.ParentSessionID == "" {
+			continue
+		}
+		child = true
+		if session.ParentSessionID != rootSessionID || session.ExecID != execID || session.TraceID != traceID {
+			t.Fatalf("child session = %+v, want parent %q exec %q trace %q", session, rootSessionID, execID, traceID)
+		}
+	}
+	if !child {
+		t.Fatalf("sessions = %+v, want root and child lineage", sessions)
+	}
+
+	var taskStarted, taskCompleted bool
+	for _, event := range stream.List() {
+		if event.Kind == events.EventTaskStarted && event.Payload["subagent"] == "translate" {
+			taskStarted = true
+		}
+		if event.Kind == events.EventTaskCompleted && event.Payload["subagent"] == "translate" {
+			taskCompleted = true
+		}
+	}
+	if !taskStarted || !taskCompleted {
+		t.Fatalf("events = %+v, want subagent task start and completion", stream.List())
 	}
 }

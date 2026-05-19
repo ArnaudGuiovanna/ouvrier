@@ -83,3 +83,48 @@ func TestRunExecutesToolCallsThroughExecutor(t *testing.T) {
 		t.Fatalf("tool answer = %q, want workers", decoded.Answer)
 	}
 }
+
+type toolHandlerFunc func(context.Context, provider.ToolCall) (provider.ToolResult, error)
+
+func (f toolHandlerFunc) Execute(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {
+	return f(ctx, call)
+}
+
+func TestRunPassesSessionThroughToolContext(t *testing.T) {
+	call := provider.ToolCall{ID: "call_1", Name: "inspect_session", Arguments: []byte(`{}`)}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need session", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	executor := tools.NewExecutor()
+	if err := executor.RegisterHandler("inspect_session", toolHandlerFunc(func(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {
+		session, ok := harness.SessionFromContext(ctx)
+		if !ok {
+			t.Fatal("SessionFromContext ok = false, want true")
+		}
+		if session.ExecID == "" || session.SessionID == "" || session.TraceID == "" {
+			t.Fatalf("session identifiers are empty: %+v", session)
+		}
+		content, _ := json.Marshal(map[string]string{"session_id": session.SessionID})
+		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: content}, nil
+	})); err != nil {
+		t.Fatalf("RegisterHandler returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithToolExecutor(executor),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+}

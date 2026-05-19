@@ -18,6 +18,7 @@ type Harness struct {
 	model           string
 	systemPrompt    string
 	budget          runtimecore.Budget
+	parentSession   *runtimecore.Session
 	toolExecutor    *tools.Executor
 	tools           []provider.ToolSpec
 	stateStore      state.Store
@@ -54,6 +55,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		model:           cfg.model,
 		systemPrompt:    cfg.systemPrompt,
 		budget:          cfg.budget,
+		parentSession:   cfg.parentSession,
 		toolExecutor:    cfg.toolExecutor,
 		tools:           append([]provider.ToolSpec(nil), cfg.tools...),
 		stateStore:      cfg.stateStore,
@@ -76,9 +78,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		defer cancel()
 	}
 
-	session, err := runtimecore.NewSession(h.model,
-		runtimecore.WithSessionBudget(h.budget),
-	)
+	session, err := h.newSession()
 	if err != nil {
 		return Outcome{Status: StatusFailed}, err
 	}
@@ -155,7 +155,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 				out.Status = StatusFailed
 				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 			}
-			result, err := h.toolExecutor.Execute(runCtx, call)
+			result, err := h.toolExecutor.Execute(contextWithSession(runCtx, session), call)
 			if err != nil {
 				if payload, ok := h.wallClockBudgetPayload(runCtx); ok {
 					return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
@@ -213,7 +213,25 @@ func waitRetryBackoff(ctx context.Context, backoff time.Duration, attempt int) e
 	}
 }
 
+func (h *Harness) newSession() (runtimecore.Session, error) {
+	opts := []runtimecore.SessionOption{runtimecore.WithSessionBudget(h.budget)}
+	if h.parentSession != nil {
+		return runtimecore.NewChildSession(*h.parentSession, h.model, opts...)
+	}
+	return runtimecore.NewSession(h.model, opts...)
+}
+
 func (h *Harness) startExecution(ctx context.Context, session runtimecore.Session) error {
+	if h.parentSession != nil {
+		if h.stateStore != nil {
+			if err := h.stateStore.SaveSession(ctx, session); err != nil {
+				return err
+			}
+		}
+		return h.emit(ctx, session, events.EventSessionStart, map[string]any{
+			"model": h.model,
+		})
+	}
 	if h.stateStore == nil {
 		return h.emit(ctx, session, events.EventSessionStart, map[string]any{
 			"model": h.model,
@@ -241,7 +259,7 @@ func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Sessi
 	emitErr := h.emit(ctx, session, events.EventSessionEnd, map[string]any{
 		"status": string(status),
 	})
-	if h.stateStore == nil {
+	if h.stateStore == nil || h.parentSession != nil {
 		return emitErr
 	}
 	return errors.Join(emitErr, h.stateStore.SaveExecution(ctx, state.Execution{

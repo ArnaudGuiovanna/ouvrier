@@ -11,12 +11,17 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 	if !ok {
 		return runtimeplan.Step{}, ErrInvalidNode
 	}
+	subAgents, err := runtimeSubAgentsFromPipe(pipe.config.subAgents)
+	if err != nil {
+		return runtimeplan.Step{}, err
+	}
 	step := runtimeplan.Step{
 		Kind:       runtimeplan.StepPipe,
 		Goal:       pipe.goal,
 		Model:      pipe.config.model,
 		Tools:      runtimeToolsFromPipe(pipe.config.tools),
 		MCPServers: runtimeMCPServersFromPipe(pipe.config.mcpServers),
+		SubAgents:  subAgents,
 	}
 	if pipe.config.output != nil {
 		resultSchema, err := resultSchemaFromType(pipe.config.output.typ)
@@ -34,6 +39,40 @@ func runtimeMCPServersFromPipe(servers []mcpSpec) []runtimeplan.MCPServer {
 		out = append(out, runtimeplan.MCPServer{Name: server.name})
 	}
 	return out
+}
+
+func runtimeSubAgentsFromPipe(subAgents []subAgentSpec) ([]runtimeplan.SubAgent, error) {
+	out := make([]runtimeplan.SubAgent, 0, len(subAgents))
+	for _, subAgent := range subAgents {
+		if err := subAgent.validateSubAgent(); err != nil {
+			return nil, err
+		}
+		pipeline, err := compileSubAgentPipeline(subAgent.pipeline)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, runtimeplan.SubAgent{
+			Name:        subAgent.name,
+			Pipeline:    pipeline,
+			MaxParallel: subAgent.maxParallel,
+		})
+	}
+	return out, nil
+}
+
+func compileSubAgentPipeline(pipeline PipelineSpec) (runtimeplan.Pipeline, error) {
+	if err := pipeline.validateSubAgentPipeline(); err != nil {
+		return runtimeplan.Pipeline{}, err
+	}
+	steps := make([]runtimeplan.Step, 0, len(pipeline.nodes))
+	for i, node := range pipeline.nodes {
+		step, err := compileStep(node)
+		if err != nil {
+			return runtimeplan.Pipeline{}, fmt.Errorf("SubAgent pipeline node %d: %w", i, err)
+		}
+		steps = append(steps, step)
+	}
+	return runtimeplan.Pipeline{Steps: steps}, nil
 }
 
 func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {

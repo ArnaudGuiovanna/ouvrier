@@ -38,7 +38,18 @@ type Step struct {
 	Model        string
 	Tools        []Tool
 	MCPServers   []MCPServer
+	SubAgents    []SubAgent
 	ResultSchema *ResultSchema
+}
+
+type SubAgent struct {
+	Name        string
+	Pipeline    Pipeline
+	MaxParallel int
+}
+
+type Pipeline struct {
+	Steps []Step
 }
 
 type Tool struct {
