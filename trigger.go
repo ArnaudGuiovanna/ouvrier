@@ -62,6 +62,10 @@ func (t WebhookEndpoint) validatePushTarget() error {
 	return nil
 }
 
+func (t WebhookEndpoint) pushWebhookURL() string {
+	return t.value
+}
+
 // StreamTrigger is a stream trigger source.
 type StreamTrigger struct {
 	uri string

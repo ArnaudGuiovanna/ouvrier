@@ -108,12 +108,12 @@ func compileTerminal(node Node) (runtimeplan.Terminal, error) {
 		}
 		return compileReplyTerminal(*terminal)
 	case pushNode:
-		return runtimeplan.Terminal{Kind: runtimeplan.TerminalPush}, nil
+		return compilePushTerminal(terminal), nil
 	case *pushNode:
 		if terminal == nil {
 			return runtimeplan.Terminal{}, ErrInvalidNode
 		}
-		return runtimeplan.Terminal{Kind: runtimeplan.TerminalPush}, nil
+		return compilePushTerminal(*terminal), nil
 	case sinkNode:
 		return compileSinkTerminal(terminal), nil
 	case *sinkNode:
@@ -139,6 +139,18 @@ func compileReplyTerminal(node replyNode) (runtimeplan.Terminal, error) {
 		terminal.ResultSchema = resultSchema
 	}
 	return terminal, nil
+}
+
+type webhookPushTarget interface {
+	pushWebhookURL() string
+}
+
+func compilePushTerminal(node pushNode) runtimeplan.Terminal {
+	terminal := runtimeplan.Terminal{Kind: runtimeplan.TerminalPush}
+	if target, ok := node.target.(webhookPushTarget); ok {
+		terminal.PushWebhookURL = target.pushWebhookURL()
+	}
+	return terminal
 }
 
 type fileSinkTarget interface {

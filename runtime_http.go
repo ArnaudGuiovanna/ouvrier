@@ -1,6 +1,7 @@
 package ovr
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,14 +73,27 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		writeJSONStatus(w, http.StatusOK, "ok")
-	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
-		if r.plan.Terminal.Kind == runtimeplan.TerminalSink && r.plan.Terminal.SinkFilePath != "" {
+	case runtimeplan.TerminalPush:
+		if r.plan.Terminal.PushWebhookURL != "" {
 			input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
 			if err != nil {
 				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
 				return
 			}
-			if err := writeFileSink(r.plan.Terminal.SinkFilePath, input); err != nil {
+			if err := applyPushTerminal(req.Context(), r.plan.Terminal, input); err != nil {
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
+		}
+		writeJSONStatus(w, http.StatusAccepted, "accepted")
+	case runtimeplan.TerminalSink:
+		if r.plan.Terminal.SinkFilePath != "" {
+			input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
+			if err != nil {
+				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
+				return
+			}
+			if err := applySinkTerminal(r.plan.Terminal, input); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
@@ -138,6 +152,10 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
 	case runtimeplan.TerminalPush:
+		if err := applyPushTerminal(req.Context(), r.plan.Terminal, output); err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
+		}
 		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
 	case runtimeplan.TerminalSink:
 		if err := applySinkTerminal(r.plan.Terminal, output); err != nil {
@@ -249,6 +267,34 @@ func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
 		return nil
 	}
 	return schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(output))
+}
+
+func applyPushTerminal(ctx context.Context, terminal runtimeplan.Terminal, output string) error {
+	if terminal.PushWebhookURL == "" {
+		return nil
+	}
+	return postWebhook(ctx, terminal.PushWebhookURL, output)
+}
+
+func postWebhook(ctx context.Context, url, output string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBufferString(output))
+	if err != nil {
+		return err
+	}
+	if json.Valid([]byte(output)) {
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("webhook push returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func applySinkTerminal(terminal runtimeplan.Terminal, output string) error {

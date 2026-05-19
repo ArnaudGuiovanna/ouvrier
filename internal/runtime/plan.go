@@ -83,10 +83,11 @@ const (
 )
 
 type Terminal struct {
-	Kind         TerminalKind
-	Async        bool
-	ResultSchema *ResultSchema
-	SinkFilePath string
+	Kind           TerminalKind
+	Async          bool
+	ResultSchema   *ResultSchema
+	SinkFilePath   string
+	PushWebhookURL string
 }
 
 type Plan struct {

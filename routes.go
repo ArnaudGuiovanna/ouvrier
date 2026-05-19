@@ -320,12 +320,16 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 				return
 			}
 			writeJSONStatus(w, http.StatusOK, "ok")
-		case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
-			if route.plan.Terminal.Kind == runtimeplan.TerminalSink {
-				if err := applySinkTerminal(route.plan.Terminal, input); err != nil {
-					writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
-					return
-				}
+		case runtimeplan.TerminalPush:
+			if err := applyPushTerminal(req.Context(), route.plan.Terminal, input); err != nil {
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
+			writeJSONStatus(w, http.StatusAccepted, "accepted")
+		case runtimeplan.TerminalSink:
+			if err := applySinkTerminal(route.plan.Terminal, input); err != nil {
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
 			}
 			writeJSONStatus(w, http.StatusAccepted, "accepted")
 		default:
@@ -370,6 +374,10 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
 	case runtimeplan.TerminalPush:
+		if err := applyPushTerminal(req.Context(), route.plan.Terminal, output); err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
+		}
 		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
 	case runtimeplan.TerminalSink:
 		if err := applySinkTerminal(route.plan.Terminal, output); err != nil {

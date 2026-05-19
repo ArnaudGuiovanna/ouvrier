@@ -94,6 +94,51 @@ func TestHTTPAdminTriggerWritesPipelineOutputToFileSink(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminTriggerPushesPipelineOutputToWebhook(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{
+		adminToken: "secret-admin-token",
+		provider:   scripted,
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/tickets", `{"title":"broken"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"status":"classified"}`)
+}
+
+func TestHTTPAdminTriggerPushesDirectInputToWebhook(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{adminToken: "secret-admin-token"})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/events", `{"event":"created"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"event":"created"}`)
+}
+
 func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "admin-trigger-input.json")
 	handler, err := newHTTPHandlerWithRuntime([]Node{

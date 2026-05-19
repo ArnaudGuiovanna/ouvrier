@@ -222,6 +222,28 @@ func TestCompilePlansCompilesFileSink(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesWebhookPush(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook("https://example.com/hook")),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(plans))
+	}
+
+	terminal := plans[0].Terminal
+	if terminal.Kind != runtimeplan.TerminalPush {
+		t.Fatalf("terminal kind = %q, want %q", terminal.Kind, runtimeplan.TerminalPush)
+	}
+	if terminal.PushWebhookURL != "https://example.com/hook" {
+		t.Fatalf("terminal webhook URL = %q, want https://example.com/hook", terminal.PushWebhookURL)
+	}
+}
+
 func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /jobs", WorkerPool(2)),

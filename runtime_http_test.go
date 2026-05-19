@@ -3,12 +3,14 @@ package ovr
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ouvrier/internal/provider"
 )
@@ -147,6 +149,83 @@ func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerPushesPipelineOutputToWebhook(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	assertWebhookPost(t, posts, `{"status":"classified"}`)
+}
+
+func TestNewHTTPHandlerPushesDirectInputToWebhook(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"event":"created"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	assertWebhookPost(t, posts, `{"event":"created"}`)
+}
+
+func TestNewHTTPHandlerReturnsFailureWhenWebhookPushFails(t *testing.T) {
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(webhook.Close)
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	var body httpStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Status != "pipeline_execution_failed" {
+		t.Fatalf("status body = %q, want pipeline_execution_failed", body.Status)
+	}
+}
+
 func TestNewHTTPHandlerServesMultipleHTTPPipelines(t *testing.T) {
 	handler, err := newHTTPHandler([]Node{
 		From("GET /health"),
@@ -205,5 +284,39 @@ func TestNewHTTPHandlerRejectsNonHTTPPipeline(t *testing.T) {
 	})
 	if !errors.Is(err, ErrRunNotImplemented) {
 		t.Fatalf("newHTTPHandler error = %v, want ErrRunNotImplemented", err)
+	}
+}
+
+func newWebhookPostRecorder(t *testing.T) (*httptest.Server, <-chan string) {
+	t.Helper()
+
+	posts := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			t.Errorf("webhook method = %s, want POST", req.Method)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Errorf("ReadAll webhook body returned error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		posts <- string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	return server, posts
+}
+
+func assertWebhookPost(t *testing.T, posts <-chan string, want string) {
+	t.Helper()
+
+	select {
+	case got := <-posts:
+		if strings.TrimSpace(got) != want {
+			t.Fatalf("webhook body = %q, want %s", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("webhook did not receive POST")
 	}
 }
