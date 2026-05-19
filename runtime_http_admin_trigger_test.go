@@ -60,6 +60,38 @@ func TestHTTPAdminTriggerRunsExistingHTTPRouteThroughHarness(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminTriggerRunsParameterizedHTTPRouteThroughHarness(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler := newTestParameterizedAdminTriggerHTTPHandler(t, httpRuntime{
+		adminToken: "secret-admin-token",
+		provider:   scripted,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "secret-admin-token", `{
+		"method": "POST",
+		"path": "/tickets/T-123",
+		"body": {"title": "broken"}
+	}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body httpStatusResponse
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || body.Output != `{"status":"classified"}` {
+		t.Fatalf("body = %+v, want ok classified output", body)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	input := decodeProviderInput(t, scripted.requests[0].Messages[0].Text())
+	assertRawJSONField(t, input, "body", `{"title":"broken"}`)
+	assertRawJSONField(t, input, "path_params", `{"id":"T-123"}`)
+}
+
 func TestHTTPAdminTriggerMissingHTTPRouteReturnsNotFound(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
@@ -82,6 +114,59 @@ func TestHTTPAdminTriggerMissingHTTPRouteReturnsNotFound(t *testing.T) {
 	}
 	if len(scripted.requests) != 0 {
 		t.Fatalf("provider calls = %d, want 0 for missing route", len(scripted.requests))
+	}
+}
+
+func TestHTTPAdminTriggerParameterizedHTTPRouteConcretePathMismatchReturnsNotFound(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler := newTestParameterizedAdminTriggerHTTPHandler(t, httpRuntime{
+		adminToken: "secret-admin-token",
+		provider:   scripted,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "secret-admin-token", `{
+		"method": "POST",
+		"path": "/projects/T-123",
+		"body": {"title": "broken"}
+	}`))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	var body httpStatusResponse
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "not_found" {
+		t.Fatalf("status body = %q, want not_found", body.Status)
+	}
+	if len(scripted.requests) != 0 {
+		t.Fatalf("provider calls = %d, want 0 for missing concrete route", len(scripted.requests))
+	}
+}
+
+func TestHTTPAdminTriggerParameterizedHTTPRouteExtraSegmentReturnsNotFound(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler := newTestParameterizedAdminTriggerHTTPHandler(t, httpRuntime{
+		adminToken: "secret-admin-token",
+		provider:   scripted,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "secret-admin-token", `{
+		"method": "POST",
+		"path": "/tickets/T-123/comments",
+		"body": {"title": "broken"}
+	}`))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if len(scripted.requests) != 0 {
+		t.Fatalf("provider calls = %d, want 0 for concrete path with extra segment", len(scripted.requests))
 	}
 }
 
@@ -138,6 +223,19 @@ func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	return handler
 }
 
+func newTestParameterizedAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
+	t.Helper()
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets/{id}"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, rt)
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+	return handler
+}
+
 func newAdminTriggerRequest(t *testing.T, token, method, path, body string) *http.Request {
 	t.Helper()
 	payload, err := json.Marshal(struct {
@@ -153,6 +251,16 @@ func newAdminTriggerRequest(t *testing.T, token, method, path, body string) *htt
 		t.Fatalf("Marshal admin trigger payload returned error: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/admin/trigger", strings.NewReader(string(payload)))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req
+}
+
+func newAdminTriggerJSONRequest(t *testing.T, token, payload string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/admin/trigger", strings.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

@@ -171,6 +171,10 @@ func buildHTTPRequestInput(req *http.Request, routePath string) (string, error) 
 		return "", err
 	}
 	pathParams := httpPathParams(req, routePath)
+	return buildHTTPPipelineInput(body, pathParams)
+}
+
+func buildHTTPPipelineInput(body string, pathParams map[string]string) (string, error) {
 	if len(pathParams) == 0 {
 		return body, nil
 	}

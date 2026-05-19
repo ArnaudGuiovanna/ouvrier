@@ -227,7 +227,7 @@ func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	route, ok := rt.adminTriggerRoute(trigger.Method, trigger.Path)
+	route, pathParams, ok := rt.adminTriggerRoute(trigger.Method, trigger.Path)
 	if !ok {
 		writeJSONStatus(w, http.StatusNotFound, "not_found")
 		return
@@ -237,16 +237,78 @@ func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
 		return
 	}
-	rt.executeAdminTriggerRoute(w, req, route, body)
+	input, err := buildHTTPPipelineInput(body, pathParams)
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+		return
+	}
+	rt.executeAdminTriggerRoute(w, req, route, input)
 }
 
-func (rt httpRuntime) adminTriggerRoute(method, path string) (httpRoute, bool) {
+func (rt httpRuntime) adminTriggerRoute(method, path string) (httpRoute, map[string]string, bool) {
 	for _, route := range rt.adminRoutes {
 		if route.method == method && route.path == path {
-			return route, true
+			return route, nil, true
 		}
 	}
-	return httpRoute{}, false
+	for _, route := range rt.adminRoutes {
+		if route.method != method {
+			continue
+		}
+		pathParams, ok := matchHTTPRoutePath(route.path, path)
+		if ok {
+			return route, pathParams, true
+		}
+	}
+	return httpRoute{}, nil, false
+}
+
+func matchHTTPRoutePath(routePath, actualPath string) (map[string]string, bool) {
+	if routePath == actualPath {
+		return nil, true
+	}
+	if !strings.HasPrefix(routePath, "/") || !strings.HasPrefix(actualPath, "/") {
+		return nil, false
+	}
+	routeSegments := splitHTTPPath(routePath)
+	actualSegments := splitHTTPPath(actualPath)
+	if len(routeSegments) != len(actualSegments) {
+		return nil, false
+	}
+
+	params := make(map[string]string)
+	for i, routeSegment := range routeSegments {
+		if name, ok := singleHTTPPathParamName(routeSegment); ok {
+			params[name] = actualSegments[i]
+			continue
+		}
+		if routeSegment != actualSegments[i] {
+			return nil, false
+		}
+	}
+	if len(params) == 0 {
+		return nil, false
+	}
+	return params, true
+}
+
+func splitHTTPPath(path string) []string {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" {
+		return nil
+	}
+	return strings.Split(path, "/")
+}
+
+func singleHTTPPathParamName(segment string) (string, bool) {
+	if len(segment) < 3 || !strings.HasPrefix(segment, "{") || !strings.HasSuffix(segment, "}") {
+		return "", false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(segment, "{"), "}")
+	if name == "" || strings.Contains(name, "...") {
+		return "", false
+	}
+	return name, true
 }
 
 func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.Request, route httpRoute, input string) {
