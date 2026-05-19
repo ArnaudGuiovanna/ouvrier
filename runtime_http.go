@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"ouvrier/internal/events"
 	runtimeplan "ouvrier/internal/runtime"
 	"ouvrier/internal/schema"
 )
@@ -87,13 +88,13 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	case runtimeplan.TerminalSink:
-		if r.plan.Terminal.SinkFilePath != "" {
+		if r.plan.Terminal.SinkFilePath != "" || r.plan.Terminal.SinkLog {
 			input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
 			if err != nil {
 				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
 				return
 			}
-			if err := applySinkTerminal(r.plan.Terminal, input); err != nil {
+			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, input, "input"); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
@@ -158,7 +159,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
 	case runtimeplan.TerminalSink:
-		if err := applySinkTerminal(r.plan.Terminal, output); err != nil {
+		if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, output, "output"); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
@@ -297,11 +298,82 @@ func postWebhook(ctx context.Context, url, output string) error {
 	return nil
 }
 
-func applySinkTerminal(terminal runtimeplan.Terminal, output string) error {
+func (rt httpRuntime) applySinkTerminal(ctx context.Context, terminal runtimeplan.Terminal, output, payloadKey string) error {
 	if terminal.SinkFilePath == "" {
+		if terminal.SinkLog {
+			return rt.appendLogSinkEvent(ctx, payloadKey, output)
+		}
 		return nil
 	}
 	return writeFileSink(terminal.SinkFilePath, output)
+}
+
+func (rt httpRuntime) appendLogSinkEvent(ctx context.Context, payloadKey, output string) error {
+	if rt.eventStream == nil {
+		return nil
+	}
+	_, err := rt.eventStream.Append(ctx, events.Event{
+		Kind: events.EventSinkLogged,
+		Payload: map[string]any{
+			"target":   "log",
+			payloadKey: terminalLogPayload(output),
+		},
+	})
+	return err
+}
+
+func terminalLogPayload(output string) any {
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err == nil {
+		if containsSensitiveJSONValue(decoded) {
+			redacted, err := json.Marshal(decoded)
+			if err == nil {
+				return string(redacted)
+			}
+		}
+	}
+	return output
+}
+
+func containsSensitiveJSONValue(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		found := false
+		for key, child := range typed {
+			if isSensitiveLogKey(key) {
+				typed[key] = "[REDACTED]"
+				found = true
+				continue
+			}
+			if containsSensitiveJSONValue(child) {
+				found = true
+			}
+		}
+		return found
+	case []any:
+		found := false
+		for _, child := range typed {
+			if containsSensitiveJSONValue(child) {
+				found = true
+			}
+		}
+		return found
+	}
+	return false
+}
+
+func isSensitiveLogKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch normalized {
+	case "authorization", "token", "api_key", "password", "secret", "cookie":
+		return true
+	}
+	return strings.HasSuffix(normalized, "_token") ||
+		strings.HasSuffix(normalized, "_secret") ||
+		strings.HasSuffix(normalized, "_password") ||
+		strings.Contains(normalized, "api_key") ||
+		strings.HasSuffix(normalized, "_cookie")
 }
 
 func writeFileSink(path, output string) error {

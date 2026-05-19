@@ -113,6 +113,10 @@ func (LogSink) validateSinkTarget() error {
 	return nil
 }
 
+func (LogSink) sinkLog() bool {
+	return true
+}
+
 // FileSink is a Sink target that writes the final outcome to a file.
 type FileSink struct {
 	path string

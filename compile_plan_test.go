@@ -222,6 +222,27 @@ func TestCompilePlansCompilesFileSink(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesLogSink(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /events"),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(plans))
+	}
+
+	terminal := plans[0].Terminal
+	if terminal.Kind != runtimeplan.TerminalSink {
+		t.Fatalf("terminal kind = %q, want %q", terminal.Kind, runtimeplan.TerminalSink)
+	}
+	if !terminal.SinkLog {
+		t.Fatal("terminal SinkLog = false, want true for Sink(Log())")
+	}
+}
+
 func TestCompilePlansCompilesWebhookPush(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /tickets"),

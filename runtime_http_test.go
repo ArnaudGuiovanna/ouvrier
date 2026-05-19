@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"ouvrier/internal/events"
 	"ouvrier/internal/provider"
 )
 
@@ -119,6 +120,29 @@ func TestNewHTTPHandlerServesDirectSinkAsAccepted(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerLogsDirectSinkInputToEventStream(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Sink(Log()),
+	}, httpRuntime{eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"event":"created"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
+}
+
 func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
 	scripted := &httpScriptedProvider{
@@ -147,6 +171,88 @@ func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
 	if got := strings.TrimSpace(string(data)); got != `{"status":"classified"}` {
 		t.Fatalf("file output = %q, want provider output", got)
 	}
+}
+
+func TestNewHTTPHandlerLogsPipelineOutputSinkToEventStream(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(Log()),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	assertSinkLoggedEvent(t, stream, "output", `{"status":"classified"}`)
+}
+
+func TestNewHTTPHandlerRedactsSensitiveLogSinkJSONOutput(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"password":"secret","safe":"ok"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(Log()),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	assertSinkLoggedEvent(t, stream, "output", `{"password":"[REDACTED]","safe":"ok"}`)
+}
+
+func TestNewHTTPHandlerFileSinkDoesNotLogToEventStream(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File(outputPath)),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	assertNoSinkLoggedEvent(t, stream)
 }
 
 func TestNewHTTPHandlerPushesPipelineOutputToWebhook(t *testing.T) {
@@ -284,6 +390,37 @@ func TestNewHTTPHandlerRejectsNonHTTPPipeline(t *testing.T) {
 	})
 	if !errors.Is(err, ErrRunNotImplemented) {
 		t.Fatalf("newHTTPHandler error = %v, want ErrRunNotImplemented", err)
+	}
+}
+
+func assertSinkLoggedEvent(t *testing.T, stream *events.EventStream, payloadKey, wantPayload string) {
+	t.Helper()
+
+	var matches []events.Event
+	for _, event := range stream.List() {
+		if event.Kind == events.EventSinkLogged {
+			matches = append(matches, event)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("sink_logged events = %d, want 1; events=%+v", len(matches), stream.List())
+	}
+	got, ok := matches[0].Payload[payloadKey].(string)
+	if !ok {
+		t.Fatalf("sink_logged payload[%q] = %#v, want string", payloadKey, matches[0].Payload[payloadKey])
+	}
+	if got != wantPayload {
+		t.Fatalf("sink_logged payload[%q] = %q, want %q", payloadKey, got, wantPayload)
+	}
+}
+
+func assertNoSinkLoggedEvent(t *testing.T, stream *events.EventStream) {
+	t.Helper()
+
+	for _, event := range stream.List() {
+		if event.Kind == events.EventSinkLogged {
+			t.Fatalf("unexpected sink_logged event: %+v", event)
+		}
 	}
 }
 

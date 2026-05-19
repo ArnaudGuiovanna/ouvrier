@@ -157,10 +157,17 @@ type fileSinkTarget interface {
 	sinkFilePath() string
 }
 
+type logSinkTarget interface {
+	sinkLog() bool
+}
+
 func compileSinkTerminal(node sinkNode) runtimeplan.Terminal {
 	terminal := runtimeplan.Terminal{Kind: runtimeplan.TerminalSink}
 	if target, ok := node.target.(fileSinkTarget); ok {
 		terminal.SinkFilePath = target.sinkFilePath()
+	}
+	if target, ok := node.target.(logSinkTarget); ok {
+		terminal.SinkLog = target.sinkLog()
 	}
 	return terminal
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"ouvrier/internal/events"
 	"ouvrier/internal/provider"
 )
 
@@ -162,6 +163,28 @@ func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
 	if got := strings.TrimSpace(string(data)); got != `{"event":"created"}` {
 		t.Fatalf("file output = %q, want trigger body", got)
 	}
+}
+
+func TestHTTPAdminTriggerLogsDirectSinkInputToEventStream(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Sink(Log()),
+	}, httpRuntime{adminToken: "secret-admin-token", eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/events", `{"event":"created"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
 }
 
 func TestHTTPAdminTriggerRunsParameterizedHTTPRouteThroughHarness(t *testing.T) {
