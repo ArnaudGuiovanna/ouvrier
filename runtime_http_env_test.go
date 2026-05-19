@@ -38,7 +38,7 @@ func TestNewHTTPHandlerUsesDefaultProviderRegistryFromEnv(t *testing.T) {
 		}
 		gotKey = req.Header.Get("x-api-key")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"env provider"}],"stop_reason":"end_turn"}`))
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"{\"status\":\"env provider\"}"}],"stop_reason":"end_turn"}`))
 	}))
 	defer server.Close()
 
@@ -68,7 +68,7 @@ func TestNewHTTPHandlerUsesDefaultProviderRegistryFromEnv(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("response is not JSON: %v", err)
 	}
-	if body.Status != "ok" || body.Output != "env provider" {
-		t.Fatalf("body = %+v, want ok env provider", body)
+	if body.Status != "ok" || body.Output != `{"status":"env provider"}` {
+		t.Fatalf("body = %+v, want ok env provider JSON", body)
 	}
 }

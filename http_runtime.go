@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"ouvrier/internal/events"
 	"ouvrier/internal/harness"
 	"ouvrier/internal/mcpclient"
 	"ouvrier/internal/provider"
@@ -24,14 +25,17 @@ type httpRuntime struct {
 	toolExecutor *tools.Executor
 	mcpConnector mcpConnector
 	stateStore   state.Store
+	eventStream  *events.EventStream
 }
 
 func defaultHTTPRuntime() httpRuntime {
 	providers, _ := providerRegistryFromEnv()
+	stream, _ := events.NewEventStream()
 	return httpRuntime{
 		providers:    providers,
 		toolExecutor: tools.NewExecutor(),
 		mcpConnector: envMCPConnector{connector: mcpclient.NewEnvConnector()},
+		eventStream:  stream,
 	}
 }
 
@@ -78,6 +82,12 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 		}
 		if rt.stateStore != nil {
 			harnessOptions = append(harnessOptions, harness.WithStateStore(rt.stateStore))
+		}
+		if rt.eventStream != nil {
+			harnessOptions = append(harnessOptions, harness.WithEventStream(rt.eventStream))
+		}
+		if step.ResultSchema != nil {
+			harnessOptions = append(harnessOptions, harness.WithResultSchema(step.ResultSchema))
 		}
 		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {

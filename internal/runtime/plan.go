@@ -77,6 +77,7 @@ type Plan struct {
 }
 
 type ResultSchema struct {
-	Name string
-	Type reflect.Type
+	Name       string
+	Type       reflect.Type
+	JSONSchema json.RawMessage
 }

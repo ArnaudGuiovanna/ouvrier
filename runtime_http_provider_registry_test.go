@@ -17,7 +17,7 @@ func TestNewHTTPHandlerRoutesStepsByModelProvider(t *testing.T) {
 	}
 	openai := &httpScriptedProvider{
 		name:     "openai",
-		response: provider.Response{Text: "openai output", StopReason: provider.StopEndTurn},
+		response: provider.Response{Text: `{"status":"openai output"}`, StopReason: provider.StopEndTurn},
 	}
 	registry, err := provider.NewRegistry(anthropic, openai)
 	if err != nil {
@@ -45,8 +45,8 @@ func TestNewHTTPHandlerRoutesStepsByModelProvider(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("response is not JSON: %v", err)
 	}
-	if body.Status != "ok" || body.Output != "openai output" {
-		t.Fatalf("body = %+v, want ok openai output", body)
+	if body.Status != "ok" || body.Output != `{"status":"openai output"}` {
+		t.Fatalf("body = %+v, want ok openai output JSON", body)
 	}
 	if len(anthropic.requests) != 1 {
 		t.Fatalf("anthropic calls = %d, want 1", len(anthropic.requests))

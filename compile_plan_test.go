@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -56,6 +57,7 @@ func TestCompilePlansCompilesHTTPPipeOutput(t *testing.T) {
 	if step.ResultSchema.Type != reflect.TypeFor[planReply]() {
 		t.Fatalf("step ResultSchema type = %v, want planReply", step.ResultSchema.Type)
 	}
+	assertResultSchemaJSON(t, step.ResultSchema)
 
 	if plan.Terminal.Kind != runtimeplan.TerminalReply {
 		t.Fatalf("terminal kind = %q, want %q", plan.Terminal.Kind, runtimeplan.TerminalReply)
@@ -65,6 +67,24 @@ func TestCompilePlansCompilesHTTPPipeOutput(t *testing.T) {
 	}
 	if plan.Terminal.ResultSchema.Type != reflect.TypeFor[planReply]() {
 		t.Fatalf("terminal ResultSchema type = %v, want planReply", plan.Terminal.ResultSchema.Type)
+	}
+	assertResultSchemaJSON(t, plan.Terminal.ResultSchema)
+}
+
+func assertResultSchemaJSON(t *testing.T, resultSchema *runtimeplan.ResultSchema) {
+	t.Helper()
+	if len(resultSchema.JSONSchema) == 0 {
+		t.Fatal("ResultSchema JSONSchema is empty")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resultSchema.JSONSchema, &raw); err != nil {
+		t.Fatalf("ResultSchema JSONSchema is not JSON: %v", err)
+	}
+	if raw["type"] != "object" {
+		t.Fatalf("ResultSchema type = %v, want object", raw["type"])
+	}
+	if _, ok := raw["additionalProperties"]; !ok {
+		t.Fatalf("ResultSchema should be strict: %s", resultSchema.JSONSchema)
 	}
 }
 

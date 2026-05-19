@@ -44,7 +44,7 @@ func (p *httpScriptedProvider) Complete(ctx context.Context, req provider.Reques
 
 func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 	scripted := &httpScriptedProvider{
-		response: provider.Response{Text: "classified", StopReason: provider.StopEndTurn},
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),
@@ -66,8 +66,8 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("response is not JSON: %v", err)
 	}
-	if body.Status != "ok" || body.Output != "classified" {
-		t.Fatalf("body = %+v, want ok classified", body)
+	if body.Status != "ok" || body.Output != `{"status":"classified"}` {
+		t.Fatalf("body = %+v, want ok classified JSON", body)
 	}
 	if len(scripted.requests) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
@@ -80,7 +80,7 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 func TestNewHTTPHandlerPersistsHarnessStateWhenConfigured(t *testing.T) {
 	store := state.NewMemoryStore()
 	scripted := &httpScriptedProvider{
-		response: provider.Response{Text: "classified", StopReason: provider.StopEndTurn},
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),
@@ -117,9 +117,74 @@ func TestNewHTTPHandlerPersistsHarnessStateWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerRecordsOutputSchemaViolation(t *testing.T) {
+	store := state.NewMemoryStore()
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Output[httpTestReply](),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	violations, err := store.SchemaViolations(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(violations))
+	}
+	if violations[0].SchemaName != "ovr.httpTestReply" {
+		t.Fatalf("schema name = %q, want ovr.httpTestReply", violations[0].SchemaName)
+	}
+}
+
+func TestNewHTTPHandlerValidatesTerminalReplySchemaWithoutPipeOutput(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	var body httpStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Status != "pipeline_execution_failed" {
+		t.Fatalf("status body = %q, want pipeline_execution_failed", body.Status)
+	}
+}
+
 func TestNewHTTPHandlerPassesPipeToolsToHarnessRuntime(t *testing.T) {
 	scripted := &httpScriptedProvider{
-		response: provider.Response{Text: "classified", StopReason: provider.StopEndTurn},
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),

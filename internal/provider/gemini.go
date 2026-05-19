@@ -76,12 +76,12 @@ func (p *Gemini) Complete(ctx context.Context, req Request) (Response, error) {
 	httpReq.Header.Set("x-goog-api-key", p.apiKey)
 	httpResp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return Response{}, err
+		return Response{}, transportError(p.Name(), err)
 	}
 	defer httpResp.Body.Close()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 16<<10))
-		return Response{}, fmt.Errorf("gemini %s: %s", httpResp.Status, strings.TrimSpace(string(body)))
+		return Response{}, statusError(p.Name(), httpResp.Status, httpResp.StatusCode, string(body))
 	}
 
 	var decoded geminiResponse

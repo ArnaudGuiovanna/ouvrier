@@ -99,16 +99,12 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (Respo
 
 	httpResp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return Response{}, err
+		return Response{}, transportError(p.name, err)
 	}
 	defer httpResp.Body.Close()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 16<<10))
-		detail := strings.TrimSpace(string(body))
-		if detail == "" {
-			return Response{}, fmt.Errorf("%s %s", p.name, httpResp.Status)
-		}
-		return Response{}, fmt.Errorf("%s %s: %s", p.name, httpResp.Status, detail)
+		return Response{}, statusError(p.name, httpResp.Status, httpResp.StatusCode, string(body))
 	}
 
 	var decoded openAICompatResponse

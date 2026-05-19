@@ -63,7 +63,7 @@ func TestNewHTTPHandlerRegistersMCPToolsWithHarnessRuntime(t *testing.T) {
 					Arguments: []byte(`{"query":"ouvrier"}`),
 				}},
 			},
-			{Text: "done", StopReason: provider.StopEndTurn},
+			{Text: `{"status":"done"}`, StopReason: provider.StopEndTurn},
 		},
 	}
 	session := &httpFakeMCPSession{}

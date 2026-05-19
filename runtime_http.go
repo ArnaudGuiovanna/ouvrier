@@ -13,6 +13,7 @@ import (
 	"time"
 
 	runtimeplan "ouvrier/internal/runtime"
+	"ouvrier/internal/schema"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -113,6 +114,10 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
+	if err := validateTerminalReplyOutput(r.plan, output); err != nil {
+		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		return
+	}
 
 	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
@@ -155,6 +160,13 @@ func readHTTPRequestInput(req *http.Request) (string, error) {
 		return "", errors.New("request body too large")
 	}
 	return string(body), nil
+}
+
+func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
+	if plan.Terminal.Kind != runtimeplan.TerminalReply || plan.Terminal.ResultSchema == nil {
+		return nil
+	}
+	return schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(output))
 }
 
 func writeJSONStatus(w http.ResponseWriter, code int, status string) {

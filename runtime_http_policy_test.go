@@ -19,7 +19,7 @@ func TestNewHTTPHandlerAppliesDefaultPolicyToTools(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		responses: []provider.Response{
 			{Text: "need approval", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
-			{Text: "policy handled", StopReason: provider.StopEndTurn},
+			{Text: `{"status":"policy handled"}`, StopReason: provider.StopEndTurn},
 		},
 	}
 	called := false
@@ -52,8 +52,8 @@ func TestNewHTTPHandlerAppliesDefaultPolicyToTools(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("response is not JSON: %v", err)
 	}
-	if body.Output != "policy handled" {
-		t.Fatalf("output = %q, want policy handled", body.Output)
+	if body.Output != `{"status":"policy handled"}` {
+		t.Fatalf("output = %q, want policy handled JSON", body.Output)
 	}
 	if len(scripted.requests) != 2 {
 		t.Fatalf("provider calls = %d, want 2", len(scripted.requests))

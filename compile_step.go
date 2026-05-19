@@ -19,7 +19,11 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		MCPServers: runtimeMCPServersFromPipe(pipe.config.mcpServers),
 	}
 	if pipe.config.output != nil {
-		step.ResultSchema = resultSchemaFromType(pipe.config.output.typ)
+		resultSchema, err := resultSchemaFromType(pipe.config.output.typ)
+		if err != nil {
+			return runtimeplan.Step{}, err
+		}
+		step.ResultSchema = resultSchema
 	}
 	return step, nil
 }
@@ -52,12 +56,12 @@ func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {
 func compileTerminal(node Node) (runtimeplan.Terminal, error) {
 	switch terminal := node.(type) {
 	case replyNode:
-		return compileReplyTerminal(terminal), nil
+		return compileReplyTerminal(terminal)
 	case *replyNode:
 		if terminal == nil {
 			return runtimeplan.Terminal{}, ErrInvalidNode
 		}
-		return compileReplyTerminal(*terminal), nil
+		return compileReplyTerminal(*terminal)
 	case pushNode:
 		return runtimeplan.Terminal{Kind: runtimeplan.TerminalPush}, nil
 	case *pushNode:
@@ -77,15 +81,19 @@ func compileTerminal(node Node) (runtimeplan.Terminal, error) {
 	}
 }
 
-func compileReplyTerminal(node replyNode) runtimeplan.Terminal {
+func compileReplyTerminal(node replyNode) (runtimeplan.Terminal, error) {
 	terminal := runtimeplan.Terminal{Kind: runtimeplan.TerminalReply}
 	if format, ok := node.format.(asyncReplyFormat); ok && format.asyncReply() {
 		terminal.Async = true
 	}
 	if format, ok := node.format.(resultSchemaCarrier); ok {
-		terminal.ResultSchema = resultSchemaFromType(format.resultSchemaType())
+		resultSchema, err := resultSchemaFromType(format.resultSchemaType())
+		if err != nil {
+			return runtimeplan.Terminal{}, err
+		}
+		terminal.ResultSchema = resultSchema
 	}
-	return terminal
+	return terminal, nil
 }
 
 func validateTerminalCompatibility(trigger runtimeplan.TriggerKind, terminal runtimeplan.TerminalKind) error {

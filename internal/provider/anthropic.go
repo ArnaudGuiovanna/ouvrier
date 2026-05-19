@@ -83,12 +83,12 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 
 	httpResp, err := a.httpClient.Do(httpReq)
 	if err != nil {
-		return Response{}, err
+		return Response{}, transportError(a.Name(), err)
 	}
 	defer httpResp.Body.Close()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 16<<10))
-		return Response{}, fmt.Errorf("anthropic %s: %s", httpResp.Status, strings.TrimSpace(string(body)))
+		return Response{}, statusError(a.Name(), httpResp.Status, httpResp.StatusCode, string(body))
 	}
 
 	var decoded anthropicResponse

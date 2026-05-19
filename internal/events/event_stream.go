@@ -7,20 +7,6 @@ import (
 	"time"
 )
 
-type EventKind string
-
-const (
-	EventSessionStart    EventKind = "session_start"
-	EventSessionEnd      EventKind = "session_end"
-	EventBeforeLLM       EventKind = "before_llm"
-	EventAfterLLM        EventKind = "after_llm"
-	EventBeforeTool      EventKind = "before_tool"
-	EventAfterTool       EventKind = "after_tool"
-	EventSchemaViolation EventKind = "schema_violation"
-	EventBudgetExceeded  EventKind = "budget_exceeded"
-	EventSubAgentStop    EventKind = "subagent_stop"
-)
-
 type Event struct {
 	ID        uint64
 	At        time.Time
@@ -80,6 +66,7 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 
 	s.nextID++
 	event.ID = s.nextID
+	event.Kind = CanonicalKind(event.Kind)
 	if event.At.IsZero() {
 		event.At = s.now().UTC()
 	}
