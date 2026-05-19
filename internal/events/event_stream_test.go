@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -65,6 +66,104 @@ func TestEventStreamReturnsDefensiveCopies(t *testing.T) {
 	}
 }
 
+func TestEventStreamAppendRedactsSensitivePayloadKeysRecursively(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	payload := map[string]any{
+		"authorization": "Bearer root-token",
+		"token":         "root-token",
+		"api_key":       "root-api-key",
+		"password":      "root-password",
+		"secret":        "root-secret",
+		"cookie":        "session=root-cookie",
+		"safe":          "visible",
+		"nested": map[string]any{
+			"authorization": "Bearer nested-token",
+			"token":         "nested-token",
+			"api_key":       "nested-api-key",
+			"password":      "nested-password",
+			"secret":        "nested-secret",
+			"cookie":        "session=nested-cookie",
+			"safe":          "nested-visible",
+		},
+		"items": []any{
+			map[string]any{
+				"token": "slice-token",
+				"safe":  "slice-visible",
+			},
+		},
+	}
+
+	appended, err := stream.Append(context.Background(), Event{
+		Kind:    EventBeforeLLM,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	assertSensitivePayloadRedacted(t, appended.Payload)
+	assertSensitivePayloadRedacted(t, stream.List()[0].Payload)
+	if appended.Payload["safe"] != "visible" {
+		t.Fatalf("safe payload field = %v, want visible", appended.Payload["safe"])
+	}
+	nested := appended.Payload["nested"].(map[string]any)
+	if nested["safe"] != "nested-visible" {
+		t.Fatalf("nested safe payload field = %v, want nested-visible", nested["safe"])
+	}
+	item := appended.Payload["items"].([]any)[0].(map[string]any)
+	if item["safe"] != "slice-visible" {
+		t.Fatalf("slice safe payload field = %v, want slice-visible", item["safe"])
+	}
+	if payload["token"] != "root-token" {
+		t.Fatalf("Append mutated caller payload token = %v, want root-token", payload["token"])
+	}
+}
+
+func TestEventStreamListReturnsDeepCopiesOfNestedPayloadValues(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	_, err = stream.Append(context.Background(), Event{
+		Kind: EventBeforeTool,
+		Payload: map[string]any{
+			"metadata": map[string]any{
+				"tool": "lookup",
+				"tags": []any{"first", map[string]any{
+					"label": "nested",
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	listed := stream.List()
+	metadata := listed[0].Payload["metadata"].(map[string]any)
+	metadata["tool"] = "mutated"
+	tags := metadata["tags"].([]any)
+	tags[0] = "mutated"
+	nestedTag := tags[1].(map[string]any)
+	nestedTag["label"] = "mutated"
+
+	again := stream.List()
+	want := map[string]any{
+		"metadata": map[string]any{
+			"tool": "lookup",
+			"tags": []any{"first", map[string]any{
+				"label": "nested",
+			}},
+		},
+	}
+	if !reflect.DeepEqual(again[0].Payload, want) {
+		t.Fatalf("stored payload = %#v, want %#v", again[0].Payload, want)
+	}
+}
+
 func TestEventStreamAppendHonorsCanceledContext(t *testing.T) {
 	stream, err := NewEventStream()
 	if err != nil {
@@ -97,5 +196,24 @@ func TestEventStreamSinceFiltersByID(t *testing.T) {
 	}
 	if events[0].ID != 2 || events[1].ID != 3 {
 		t.Fatalf("Since IDs = %d, %d; want 2, 3", events[0].ID, events[1].ID)
+	}
+}
+
+func assertSensitivePayloadRedacted(t *testing.T, payload map[string]any) {
+	t.Helper()
+	for _, key := range []string{"authorization", "token", "api_key", "password", "secret", "cookie"} {
+		if payload[key] != "[REDACTED]" {
+			t.Fatalf("payload[%q] = %v, want [REDACTED] in %+v", key, payload[key], payload)
+		}
+	}
+	nested := payload["nested"].(map[string]any)
+	for _, key := range []string{"authorization", "token", "api_key", "password", "secret", "cookie"} {
+		if nested[key] != "[REDACTED]" {
+			t.Fatalf("nested payload[%q] = %v, want [REDACTED] in %+v", key, nested[key], nested)
+		}
+	}
+	item := payload["items"].([]any)[0].(map[string]any)
+	if item["token"] != "[REDACTED]" {
+		t.Fatalf("slice payload token = %v, want [REDACTED] in %+v", item["token"], item)
 	}
 }

@@ -460,12 +460,13 @@ type adminExecutionResponse struct {
 }
 
 type adminEventResponse struct {
-	ID        uint64    `json:"id"`
-	At        time.Time `json:"at"`
-	Kind      string    `json:"kind"`
-	ExecID    string    `json:"exec_id,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	TraceID   string    `json:"trace_id,omitempty"`
+	ID        uint64         `json:"id"`
+	At        time.Time      `json:"at"`
+	Kind      string         `json:"kind"`
+	ExecID    string         `json:"exec_id,omitempty"`
+	SessionID string         `json:"session_id,omitempty"`
+	TraceID   string         `json:"trace_id,omitempty"`
+	Payload   map[string]any `json:"payload,omitempty"`
 }
 
 func parseAdminTraceLimit(raw string) int {
@@ -557,5 +558,6 @@ func adminEventResponseFromEvent(event events.Event) adminEventResponse {
 		ExecID:    event.ExecID,
 		SessionID: event.SessionID,
 		TraceID:   event.TraceID,
+		Payload:   event.Payload,
 	}
 }

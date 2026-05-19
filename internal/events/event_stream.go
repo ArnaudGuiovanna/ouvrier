@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,6 +24,8 @@ type EventStream struct {
 	now    func() time.Time
 	events []Event
 }
+
+const redactedPayloadValue = "[REDACTED]"
 
 type Option func(*config) error
 
@@ -70,7 +73,7 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 	if event.At.IsZero() {
 		event.At = s.now().UTC()
 	}
-	event.Payload = clonePayload(event.Payload)
+	event.Payload = sanitizePayload(event.Payload)
 	s.events = append(s.events, event)
 	return cloneEvent(event), nil
 }
@@ -100,17 +103,63 @@ func (s *EventStream) Since(id uint64) []Event {
 }
 
 func cloneEvent(event Event) Event {
-	event.Payload = clonePayload(event.Payload)
+	event.Payload = sanitizePayload(event.Payload)
 	return event
 }
 
-func clonePayload(payload map[string]any) map[string]any {
+func sanitizePayload(payload map[string]any) map[string]any {
 	if payload == nil {
 		return nil
 	}
 	clone := make(map[string]any, len(payload))
 	for key, value := range payload {
-		clone[key] = value
+		clone[key] = sanitizePayloadValue(key, value)
 	}
 	return clone
+}
+
+func sanitizePayloadValue(key string, value any) any {
+	if isSensitivePayloadKey(key) {
+		return redactedPayloadValue
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		return sanitizePayload(typed)
+	case map[string]string:
+		clone := make(map[string]string, len(typed))
+		for childKey, childValue := range typed {
+			if isSensitivePayloadKey(childKey) {
+				clone[childKey] = redactedPayloadValue
+			} else {
+				clone[childKey] = childValue
+			}
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(typed))
+		for i, item := range typed {
+			clone[i] = sanitizePayloadValue("", item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), typed...)
+	case []byte:
+		return append([]byte(nil), typed...)
+	default:
+		return value
+	}
+}
+
+func isSensitivePayloadKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch normalized {
+	case "authorization", "token", "api_key", "password", "secret", "cookie":
+		return true
+	}
+	return strings.HasSuffix(normalized, "_token") ||
+		strings.HasSuffix(normalized, "_secret") ||
+		strings.HasSuffix(normalized, "_password") ||
+		strings.Contains(normalized, "api_key") ||
+		strings.HasSuffix(normalized, "_cookie")
 }

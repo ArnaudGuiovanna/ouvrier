@@ -208,6 +208,56 @@ func TestHTTPAdminTraceByExecutionIncludesExecutionAndEvents(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminTraceByExecutionIncludesRedactedEventPayload(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{
+		Kind:      events.EventBeforeTool,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"tool":          "load_ticket",
+			"authorization": "Bearer root-token",
+			"nested": map[string]any{
+				"api_key": "nested-api-key",
+				"safe":    "visible",
+			},
+		},
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces/exec_1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Events []struct {
+			ExecID  string         `json:"exec_id"`
+			Payload map[string]any `json:"payload"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Events) != 1 || body.Events[0].ExecID != "exec_1" {
+		t.Fatalf("body = %+v, want one exec_1 event", body)
+	}
+	if body.Events[0].Payload["authorization"] != "[REDACTED]" {
+		t.Fatalf("authorization payload = %v, want [REDACTED]", body.Events[0].Payload["authorization"])
+	}
+	nested := body.Events[0].Payload["nested"].(map[string]any)
+	if nested["api_key"] != "[REDACTED]" {
+		t.Fatalf("nested api_key payload = %v, want [REDACTED]", nested["api_key"])
+	}
+	if body.Events[0].Payload["tool"] != "load_ticket" || nested["safe"] != "visible" {
+		t.Fatalf("payload = %+v, want non-sensitive fields preserved", body.Events[0].Payload)
+	}
+}
+
 func newTestAdminHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
 	handler, err := newHTTPHandlerWithRuntime([]Node{
