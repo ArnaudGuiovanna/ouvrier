@@ -27,6 +27,7 @@ type httpRuntime struct {
 	stateStore   state.Store
 	eventStream  *events.EventStream
 	adminToken   string
+	adminRoutes  []httpRoute
 }
 
 func defaultHTTPRuntime() httpRuntime {

@@ -33,6 +33,7 @@ func newHTTPHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler,
 	if err != nil {
 		return nil, err
 	}
+	runtime.adminRoutes = routes
 
 	mux := http.NewServeMux()
 	registerHTTPAdminRoutes(mux, runtime)

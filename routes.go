@@ -3,6 +3,8 @@ package ovr
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -63,6 +65,7 @@ func registerHTTPAdminRoutes(mux *http.ServeMux, rt httpRuntime) {
 	mux.HandleFunc("GET /admin/status", rt.serveAdminStatus)
 	mux.HandleFunc("GET /admin/traces", rt.serveAdminTraces)
 	mux.HandleFunc("GET /admin/traces/{execID}", rt.serveAdminTrace)
+	mux.HandleFunc("POST /admin/trigger", rt.serveAdminTrigger)
 }
 
 func (rt httpRuntime) serveAdminHealth(w http.ResponseWriter, req *http.Request) {
@@ -208,6 +211,103 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request) {
+	if !rt.authorizeAdmin(w, req) {
+		return
+	}
+	var trigger adminTriggerRequest
+	if err := json.NewDecoder(req.Body).Decode(&trigger); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+		return
+	}
+	trigger.Method = strings.ToUpper(strings.TrimSpace(trigger.Method))
+	trigger.Path = strings.TrimSpace(trigger.Path)
+	if trigger.Method == "" || trigger.Path == "" {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+		return
+	}
+
+	route, ok := rt.adminTriggerRoute(trigger.Method, trigger.Path)
+	if !ok {
+		writeJSONStatus(w, http.StatusNotFound, "not_found")
+		return
+	}
+	body, err := trigger.bodyString()
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+		return
+	}
+	rt.executeAdminTriggerRoute(w, req, route, body)
+}
+
+func (rt httpRuntime) adminTriggerRoute(method, path string) (httpRoute, bool) {
+	for _, route := range rt.adminRoutes {
+		if route.method == method && route.path == path {
+			return route, true
+		}
+	}
+	return httpRoute{}, false
+}
+
+func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.Request, route httpRoute, input string) {
+	if len(route.plan.Steps) == 0 {
+		switch route.plan.Terminal.Kind {
+		case runtimeplan.TerminalReply:
+			if route.plan.Terminal.Async {
+				writeJSONStatus(w, http.StatusAccepted, "accepted")
+				return
+			}
+			writeJSONStatus(w, http.StatusOK, "ok")
+		case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
+			writeJSONStatus(w, http.StatusAccepted, "accepted")
+		default:
+			writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
+		}
+		return
+	}
+
+	if !route.tryAcquireWorker() {
+		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+		return
+	}
+	if route.plan.Terminal.Async {
+		ctx := context.WithoutCancel(req.Context())
+		go func() {
+			defer route.releaseWorker()
+			_, _ = rt.runPlan(ctx, route.plan, input)
+		}()
+		writeJSONStatus(w, http.StatusAccepted, "accepted")
+		return
+	}
+	defer route.releaseWorker()
+
+	output, err := rt.runPlan(req.Context(), route.plan, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, errHTTPProviderNotConfigured):
+			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")
+		case errors.Is(err, errHTTPPipelineIncomplete):
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete")
+		default:
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		}
+		return
+	}
+	if err := validateTerminalReplyOutput(route.plan, output); err != nil {
+		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		return
+	}
+
+	switch route.plan.Terminal.Kind {
+	case runtimeplan.TerminalReply:
+		writeJSONOutput(w, http.StatusOK, "ok", output)
+	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
+		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
+	default:
+		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
+	}
+}
+
 func (rt httpRuntime) authorizeAdmin(w http.ResponseWriter, req *http.Request) bool {
 	token := strings.TrimSpace(rt.adminToken)
 	if token == "" {
@@ -263,6 +363,30 @@ type adminTraceResponse struct {
 	Events           []adminEventResponse    `json:"events"`
 	Sessions         int                     `json:"sessions"`
 	SchemaViolations int                     `json:"schema_violations"`
+}
+
+type adminTriggerRequest struct {
+	Method string          `json:"method"`
+	Path   string          `json:"path"`
+	Body   json.RawMessage `json:"body"`
+}
+
+func (r adminTriggerRequest) bodyString() (string, error) {
+	body := strings.TrimSpace(string(r.Body))
+	if body == "" || body == "null" {
+		return "", nil
+	}
+	if strings.HasPrefix(body, `"`) {
+		var text string
+		if err := json.Unmarshal(r.Body, &text); err != nil {
+			return "", err
+		}
+		return text, nil
+	}
+	if !json.Valid(r.Body) {
+		return "", errors.New("invalid trigger body")
+	}
+	return body, nil
 }
 
 type adminExecutionResponse struct {
