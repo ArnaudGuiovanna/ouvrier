@@ -200,6 +200,28 @@ func TestCompilePlansCompilesMultiplePipelines(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesFileSink(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File("./out/tickets.jsonl")),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(plans))
+	}
+
+	terminal := plans[0].Terminal
+	if terminal.Kind != runtimeplan.TerminalSink {
+		t.Fatalf("terminal kind = %q, want %q", terminal.Kind, runtimeplan.TerminalSink)
+	}
+	if terminal.SinkFilePath != "./out/tickets.jsonl" {
+		t.Fatalf("terminal file path = %q, want ./out/tickets.jsonl", terminal.SinkFilePath)
+	}
+}
+
 func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /jobs", WorkerPool(2)),

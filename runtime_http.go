@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -72,6 +73,17 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
+		if r.plan.Terminal.Kind == runtimeplan.TerminalSink && r.plan.Terminal.SinkFilePath != "" {
+			input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
+			if err != nil {
+				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
+				return
+			}
+			if err := writeFileSink(r.plan.Terminal.SinkFilePath, input); err != nil {
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
+		}
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	default:
 		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
@@ -125,8 +137,14 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
-	case runtimeplan.TerminalPush, runtimeplan.TerminalSink:
+	case runtimeplan.TerminalPush:
 		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
+	case runtimeplan.TerminalSink:
+		if err := applySinkTerminal(r.plan.Terminal, output); err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
+		}
+		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	default:
 		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
 	}
@@ -231,6 +249,17 @@ func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
 		return nil
 	}
 	return schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(output))
+}
+
+func applySinkTerminal(terminal runtimeplan.Terminal, output string) error {
+	if terminal.SinkFilePath == "" {
+		return nil
+	}
+	return writeFileSink(terminal.SinkFilePath, output)
+}
+
+func writeFileSink(path, output string) error {
+	return os.WriteFile(path, []byte(output), 0o644)
 }
 
 func writeJSONStatus(w http.ResponseWriter, code int, status string) {

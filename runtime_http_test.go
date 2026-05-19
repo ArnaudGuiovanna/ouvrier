@@ -5,7 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"ouvrier/internal/provider"
 )
 
 type httpTestReply struct {
@@ -109,6 +114,36 @@ func TestNewHTTPHandlerServesDirectSinkAsAccepted(t *testing.T) {
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+}
+
+func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File(outputPath)),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) returned error: %v", outputPath, err)
+	}
+	if got := strings.TrimSpace(string(data)); got != `{"status":"classified"}` {
+		t.Fatalf("file output = %q, want provider output", got)
 	}
 }
 

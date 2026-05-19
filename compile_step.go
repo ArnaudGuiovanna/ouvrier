@@ -115,12 +115,12 @@ func compileTerminal(node Node) (runtimeplan.Terminal, error) {
 		}
 		return runtimeplan.Terminal{Kind: runtimeplan.TerminalPush}, nil
 	case sinkNode:
-		return runtimeplan.Terminal{Kind: runtimeplan.TerminalSink}, nil
+		return compileSinkTerminal(terminal), nil
 	case *sinkNode:
 		if terminal == nil {
 			return runtimeplan.Terminal{}, ErrInvalidNode
 		}
-		return runtimeplan.Terminal{Kind: runtimeplan.TerminalSink}, nil
+		return compileSinkTerminal(*terminal), nil
 	default:
 		return runtimeplan.Terminal{}, ErrInvalidNode
 	}
@@ -139,6 +139,18 @@ func compileReplyTerminal(node replyNode) (runtimeplan.Terminal, error) {
 		terminal.ResultSchema = resultSchema
 	}
 	return terminal, nil
+}
+
+type fileSinkTarget interface {
+	sinkFilePath() string
+}
+
+func compileSinkTerminal(node sinkNode) runtimeplan.Terminal {
+	terminal := runtimeplan.Terminal{Kind: runtimeplan.TerminalSink}
+	if target, ok := node.target.(fileSinkTarget); ok {
+		terminal.SinkFilePath = target.sinkFilePath()
+	}
+	return terminal
 }
 
 func validateTerminalCompatibility(trigger runtimeplan.TriggerKind, terminal runtimeplan.TerminalKind) error {

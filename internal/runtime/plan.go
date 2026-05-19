@@ -86,6 +86,7 @@ type Terminal struct {
 	Kind         TerminalKind
 	Async        bool
 	ResultSchema *ResultSchema
+	SinkFilePath string
 }
 
 type Plan struct {

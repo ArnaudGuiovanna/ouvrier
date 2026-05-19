@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +59,63 @@ func TestHTTPAdminTriggerRunsExistingHTTPRouteThroughHarness(t *testing.T) {
 	}
 	if scripted.requests[0].Messages[0].Text() != `{"title":"broken"}` {
 		t.Fatalf("provider input = %q, want trigger body JSON", scripted.requests[0].Messages[0].Text())
+	}
+}
+
+func TestHTTPAdminTriggerWritesPipelineOutputToFileSink(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "admin-trigger-output.json")
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File(outputPath)),
+	}, httpRuntime{
+		adminToken: "secret-admin-token",
+		provider:   scripted,
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/tickets", `{"title":"broken"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) returned error: %v", outputPath, err)
+	}
+	if got := strings.TrimSpace(string(data)); got != `{"status":"classified"}` {
+		t.Fatalf("file output = %q, want provider output", got)
+	}
+}
+
+func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "admin-trigger-input.json")
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Sink(File(outputPath)),
+	}, httpRuntime{adminToken: "secret-admin-token"})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/events", `{"event":"created"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) returned error: %v", outputPath, err)
+	}
+	if got := strings.TrimSpace(string(data)); got != `{"event":"created"}` {
+		t.Fatalf("file output = %q, want trigger body", got)
 	}
 }
 

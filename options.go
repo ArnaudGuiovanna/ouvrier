@@ -3,6 +3,7 @@ package ovr
 import (
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 // ReplyFormat configures how Reply serializes the final outcome.
@@ -110,6 +111,30 @@ func Log() LogSink {
 
 func (LogSink) validateSinkTarget() error {
 	return nil
+}
+
+// FileSink is a Sink target that writes the final outcome to a file.
+type FileSink struct {
+	path string
+}
+
+// File declares a file sink target.
+func File(path string) FileSink {
+	return FileSink{path: strings.TrimSpace(path)}
+}
+
+func (s FileSink) validateSinkTarget() error {
+	if s.path == "" {
+		return fmt.Errorf("%w: file sink path is required", ErrInvalidNode)
+	}
+	if strings.ContainsRune(s.path, 0) {
+		return fmt.Errorf("%w: file sink path is invalid", ErrInvalidNode)
+	}
+	return nil
+}
+
+func (s FileSink) sinkFilePath() string {
+	return s.path
 }
 
 type sinkNode struct {

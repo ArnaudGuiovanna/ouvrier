@@ -116,6 +116,28 @@ func TestValidateRejectsDuplicatePipeRetry(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEmptyFileSinkPath(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("classify ticket", ovr.Model("anthropic/claude-sonnet-4-6")),
+		ovr.Sink(ovr.File("")),
+	)
+	if !errors.Is(err, ovr.ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
+
+func TestValidateRejectsInvalidFileSinkPath(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("classify ticket", ovr.Model("anthropic/claude-sonnet-4-6")),
+		ovr.Sink(ovr.File("bad\x00path")),
+	)
+	if !errors.Is(err, ovr.ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
+
 func TestValidateRequiresTerminalToBeLastBeforeNextPipeline(t *testing.T) {
 	err := ovr.Validate(
 		ovr.From("GET /health"),
