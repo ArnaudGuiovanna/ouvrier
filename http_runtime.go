@@ -20,15 +20,16 @@ var (
 )
 
 type httpRuntime struct {
-	provider     provider.Provider
-	providers    *provider.Registry
-	toolExecutor *tools.Executor
-	mcpConnector mcpConnector
-	stateStore   state.Store
-	eventStream  *events.EventStream
-	hookBus      *events.HookBus
-	adminToken   string
-	adminRoutes  []httpRoute
+	provider             provider.Provider
+	providers            *provider.Registry
+	toolExecutor         *tools.Executor
+	mcpConnector         mcpConnector
+	stateStore           state.Store
+	eventStream          *events.EventStream
+	hookBus              *events.HookBus
+	schemaRepairAttempts int
+	adminToken           string
+	adminRoutes          []httpRoute
 }
 
 func defaultHTTPRuntime() httpRuntime {
@@ -120,6 +121,9 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		}
 		if step.ResultSchema != nil {
 			harnessOptions = append(harnessOptions, harness.WithResultSchema(step.ResultSchema))
+		}
+		if rt.schemaRepairAttempts > 0 {
+			harnessOptions = append(harnessOptions, harness.WithSchemaRepairAttempts(rt.schemaRepairAttempts))
 		}
 		if step.Retry != nil {
 			harnessOptions = append(harnessOptions,

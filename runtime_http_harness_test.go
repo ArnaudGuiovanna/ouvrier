@@ -277,6 +277,65 @@ func TestNewHTTPHandlerRecordsOutputSchemaViolation(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerRepairsPipeOutputSchemaViolationWhenConfigured(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+			{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Output[httpTestReply](),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream, schemaRepairAttempts: 1})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body httpStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Output != `{"status":"classified"}` {
+		t.Fatalf("output = %q, want repaired JSON", body.Output)
+	}
+	if len(scripted.requests) != 2 {
+		t.Fatalf("provider calls = %d, want initial and repair", len(scripted.requests))
+	}
+	violations, err := store.SchemaViolations(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want original violation", len(violations))
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaRepairStarted); !ok {
+		t.Fatalf("events = %+v, want schema repair started event", stream.List())
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaRepairCompleted); !ok {
+		t.Fatalf("events = %+v, want schema repair completed event", stream.List())
+	}
+	if event, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaValidationPassed); !ok || event.Payload["repaired"] != true {
+		t.Fatalf("events = %+v, want repaired schema validation passed event", stream.List())
+	}
+}
+
 func TestNewHTTPHandlerValidatesTerminalReplySchemaWithoutPipeOutput(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
