@@ -244,6 +244,8 @@ func registerRuntimeTools(executor *tools.Executor, runtimeTools []runtimeplan.T
 				IdempotencyKey:   tool.IdempotencyKey,
 				SideEffects:      tool.SideEffects,
 				RequiresApproval: tool.RequiresApproval,
+				ArgumentName:     tool.ArgumentName,
+				InputSchema:      tool.InputSchema,
 			})); err != nil {
 				return nil, err
 			}

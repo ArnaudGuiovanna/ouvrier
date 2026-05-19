@@ -111,6 +111,38 @@ func TestCompilePlansLeavesPipeRetryPolicyUnsetByDefault(t *testing.T) {
 	}
 }
 
+func TestCompilePlansPublishesStrictSingleValueToolSchema(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /learners"),
+		Pipe("inspect learners",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("list_learners", listLearners,
+				Param("days", "Number of days to inspect."),
+			),
+		),
+		Reply(JSON[planReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	tool := plans[0].Steps[0].Tools[0]
+	if tool.ArgumentName != "days" {
+		t.Fatalf("tool ArgumentName = %q, want days", tool.ArgumentName)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(tool.InputSchema, &raw); err != nil {
+		t.Fatalf("tool InputSchema is not JSON: %v", err)
+	}
+	if raw["additionalProperties"] != false {
+		t.Fatalf("tool InputSchema = %s, want strict additionalProperties false", tool.InputSchema)
+	}
+	required, ok := raw["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "days" {
+		t.Fatalf("tool InputSchema required = %+v, want days", raw["required"])
+	}
+}
+
 func assertResultSchemaJSON(t *testing.T, resultSchema *runtimeplan.ResultSchema) {
 	t.Helper()
 	if len(resultSchema.JSONSchema) == 0 {

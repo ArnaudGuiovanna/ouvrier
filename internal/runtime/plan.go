@@ -63,6 +63,7 @@ type Tool struct {
 	Name             string
 	Description      string
 	InputSchema      json.RawMessage
+	ArgumentName     string
 	GoFunc           any
 	Effect           policy.Effect
 	IdempotencyKey   string

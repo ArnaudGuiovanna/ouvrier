@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"strings"
 
 	"ouvrier/internal/policy"
@@ -18,6 +19,8 @@ type Metadata struct {
 	SideEffects      []string
 	RequiresApproval bool
 	Kind             ToolKind
+	ArgumentName     string
+	InputSchema      json.RawMessage
 }
 
 type Option func(*Executor)
@@ -35,6 +38,8 @@ func WithMetadata(metadata Metadata) RegisterOption {
 		metadata.Effect = normalizeEffect(metadata.Effect)
 		metadata.IdempotencyKey = strings.TrimSpace(metadata.IdempotencyKey)
 		metadata.SideEffects = cleanLabels(metadata.SideEffects)
+		metadata.ArgumentName = strings.TrimSpace(metadata.ArgumentName)
+		metadata.InputSchema = append(json.RawMessage(nil), metadata.InputSchema...)
 		tool.metadata = metadata
 	}
 }

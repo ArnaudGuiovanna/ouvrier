@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
@@ -140,7 +144,10 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 		return result, nil
 	}
 
-	args, err := buildCallArgs(ctx, tool.typ, call.Arguments)
+	if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
+		return errorResult(call, err), nil
+	}
+	args, err := buildCallArgs(ctx, tool.typ, tool.metadata, call.Arguments)
 	if err != nil {
 		return errorResult(call, err), nil
 	}
@@ -203,36 +210,128 @@ func validateSignature(name string, typ reflect.Type) error {
 	return nil
 }
 
-func buildCallArgs(ctx context.Context, typ reflect.Type, raw json.RawMessage) ([]reflect.Value, error) {
+func buildCallArgs(ctx context.Context, typ reflect.Type, metadata Metadata, raw json.RawMessage) ([]reflect.Value, error) {
 	args := []reflect.Value{reflect.ValueOf(ctx)}
 	if typ.NumIn() == 1 {
 		return args, nil
 	}
 
-	value, err := decodeArgument(typ.In(1), raw)
+	value, err := decodeArgument(typ.In(1), metadata, raw)
 	if err != nil {
 		return nil, err
 	}
 	return append(args, value), nil
 }
 
-func decodeArgument(typ reflect.Type, raw json.RawMessage) (reflect.Value, error) {
+func decodeArgument(typ reflect.Type, metadata Metadata, raw json.RawMessage) (reflect.Value, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = []byte(`{}`)
 	}
+	var err error
+	raw, err = unwrapSingleValueArgument(typ, metadata.ArgumentName, raw)
+	if err != nil {
+		return reflect.Value{}, fmt.Errorf("decode tool arguments: %w", err)
+	}
 	if typ.Kind() == reflect.Pointer {
 		value := reflect.New(typ.Elem())
-		if err := json.Unmarshal(raw, value.Interface()); err != nil {
+		if err := decodeJSONArgument(raw, value.Interface(), shouldRejectUnknownFields(typ.Elem())); err != nil {
 			return reflect.Value{}, fmt.Errorf("decode tool arguments: %w", err)
 		}
 		return value, nil
 	}
 
 	value := reflect.New(typ)
-	if err := json.Unmarshal(raw, value.Interface()); err != nil {
+	if err := decodeJSONArgument(raw, value.Interface(), shouldRejectUnknownFields(typ)); err != nil {
 		return reflect.Value{}, fmt.Errorf("decode tool arguments: %w", err)
 	}
 	return value.Elem(), nil
+}
+
+func shouldRejectUnknownFields(typ reflect.Type) bool {
+	return typ.Kind() == reflect.Struct
+}
+
+func validateToolArguments(schemaJSON json.RawMessage, raw json.RawMessage) error {
+	if len(bytes.TrimSpace(schemaJSON)) == 0 {
+		return nil
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		raw = []byte(`{}`)
+	}
+
+	var parsed jsonschema.Schema
+	if err := json.Unmarshal(schemaJSON, &parsed); err != nil {
+		return fmt.Errorf("validate tool arguments: decode schema JSON: %w", err)
+	}
+	resolved, err := parsed.Resolve(nil)
+	if err != nil {
+		return fmt.Errorf("validate tool arguments: resolve schema: %w", err)
+	}
+
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(&value); err != nil {
+		return fmt.Errorf("validate tool arguments: decode JSON: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("validate tool arguments: arguments must contain a single JSON value")
+	}
+	if err := resolved.Validate(value); err != nil {
+		return fmt.Errorf("validate tool arguments: %w", err)
+	}
+	return nil
+}
+
+func decodeJSONArgument(raw json.RawMessage, target any, rejectUnknown bool) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if rejectUnknown {
+		decoder.DisallowUnknownFields()
+	}
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("arguments must contain a single JSON value")
+	}
+	return nil
+}
+
+func unwrapSingleValueArgument(typ reflect.Type, name string, raw json.RawMessage) (json.RawMessage, error) {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if typ.Kind() == reflect.Struct {
+		return raw, nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return raw, nil
+	}
+
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return raw, nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &object); err != nil {
+		return nil, err
+	}
+	value, ok := object[name]
+	if !ok {
+		return nil, fmt.Errorf("missing field %q", name)
+	}
+	if len(object) != 1 {
+		unknown := make([]string, 0, len(object)-1)
+		for key := range object {
+			if key != name {
+				unknown = append(unknown, key)
+			}
+		}
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("unknown field %q", unknown[0])
+	}
+	return value, nil
 }
 
 func toolResultFromValues(call provider.ToolCall, values []reflect.Value) (provider.ToolResult, error) {

@@ -26,6 +26,26 @@ func toolInputSchema(tool toolSpec) json.RawMessage {
 	return singleValueToolSchema(argType, tool.params)
 }
 
+func toolArgumentName(tool toolSpec) string {
+	if tool.fnType == nil || tool.fnType.NumIn() < 2 {
+		return ""
+	}
+	argType := tool.fnType.In(1)
+	if argType.Kind() == reflect.Pointer {
+		argType = argType.Elem()
+	}
+	if argType.Kind() == reflect.Struct {
+		return ""
+	}
+	name := "value"
+	if len(tool.params) == 1 {
+		for param := range tool.params {
+			name = param
+		}
+	}
+	return name
+}
+
 func structToolSchema(typ reflect.Type, params map[string]string) json.RawMessage {
 	properties := map[string]any{}
 	var required []string
@@ -67,8 +87,9 @@ func singleValueToolSchema(typ reflect.Type, params map[string]string) json.RawM
 
 func objectToolSchema(properties map[string]any, required []string) json.RawMessage {
 	schema := map[string]any{
-		"type":       "object",
-		"properties": properties,
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": false,
 	}
 	if len(required) > 0 {
 		schema["required"] = required

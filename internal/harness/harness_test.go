@@ -1056,15 +1056,62 @@ func TestRunAppendsCoreEventsAndRunsHooks(t *testing.T) {
 	}
 	wantKinds := []events.EventKind{
 		events.EventSessionStart,
+		events.EventPipeStarted,
 		events.EventBeforeLLM,
 		events.EventAfterLLM,
+		events.EventPipeCompleted,
 		events.EventSessionEnd,
 	}
 	if !reflect.DeepEqual(kinds, wantKinds) {
 		t.Fatalf("event kinds = %+v, want %+v", kinds, wantKinds)
 	}
-	if recorded[1].Payload["hooked"] != true {
-		t.Fatalf("before LLM payload = %+v, want hook enrichment", recorded[1].Payload)
+	if recorded[2].Payload["hooked"] != true {
+		t.Fatalf("before LLM payload = %+v, want hook enrichment", recorded[2].Payload)
+	}
+	if recorded[1].Payload["model"] != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("pipe started payload = %+v, want model", recorded[1].Payload)
+	}
+	if recorded[4].Payload["status"] != string(harness.StatusCompleted) {
+		t.Fatalf("pipe completed payload = %+v, want completed status", recorded[4].Payload)
+	}
+}
+
+func TestRunEmitsPipeFailedOnProviderError(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventPipeFailed, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["observed"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	boom := errors.New("provider exploded")
+	p := &scriptedProvider{err: boom}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, boom) {
+		t.Fatalf("Run error = %v, want provider error", err)
+	}
+	event, ok := findEvent(stream.List(), events.EventPipeFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want pipe failed event", stream.List())
+	}
+	if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["status"] != string(harness.StatusFailed) || event.Payload["observed"] != true {
+		t.Fatalf("event payload = %+v, want failed status and hook enrichment", event.Payload)
 	}
 }
 

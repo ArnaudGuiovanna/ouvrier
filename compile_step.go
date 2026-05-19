@@ -88,6 +88,7 @@ func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {
 			Name:             tool.name,
 			Description:      tool.description,
 			InputSchema:      toolInputSchema(tool),
+			ArgumentName:     toolArgumentName(tool),
 			GoFunc:           tool.fn,
 			Effect:           tool.effect,
 			IdempotencyKey:   tool.idempotencyKey,

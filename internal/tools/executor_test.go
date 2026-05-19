@@ -106,6 +106,146 @@ func TestExecutorReturnsToolErrorResult(t *testing.T) {
 	}
 }
 
+func TestExecutorRejectsUnknownStructArgumentFields(t *testing.T) {
+	executor := NewExecutor()
+	called := false
+	err := executor.Register("lookup", func(ctx context.Context, args lookupArgs) (lookupResult, error) {
+		called = true
+		return lookupResult{Answer: "workers"}, nil
+	})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), provider.ToolCall{
+		ID:        "call_1",
+		Name:      "lookup",
+		Arguments: []byte(`{"query":"ouvrier","extra":true}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("IsError = false, want true; content=%s", result.Content)
+	}
+	if called {
+		t.Fatal("tool was called despite unknown arguments")
+	}
+	if !strings.Contains(string(result.Content), "unknown field") {
+		t.Fatalf("content = %s, want unknown field error", result.Content)
+	}
+}
+
+func TestExecutorUnwrapsSingleValueObjectArgument(t *testing.T) {
+	executor := NewExecutor()
+	err := executor.Register("score", func(ctx context.Context, days int) (int, error) {
+		return days + 1, nil
+	}, WithMetadata(Metadata{ArgumentName: "days"}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), provider.ToolCall{
+		ID:        "call_1",
+		Name:      "score",
+		Arguments: []byte(`{"days":7}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("IsError = true, content=%s", result.Content)
+	}
+	var decoded int
+	if err := json.Unmarshal(result.Content, &decoded); err != nil {
+		t.Fatalf("result content is not JSON number: %v", err)
+	}
+	if decoded != 8 {
+		t.Fatalf("result = %d, want 8", decoded)
+	}
+}
+
+func TestExecutorRejectsUnknownSingleValueObjectArguments(t *testing.T) {
+	executor := NewExecutor()
+	called := false
+	err := executor.Register("score", func(ctx context.Context, days int) (int, error) {
+		called = true
+		return days, nil
+	}, WithMetadata(Metadata{ArgumentName: "days"}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), provider.ToolCall{
+		ID:        "call_1",
+		Name:      "score",
+		Arguments: []byte(`{"days":7,"extra":true}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("IsError = false, want true; content=%s", result.Content)
+	}
+	if called {
+		t.Fatal("tool was called despite unknown arguments")
+	}
+	if !strings.Contains(string(result.Content), "unknown field") {
+		t.Fatalf("content = %s, want unknown field error", result.Content)
+	}
+}
+
+func TestExecutorValidatesArgumentsAgainstInputSchema(t *testing.T) {
+	inputSchema := json.RawMessage(`{
+		"type":"object",
+		"properties":{"days":{"type":"integer"}},
+		"required":["days"],
+		"additionalProperties":false
+	}`)
+
+	tests := []struct {
+		name string
+		args json.RawMessage
+	}{
+		{name: "missing required", args: []byte(`{}`)},
+		{name: "null value", args: []byte(`{"days":null}`)},
+		{name: "wrong type", args: []byte(`{"days":"seven"}`)},
+		{name: "extra field", args: []byte(`{"days":7,"extra":true}`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := NewExecutor()
+			called := false
+			err := executor.Register("score", func(ctx context.Context, days int) (int, error) {
+				called = true
+				return days, nil
+			}, WithMetadata(Metadata{ArgumentName: "days", InputSchema: inputSchema}))
+			if err != nil {
+				t.Fatalf("Register returned error: %v", err)
+			}
+
+			result, err := executor.Execute(context.Background(), provider.ToolCall{
+				ID:        "call_1",
+				Name:      "score",
+				Arguments: tt.args,
+			})
+			if err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+			if !result.IsError {
+				t.Fatalf("IsError = false, want true; content=%s", result.Content)
+			}
+			if called {
+				t.Fatal("tool was called despite invalid schema arguments")
+			}
+			if !strings.Contains(string(result.Content), "validate tool arguments") {
+				t.Fatalf("content = %s, want schema validation error", result.Content)
+			}
+		})
+	}
+}
+
 func TestExecutorRejectsUnsupportedSignature(t *testing.T) {
 	executor := NewExecutor()
 	err := executor.Register("bad", func(query string) error {

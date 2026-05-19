@@ -250,12 +250,22 @@ func (h *Harness) startExecution(ctx context.Context, session runtimecore.Sessio
 				return err
 			}
 		}
-		return h.emit(ctx, session, events.EventSessionStart, map[string]any{
+		if err := h.emit(ctx, session, events.EventSessionStart, map[string]any{
+			"model": h.model,
+		}); err != nil {
+			return err
+		}
+		return h.emit(ctx, session, events.EventPipeStarted, map[string]any{
 			"model": h.model,
 		})
 	}
 	if h.stateStore == nil {
-		return h.emit(ctx, session, events.EventSessionStart, map[string]any{
+		if err := h.emit(ctx, session, events.EventSessionStart, map[string]any{
+			"model": h.model,
+		}); err != nil {
+			return err
+		}
+		return h.emit(ctx, session, events.EventPipeStarted, map[string]any{
 			"model": h.model,
 		})
 	}
@@ -272,15 +282,28 @@ func (h *Harness) startExecution(ctx context.Context, session runtimecore.Sessio
 		markErr := h.finishExecution(ctx, session, StatusFailed)
 		return errors.Join(err, markErr)
 	}
-	return h.emit(ctx, session, events.EventSessionStart, map[string]any{
+	if err := h.emit(ctx, session, events.EventSessionStart, map[string]any{
+		"model": h.model,
+	}); err != nil {
+		return err
+	}
+	return h.emit(ctx, session, events.EventPipeStarted, map[string]any{
 		"model": h.model,
 	})
 }
 
 func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Session, status Status) error {
-	emitErr := h.emit(ctx, session, events.EventSessionEnd, map[string]any{
+	pipeKind := events.EventPipeFailed
+	if status == StatusCompleted {
+		pipeKind = events.EventPipeCompleted
+	}
+	emitErr := h.emit(ctx, session, pipeKind, map[string]any{
+		"model":  h.model,
 		"status": string(status),
 	})
+	emitErr = errors.Join(emitErr, h.emit(ctx, session, events.EventSessionEnd, map[string]any{
+		"status": string(status),
+	}))
 	if h.stateStore == nil || h.parentSession != nil {
 		return emitErr
 	}
