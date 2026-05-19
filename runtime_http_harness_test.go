@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -75,6 +76,128 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 	}
 	if scripted.requests[0].Messages[0].Text() != `{"title":"broken"}` {
 		t.Fatalf("provider input = %q", scripted.requests[0].Messages[0].Text())
+	}
+}
+
+func TestNewHTTPHandlerPassesPathParamsAndJSONBodyToHarnessInput(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets/{id}"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets/T-123", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	input := decodeProviderInput(t, scripted.requests[0].Messages[0].Text())
+	assertRawJSONField(t, input, "body", `{"title":"broken"}`)
+	assertRawJSONField(t, input, "path_params", `{"id":"T-123"}`)
+}
+
+func TestNewHTTPHandlerPassesPathParamsAndTextBodyToHarnessInput(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets/{id}"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets/T-456", strings.NewReader("urgent plain text"))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	input := decodeProviderInput(t, scripted.requests[0].Messages[0].Text())
+	assertRawJSONField(t, input, "body", `"urgent plain text"`)
+	assertRawJSONField(t, input, "path_params", `{"id":"T-456"}`)
+}
+
+func TestNewHTTPHandlerPassesPathParamsAndEmptyBodyToHarnessInput(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"ok"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets/{id}"),
+		Pipe("load ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets/T-999", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	input := decodeProviderInput(t, scripted.requests[0].Messages[0].Text())
+	assertNoJSONField(t, input, "body")
+	assertRawJSONField(t, input, "path_params", `{"id":"T-999"}`)
+}
+
+func decodeProviderInput(t *testing.T, raw string) map[string]json.RawMessage {
+	t.Helper()
+
+	var input map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		t.Fatalf("provider input is not JSON: %v; input=%s", err, raw)
+	}
+	return input
+}
+
+func assertRawJSONField(t *testing.T, input map[string]json.RawMessage, field, want string) {
+	t.Helper()
+
+	raw, ok := input[field]
+	if !ok {
+		t.Fatalf("provider input missing %q: %+v", field, input)
+	}
+	var gotValue any
+	if err := json.Unmarshal(raw, &gotValue); err != nil {
+		t.Fatalf("provider input field %q is not JSON: %v; field=%s", field, err, string(raw))
+	}
+	var wantValue any
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		t.Fatalf("test want JSON for %q is invalid: %v", field, err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("provider input field %q = %s, want %s", field, string(raw), want)
+	}
+}
+
+func assertNoJSONField(t *testing.T, input map[string]json.RawMessage, field string) {
+	t.Helper()
+
+	if _, ok := input[field]; ok {
+		t.Fatalf("provider input field %q is present, want absent: %+v", field, input)
 	}
 }
 

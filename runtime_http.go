@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -78,7 +79,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
-	input, err := readHTTPRequestInput(req)
+	input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
 	if err != nil {
 		writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
 		return
@@ -162,6 +163,63 @@ func readHTTPRequestInput(req *http.Request) (string, error) {
 		return "", errors.New("request body too large")
 	}
 	return string(body), nil
+}
+
+func buildHTTPRequestInput(req *http.Request, routePath string) (string, error) {
+	body, err := readHTTPRequestInput(req)
+	if err != nil {
+		return "", err
+	}
+	pathParams := httpPathParams(req, routePath)
+	if len(pathParams) == 0 {
+		return body, nil
+	}
+
+	input := map[string]any{
+		"path_params": pathParams,
+	}
+	if strings.TrimSpace(body) != "" {
+		var decoded any
+		if err := json.Unmarshal([]byte(body), &decoded); err == nil {
+			input["body"] = decoded
+		} else {
+			input["body"] = body
+		}
+	}
+
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func httpPathParams(req *http.Request, routePath string) map[string]string {
+	names := httpPathParamNames(routePath)
+	if len(names) == 0 {
+		return nil
+	}
+	params := make(map[string]string, len(names))
+	for _, name := range names {
+		params[name] = req.PathValue(name)
+	}
+	return params
+}
+
+func httpPathParamNames(routePath string) []string {
+	segments := strings.Split(routePath, "/")
+	names := make([]string, 0)
+	for _, segment := range segments {
+		if len(segment) < 3 || !strings.HasPrefix(segment, "{") || !strings.HasSuffix(segment, "}") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(segment, "{"), "}")
+		if name == "" || strings.Contains(name, "...") {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
