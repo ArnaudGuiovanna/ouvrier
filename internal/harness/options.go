@@ -35,6 +35,7 @@ type config struct {
 	eventStream     *events.EventStream
 	hookBus         *events.HookBus
 	resultSchema    *runtimecore.ResultSchema
+	schemaRepairs   int
 	providerRetries int
 	retryBackoff    time.Duration
 }
@@ -206,6 +207,16 @@ func WithResultSchema(contract *runtimecore.ResultSchema) Option {
 			return errors.New("result schema is required")
 		}
 		cfg.resultSchema = contract
+		return nil
+	}
+}
+
+func WithSchemaRepairAttempts(max int) Option {
+	return func(cfg *config) error {
+		if max < 0 {
+			return errors.New("schema repair attempts must be greater than or equal to zero")
+		}
+		cfg.schemaRepairs = max
 		return nil
 	}
 }

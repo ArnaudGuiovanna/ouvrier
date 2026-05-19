@@ -27,6 +27,9 @@ const (
 
 	EventSchemaValidationPassed EventKind = "schema_validation_passed"
 	EventSchemaValidationFailed EventKind = "schema_validation_failed"
+	EventSchemaRepairStarted    EventKind = "schema_repair_started"
+	EventSchemaRepairCompleted  EventKind = "schema_repair_completed"
+	EventSchemaRepairFailed     EventKind = "schema_repair_failed"
 
 	EventBudgetExceeded EventKind = "budget_exceeded"
 

@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"ouvrier/internal/events"
@@ -26,6 +27,7 @@ type Harness struct {
 	eventStream     *events.EventStream
 	hookBus         *events.HookBus
 	resultSchema    *runtimecore.ResultSchema
+	schemaRepairs   int
 	providerRetries int
 	retryBackoff    time.Duration
 }
@@ -68,6 +70,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		eventStream:     stream,
 		hookBus:         cfg.hookBus,
 		resultSchema:    cfg.resultSchema,
+		schemaRepairs:   cfg.schemaRepairs,
 		providerRetries: cfg.providerRetries,
 		retryBackoff:    cfg.retryBackoff,
 	}, nil
@@ -143,7 +146,16 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			return h.truncateForBudget(runCtx, session, out, payload)
 		}
 		if len(resp.ToolCalls) == 0 {
-			if err := h.validateResult(runCtx, session, out.Text); err != nil {
+			validated, repairUsage, err := h.validateResult(runCtx, session, out.Text)
+			if repairUsage.InputTokens != 0 || repairUsage.OutputTokens != 0 || repairUsage.CostUSD != 0 {
+				out.Usage.Add(repairUsage)
+				if _, payload, exceeded := h.budgetLedger.Add(repairUsage); exceeded {
+					out.Text = validated
+					return h.truncateForBudget(runCtx, session, out, payload)
+				}
+			}
+			out.Text = validated
+			if err != nil {
 				out.Status = StatusFailed
 				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 			}
@@ -289,17 +301,116 @@ func (h *Harness) truncateForBudget(ctx context.Context, session runtimecore.Ses
 	return out, h.finishExecution(ctx, session, out.Status)
 }
 
-func (h *Harness) validateResult(ctx context.Context, session runtimecore.Session, text string) error {
+func (h *Harness) validateResult(ctx context.Context, session runtimecore.Session, text string) (string, provider.Usage, error) {
 	if h.resultSchema == nil {
-		return nil
+		return text, provider.Usage{}, nil
 	}
 	if err := schema.ValidateJSON(h.resultSchema, []byte(text)); err != nil {
 		recordErr := h.recordSchemaViolation(ctx, session, err)
-		return errors.Join(err, recordErr)
+		if recordErr != nil {
+			return text, provider.Usage{}, errors.Join(err, recordErr)
+		}
+		if h.schemaRepairs <= 0 {
+			return text, provider.Usage{}, err
+		}
+		return h.repairResult(ctx, session, text, err)
 	}
-	return h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
+	return text, provider.Usage{}, h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
 		"schema": h.resultSchema.Name,
 	})
+}
+
+func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session, text string, validationErr error) (string, provider.Usage, error) {
+	var usage provider.Usage
+	currentText := text
+	currentErr := validationErr
+
+	for attempt := 1; attempt <= h.schemaRepairs; attempt++ {
+		if err := h.emit(ctx, session, events.EventSchemaRepairStarted, map[string]any{
+			"schema":       h.resultSchema.Name,
+			"attempt":      attempt,
+			"max_attempts": h.schemaRepairs,
+			"error":        currentErr.Error(),
+		}); err != nil {
+			return currentText, usage, err
+		}
+
+		resp, err := h.completeWithRetry(ctx, provider.Request{
+			Model:  h.model,
+			System: h.systemPrompt,
+			Messages: []provider.Message{
+				provider.UserText(schemaRepairPrompt(h.resultSchema, currentText, currentErr)),
+			},
+		}, true)
+		if err != nil {
+			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
+				"schema":       h.resultSchema.Name,
+				"attempt":      attempt,
+				"max_attempts": h.schemaRepairs,
+				"error":        err.Error(),
+			})
+			return currentText, usage, errors.Join(err, emitErr)
+		}
+		usage.Add(resp.Usage)
+		if len(resp.ToolCalls) > 0 {
+			err := errors.New("schema repair returned tool calls")
+			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
+				"schema":       h.resultSchema.Name,
+				"attempt":      attempt,
+				"max_attempts": h.schemaRepairs,
+				"error":        err.Error(),
+			})
+			return currentText, usage, errors.Join(err, emitErr)
+		}
+
+		currentText = resp.Text
+		if err := schema.ValidateJSON(h.resultSchema, []byte(currentText)); err != nil {
+			currentErr = err
+			recordErr := h.recordSchemaViolation(ctx, session, err)
+			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
+				"schema":       h.resultSchema.Name,
+				"attempt":      attempt,
+				"max_attempts": h.schemaRepairs,
+				"error":        err.Error(),
+			})
+			if recordErr != nil || emitErr != nil {
+				return currentText, usage, errors.Join(err, recordErr, emitErr)
+			}
+			continue
+		}
+
+		if err := h.emit(ctx, session, events.EventSchemaRepairCompleted, map[string]any{
+			"schema":       h.resultSchema.Name,
+			"attempt":      attempt,
+			"max_attempts": h.schemaRepairs,
+		}); err != nil {
+			return currentText, usage, err
+		}
+		if err := h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
+			"schema":          h.resultSchema.Name,
+			"repaired":        true,
+			"repair_attempts": attempt,
+		}); err != nil {
+			return currentText, usage, err
+		}
+		return currentText, usage, nil
+	}
+
+	return currentText, usage, currentErr
+}
+
+func schemaRepairPrompt(contract *runtimecore.ResultSchema, output string, validationErr error) string {
+	return fmt.Sprintf(`The previous assistant output did not match the required result schema.
+
+Schema name: %s
+Validation error: %s
+JSON Schema:
+%s
+
+Invalid output:
+%s
+
+Return only valid JSON that conforms to the schema. Do not include markdown, prose, or tool calls.`, contract.Name, validationErr.Error(), string(contract.JSONSchema), output)
 }
 
 func (h *Harness) recordSchemaViolation(ctx context.Context, session runtimecore.Session, validationErr error) error {

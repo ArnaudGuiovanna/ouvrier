@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -682,6 +683,185 @@ func TestRunValidatesResultSchemaAndRecordsViolation(t *testing.T) {
 	}
 }
 
+func TestRunRepairsInvalidResultSchemaWithinBound(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	contract, err := schema.FromType(reflect.TypeFor[harnessSchemaReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{
+				Text:       `{"status":1}`,
+				StopReason: provider.StopEndTurn,
+				Usage:      provider.Usage{InputTokens: 2, OutputTokens: 1, CostUSD: 0.01},
+			},
+			{
+				Text:       `{"status":"ok"}`,
+				StopReason: provider.StopEndTurn,
+				Usage:      provider.Usage{InputTokens: 3, OutputTokens: 2, CostUSD: 0.02},
+			},
+		},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+		harness.WithEventStream(stream),
+		harness.WithResultSchema(contract),
+		harness.WithSchemaRepairAttempts(1),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if out.Text != `{"status":"ok"}` {
+		t.Fatalf("Text = %q, want repaired JSON", out.Text)
+	}
+	if out.Usage.InputTokens != 5 || out.Usage.OutputTokens != 3 || out.Usage.CostUSD != 0.03 {
+		t.Fatalf("Usage = %+v, want initial plus repair usage", out.Usage)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("provider calls = %d, want initial and repair", len(p.requests))
+	}
+	repairReq := p.requests[1]
+	if len(repairReq.Tools) != 0 {
+		t.Fatalf("repair tools = %+v, want no tools", repairReq.Tools)
+	}
+	if !strings.Contains(repairReq.Messages[0].Text(), "Return only valid JSON") ||
+		!strings.Contains(repairReq.Messages[0].Text(), contract.Name) {
+		t.Fatalf("repair prompt = %q, want JSON-only schema repair prompt", repairReq.Messages[0].Text())
+	}
+
+	violations, err := store.SchemaViolations(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want original violation only", len(violations))
+	}
+	if _, ok := findEvent(stream.List(), events.EventSchemaRepairStarted); !ok {
+		t.Fatalf("events = %+v, want schema repair started event", stream.List())
+	}
+	if _, ok := findEvent(stream.List(), events.EventSchemaRepairCompleted); !ok {
+		t.Fatalf("events = %+v, want schema repair completed event", stream.List())
+	}
+	if event, ok := findEvent(stream.List(), events.EventSchemaValidationPassed); !ok || event.Payload["repaired"] != true {
+		t.Fatalf("events = %+v, want repaired schema validation passed event", stream.List())
+	}
+}
+
+func TestRunFailsWhenSchemaRepairAttemptsAreExhausted(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	contract, err := schema.FromType(reflect.TypeFor[harnessSchemaReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+			{Text: `{"status":2}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+		harness.WithEventStream(stream),
+		harness.WithResultSchema(contract),
+		harness.WithSchemaRepairAttempts(1),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err == nil {
+		t.Fatal("Run returned nil error after exhausted repair")
+	}
+	if out.Status != harness.StatusFailed {
+		t.Fatalf("Status = %q, want failed", out.Status)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("provider calls = %d, want initial and one repair", len(p.requests))
+	}
+	violations, err := store.SchemaViolations(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 2 {
+		t.Fatalf("violations = %d, want original and repair violations", len(violations))
+	}
+	if _, ok := findEvent(stream.List(), events.EventSchemaRepairFailed); !ok {
+		t.Fatalf("events = %+v, want schema repair failed event", stream.List())
+	}
+	if _, ok := findEvent(stream.List(), events.EventSchemaValidationPassed); ok {
+		t.Fatalf("events = %+v, did not want schema validation passed", stream.List())
+	}
+}
+
+func TestRunPassesSchemaRepairEventsThroughHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventSchemaRepairStarted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	contract, err := schema.FromType(reflect.TypeFor[harnessSchemaReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+			{Text: `{"status":"ok"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+		harness.WithResultSchema(contract),
+		harness.WithSchemaRepairAttempts(1),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	event, ok := findEvent(stream.List(), events.EventSchemaRepairStarted)
+	if !ok {
+		t.Fatalf("events = %+v, want schema repair started event", stream.List())
+	}
+	if event.Payload["checked"] != true {
+		t.Fatalf("event payload = %+v, want hook enrichment", event.Payload)
+	}
+}
+
 func TestRunEmitsSchemaValidationPassedWhenResultSchemaMatches(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -775,6 +955,17 @@ func TestRunPassesSchemaValidationPassedThroughHookBus(t *testing.T) {
 	}
 	if event.Payload["checked"] != true {
 		t.Fatalf("event payload = %+v, want hook enrichment", event.Payload)
+	}
+}
+
+func TestWithSchemaRepairAttemptsRejectsNegativeValue(t *testing.T) {
+	p := &scriptedProvider{}
+	_, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithSchemaRepairAttempts(-1),
+	)
+	if err == nil {
+		t.Fatal("New returned nil error for negative repair attempts")
 	}
 }
 
