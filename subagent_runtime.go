@@ -71,7 +71,11 @@ func (h *subAgentHandler) Execute(ctx context.Context, call provider.ToolCall) (
 	if err := h.emitTask(ctx, parent, events.EventTaskStarted, call, nil); err != nil {
 		return provider.ToolResult{}, err
 	}
-	output, err := h.runtime.runSteps(ctx, h.spec.Pipeline.Steps, input, planRunScope{parentSession: &parent})
+	scope := planRunScope{parentSession: &parent}
+	if ledger, ok := harness.BudgetLedgerFromContext(ctx); ok {
+		scope.budgetLedger = ledger
+	}
+	output, err := h.runtime.runSteps(ctx, h.spec.Pipeline.Steps, input, scope)
 	if err != nil {
 		emitErr := h.emitTask(ctx, parent, events.EventTaskFailed, call, map[string]any{"error": err.Error()})
 		return provider.ToolResult{}, errors.Join(err, emitErr)

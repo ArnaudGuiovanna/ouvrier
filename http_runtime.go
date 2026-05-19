@@ -62,6 +62,7 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 
 type planRunScope struct {
 	parentSession *runtimeplan.Session
+	budgetLedger  *harness.BudgetLedger
 }
 
 func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, input string, scope planRunScope) (string, error) {
@@ -100,6 +101,9 @@ func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, in
 		}
 		if scope.parentSession != nil {
 			harnessOptions = append(harnessOptions, harness.WithParentSession(*scope.parentSession))
+		}
+		if scope.budgetLedger != nil {
+			harnessOptions = append(harnessOptions, harness.WithBudgetLedger(scope.budgetLedger))
 		}
 		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {

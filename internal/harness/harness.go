@@ -18,6 +18,7 @@ type Harness struct {
 	model           string
 	systemPrompt    string
 	budget          runtimecore.Budget
+	budgetLedger    *BudgetLedger
 	parentSession   *runtimecore.Session
 	toolExecutor    *tools.Executor
 	tools           []provider.ToolSpec
@@ -50,11 +51,16 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 			return nil, err
 		}
 	}
+	ledger := cfg.budgetLedger
+	if ledger == nil {
+		ledger = NewBudgetLedger(cfg.budget)
+	}
 	return &Harness{
 		provider:        p,
 		model:           cfg.model,
 		systemPrompt:    cfg.systemPrompt,
 		budget:          cfg.budget,
+		budgetLedger:    ledger,
 		parentSession:   cfg.parentSession,
 		toolExecutor:    cfg.toolExecutor,
 		tools:           append([]provider.ToolSpec(nil), cfg.tools...),
@@ -133,7 +139,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		if resp.Text != "" {
 			out.Text = resp.Text
 		}
-		if payload, exceeded := h.usageBudgetExceeded(out.Usage); exceeded {
+		if _, payload, exceeded := h.budgetLedger.Add(resp.Usage); exceeded {
 			return h.truncateForBudget(runCtx, session, out, payload)
 		}
 		if len(resp.ToolCalls) == 0 {
@@ -157,6 +163,9 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 		}
 		messages = append(messages, toolMessages...)
+		if _, payload, exceeded := h.budgetLedger.Exceeded(); exceeded {
+			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
+		}
 	}
 
 	return h.truncateForBudget(runCtx, session, out, map[string]any{
@@ -259,33 +268,6 @@ func executionStatus(status Status) state.ExecutionStatus {
 	default:
 		return state.ExecutionFailed
 	}
-}
-
-func (h *Harness) usageBudgetExceeded(usage provider.Usage) (map[string]any, bool) {
-	usedTokens := usage.InputTokens + usage.OutputTokens
-	if h.budget.MaxTokens > 0 && usedTokens > h.budget.MaxTokens {
-		return map[string]any{
-			"budget":        "tokens",
-			"max_tokens":    h.budget.MaxTokens,
-			"used_tokens":   usedTokens,
-			"input_tokens":  usage.InputTokens,
-			"output_tokens": usage.OutputTokens,
-			"max_cost_usd":  h.budget.MaxCostUSD,
-			"used_cost_usd": usage.CostUSD,
-		}, true
-	}
-	if h.budget.MaxCostUSD > 0 && usage.CostUSD > h.budget.MaxCostUSD {
-		return map[string]any{
-			"budget":        "cost_usd",
-			"max_tokens":    h.budget.MaxTokens,
-			"used_tokens":   usedTokens,
-			"input_tokens":  usage.InputTokens,
-			"output_tokens": usage.OutputTokens,
-			"max_cost_usd":  h.budget.MaxCostUSD,
-			"used_cost_usd": usage.CostUSD,
-		}, true
-	}
-	return nil, false
 }
 
 func (h *Harness) wallClockBudgetPayload(ctx context.Context) (map[string]any, bool) {

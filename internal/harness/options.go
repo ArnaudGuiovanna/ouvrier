@@ -27,6 +27,7 @@ type config struct {
 	systemPrompt    string
 	budget          runtimecore.Budget
 	budgetSet       bool
+	budgetLedger    *BudgetLedger
 	parentSession   *runtimecore.Session
 	toolExecutor    *tools.Executor
 	tools           []provider.ToolSpec
@@ -118,6 +119,16 @@ func WithParentSession(parent runtimecore.Session) Option {
 		if !cfg.budgetSet {
 			cfg.budget = parent.Budget
 		}
+		return nil
+	}
+}
+
+func WithBudgetLedger(ledger *BudgetLedger) Option {
+	return func(cfg *config) error {
+		if ledger == nil {
+			return errors.New("budget ledger is required")
+		}
+		cfg.budgetLedger = ledger
 		return nil
 	}
 }

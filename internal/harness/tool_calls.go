@@ -80,7 +80,7 @@ func (h *Harness) executeSingleToolCall(ctx context.Context, session runtimecore
 }
 
 func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, call provider.ToolCall) toolCallOutcome {
-	result, err := h.toolExecutor.Execute(contextWithSession(ctx, session), call)
+	result, err := h.toolExecutor.Execute(contextWithExecution(ctx, session, h.budgetLedger), call)
 	if err != nil {
 		if payload, ok := h.wallClockBudgetPayload(ctx); ok {
 			return toolCallOutcome{budgetPayload: payload}
