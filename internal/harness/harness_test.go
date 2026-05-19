@@ -390,6 +390,17 @@ func TestRunReturnsFailedOutcomeOnProviderError(t *testing.T) {
 }
 
 func TestRunRetriesTransientProviderErrorBeforeSideEffects(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventLLMCallFailed, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
 	p := &scriptedProvider{
 		errors: []error{provider.TransientError(errors.New("rate limited"))},
 		responses: []provider.Response{{
@@ -400,6 +411,8 @@ func TestRunRetriesTransientProviderErrorBeforeSideEffects(t *testing.T) {
 	h, err := harness.New(p,
 		harness.WithModel("anthropic/claude-sonnet-4-6"),
 		harness.WithProviderRetries(2),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
 	)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -418,9 +431,30 @@ func TestRunRetriesTransientProviderErrorBeforeSideEffects(t *testing.T) {
 	if out.Iterations != 1 {
 		t.Fatalf("Iterations = %d, want one logical LLM iteration", out.Iterations)
 	}
+	event, ok := findEvent(stream.List(), events.EventLLMCallFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want LLM failed event for transient retry", stream.List())
+	}
+	if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["iteration"] != 1 ||
+		event.Payload["attempt"] != 1 ||
+		event.Payload["retrying"] != true ||
+		event.Payload["transient"] != true ||
+		event.Payload["checked"] != true {
+		t.Fatalf("event payload = %+v, want retrying transient failure with hook enrichment", event.Payload)
+	}
+	if _, ok := event.Payload["messages"]; ok {
+		t.Fatalf("event payload = %+v, must not include request messages", event.Payload)
+	}
 }
 
 func TestRunDoesNotRetryTransientProviderErrorAfterToolCall(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
 	call := provider.ToolCall{
 		ID:        "call_1",
 		Name:      "lookup",
@@ -444,6 +478,7 @@ func TestRunDoesNotRetryTransientProviderErrorAfterToolCall(t *testing.T) {
 		harness.WithModel("anthropic/claude-sonnet-4-6"),
 		harness.WithProviderRetries(2),
 		harness.WithToolExecutor(executor),
+		harness.WithEventStream(stream),
 	)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -458,6 +493,16 @@ func TestRunDoesNotRetryTransientProviderErrorAfterToolCall(t *testing.T) {
 	}
 	if len(p.requests) != 2 {
 		t.Fatalf("provider calls = %d, want no retry after tool call", len(p.requests))
+	}
+	event, ok := findEvent(stream.List(), events.EventLLMCallFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want LLM failed event after tool call", stream.List())
+	}
+	if event.Payload["iteration"] != 2 ||
+		event.Payload["attempt"] != 1 ||
+		event.Payload["retrying"] != false ||
+		event.Payload["transient"] != true {
+		t.Fatalf("event payload = %+v, want non-retry transient failure after tool call", event.Payload)
 	}
 }
 

@@ -109,7 +109,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			out.Status = StatusFailed
 			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 		}
-		resp, err := h.completeWithRetry(runCtx, provider.Request{
+		resp, err := h.completeWithRetry(runCtx, session, out.Iterations, provider.Request{
 			Model:    h.model,
 			System:   h.systemPrompt,
 			Messages: append([]provider.Message(nil), messages...),
@@ -120,11 +120,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 				return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
 			}
 			out.Status = StatusFailed
-			emitErr := h.emit(runCtx, session, events.EventAfterLLM, map[string]any{
-				"iteration": out.Iterations,
-				"error":     err.Error(),
-			})
-			return out, errors.Join(err, emitErr, h.finishExecution(runCtx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 		}
 
 		out.Usage.Add(resp.Usage)
@@ -146,7 +142,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			return h.truncateForBudget(runCtx, session, out, payload)
 		}
 		if len(resp.ToolCalls) == 0 {
-			validated, repairUsage, err := h.validateResult(runCtx, session, out.Text)
+			validated, repairUsage, err := h.validateResult(runCtx, session, out.Iterations, out.Text)
 			if repairUsage.InputTokens != 0 || repairUsage.OutputTokens != 0 || repairUsage.CostUSD != 0 {
 				out.Usage.Add(repairUsage)
 				if _, payload, exceeded := h.budgetLedger.Add(repairUsage); exceeded {
@@ -187,15 +183,41 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 	})
 }
 
-func (h *Harness) completeWithRetry(ctx context.Context, req provider.Request, retryAllowed bool) (provider.Response, error) {
+func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Session, iteration int, req provider.Request, retryAllowed bool) (provider.Response, error) {
 	resp, err := h.provider.Complete(ctx, req)
 	for attempt := 0; err != nil && retryAllowed && provider.IsTransientError(err) && attempt < h.providerRetries; attempt++ {
+		if emitErr := h.emitProviderFailure(ctx, session, iteration, attempt+1, req.Model, err, true); emitErr != nil {
+			return provider.Response{}, errors.Join(err, emitErr)
+		}
 		if waitErr := waitRetryBackoff(ctx, h.retryBackoff, attempt); waitErr != nil {
 			return provider.Response{}, waitErr
 		}
 		resp, err = h.provider.Complete(ctx, req)
 	}
+	if err != nil {
+		if emitErr := h.emitProviderFailure(ctx, session, iteration, providerAttemptNumber(err, retryAllowed, h.providerRetries), req.Model, err, false); emitErr != nil {
+			return provider.Response{}, errors.Join(err, emitErr)
+		}
+	}
 	return resp, err
+}
+
+func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.Session, iteration, attempt int, model string, err error, retrying bool) error {
+	return h.emit(ctx, session, events.EventLLMCallFailed, map[string]any{
+		"iteration": iteration,
+		"attempt":   attempt,
+		"model":     model,
+		"error":     err.Error(),
+		"transient": provider.IsTransientError(err),
+		"retrying":  retrying,
+	})
+}
+
+func providerAttemptNumber(err error, retryAllowed bool, maxRetries int) int {
+	if retryAllowed && provider.IsTransientError(err) {
+		return maxRetries + 1
+	}
+	return 1
 }
 
 func waitRetryBackoff(ctx context.Context, backoff time.Duration, attempt int) error {
@@ -301,7 +323,7 @@ func (h *Harness) truncateForBudget(ctx context.Context, session runtimecore.Ses
 	return out, h.finishExecution(ctx, session, out.Status)
 }
 
-func (h *Harness) validateResult(ctx context.Context, session runtimecore.Session, text string) (string, provider.Usage, error) {
+func (h *Harness) validateResult(ctx context.Context, session runtimecore.Session, iteration int, text string) (string, provider.Usage, error) {
 	if h.resultSchema == nil {
 		return text, provider.Usage{}, nil
 	}
@@ -313,14 +335,14 @@ func (h *Harness) validateResult(ctx context.Context, session runtimecore.Sessio
 		if h.schemaRepairs <= 0 {
 			return text, provider.Usage{}, err
 		}
-		return h.repairResult(ctx, session, text, err)
+		return h.repairResult(ctx, session, iteration, text, err)
 	}
 	return text, provider.Usage{}, h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
 		"schema": h.resultSchema.Name,
 	})
 }
 
-func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session, text string, validationErr error) (string, provider.Usage, error) {
+func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session, iteration int, text string, validationErr error) (string, provider.Usage, error) {
 	var usage provider.Usage
 	currentText := text
 	currentErr := validationErr
@@ -335,7 +357,7 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			return currentText, usage, err
 		}
 
-		resp, err := h.completeWithRetry(ctx, provider.Request{
+		resp, err := h.completeWithRetry(ctx, session, iteration, provider.Request{
 			Model:  h.model,
 			System: h.systemPrompt,
 			Messages: []provider.Message{
