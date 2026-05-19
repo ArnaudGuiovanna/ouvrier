@@ -241,6 +241,96 @@ func TestNewHTTPHandlerPersistsHarnessStateWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerEmitsPipelineEventsThroughHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventPipelineStarted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets/{id}"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, eventStream: stream, hookBus: hooks})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets/T-123", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	started, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineStarted)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline started event", stream.List())
+	}
+	if started.Payload["method"] != "POST" || started.Payload["path"] != "/tickets/{id}" || started.Payload["checked"] != true {
+		t.Fatalf("pipeline started payload = %+v, want route details and hook enrichment", started.Payload)
+	}
+	completed, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineCompleted)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline completed event", stream.List())
+	}
+	if completed.ExecID == "" || completed.SessionID == "" || completed.TraceID == "" {
+		t.Fatalf("completed event = %+v, want session identifiers", completed)
+	}
+	if completed.Payload["status"] != "completed" || completed.Payload["steps"] != 1 {
+		t.Fatalf("pipeline completed payload = %+v, want completed status", completed.Payload)
+	}
+	if _, ok := completed.Payload["output"]; ok {
+		t.Fatalf("pipeline completed payload = %+v, must not include raw output", completed.Payload)
+	}
+}
+
+func TestNewHTTPHandlerEmitsPipelineFailedOnProviderError(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{err: context.DeadlineExceeded}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	failed, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline failed event", stream.List())
+	}
+	if failed.ExecID == "" || failed.SessionID == "" || failed.TraceID == "" {
+		t.Fatalf("failed event = %+v, want session identifiers", failed)
+	}
+	if failed.Payload["status"] != "failed" || failed.Payload["error"] == "" {
+		t.Fatalf("pipeline failed payload = %+v, want failed status and error", failed.Payload)
+	}
+	if _, ok := failed.Payload["input"]; ok {
+		t.Fatalf("pipeline failed payload = %+v, must not include raw input", failed.Payload)
+	}
+}
+
 func TestNewHTTPHandlerRecordsOutputSchemaViolation(t *testing.T) {
 	store := state.NewMemoryStore()
 	scripted := &httpScriptedProvider{

@@ -65,7 +65,20 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 }
 
 func (rt httpRuntime) runPlanResult(ctx context.Context, plan runtimeplan.Plan, input string) (planRunResult, error) {
-	return rt.runStepsResult(ctx, plan.Steps, input, planRunScope{})
+	result := planRunResult{Output: input}
+	if err := rt.emitPipelineEvent(ctx, result, plan, events.EventPipelineStarted, "started", nil); err != nil {
+		return result, err
+	}
+
+	result, err := rt.runStepsResult(ctx, plan.Steps, input, planRunScope{})
+	if err != nil {
+		emitErr := rt.emitPipelineEvent(ctx, result, plan, events.EventPipelineFailed, "failed", err)
+		return result, errors.Join(err, emitErr)
+	}
+	if err := rt.emitPipelineEvent(ctx, result, plan, events.EventPipelineCompleted, "completed", nil); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 type planRunScope struct {

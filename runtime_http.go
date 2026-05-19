@@ -346,6 +346,20 @@ func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult
 	return err
 }
 
+func (rt httpRuntime) emitPipelineEvent(ctx context.Context, result planRunResult, plan runtimeplan.Plan, kind events.EventKind, status string, eventErr error) error {
+	payload := map[string]any{
+		"method":   plan.Trigger.Method,
+		"path":     plan.Trigger.Path,
+		"steps":    len(plan.Steps),
+		"terminal": string(plan.Terminal.Kind),
+		"status":   status,
+	}
+	if eventErr != nil {
+		payload["error"] = eventErr.Error()
+	}
+	return rt.emitRuntimeEvent(ctx, result, kind, payload)
+}
+
 func applyPushTerminal(ctx context.Context, terminal runtimeplan.Terminal, output string) error {
 	if terminal.PushWebhookURL == "" {
 		return nil
