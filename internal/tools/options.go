@@ -6,11 +6,18 @@ import (
 	"ouvrier/internal/policy"
 )
 
+type ToolKind string
+
+const (
+	ToolKindSubAgent ToolKind = "subagent"
+)
+
 type Metadata struct {
 	Effect           policy.Effect
 	IdempotencyKey   string
 	SideEffects      []string
 	RequiresApproval bool
+	Kind             ToolKind
 }
 
 type Option func(*Executor)

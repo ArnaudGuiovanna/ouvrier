@@ -81,3 +81,29 @@ func TestExecutorPassesToolMetadataToPermissionPolicy(t *testing.T) {
 		t.Fatalf("action side effects = %+v, want ticket-write", action.SideEffects)
 	}
 }
+
+func TestExecutorNewScopeKeepsPolicyWithoutSharingRegisteredTools(t *testing.T) {
+	policyRecorder := &recordingPolicy{}
+	executor := NewExecutor(WithPermissionPolicy(policyRecorder))
+	if err := executor.Register("base_only", func(ctx context.Context) error { return nil }); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	scoped := executor.NewScope()
+	if _, err := scoped.Execute(context.Background(), provider.ToolCall{ID: "call_missing", Name: "base_only"}); err == nil {
+		t.Fatal("scoped Execute returned nil error for base-only tool")
+	}
+	if err := scoped.Register("scoped", func(ctx context.Context) error { return nil }); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	result, err := scoped.Execute(context.Background(), provider.ToolCall{ID: "call_scoped", Name: "scoped"})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("IsError = false, want policy denial from copied policy")
+	}
+	if policyRecorder.action.ToolName != "scoped" {
+		t.Fatalf("policy action = %+v, want scoped tool", policyRecorder.action)
+	}
+}

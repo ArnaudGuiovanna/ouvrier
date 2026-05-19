@@ -29,6 +29,7 @@ func registerRuntimeSubAgents(rt httpRuntime, executor *tools.Executor, subAgent
 		handler := newSubAgentHandler(rt, subAgent)
 		if err := executor.RegisterHandler(subAgent.Name, handler, tools.WithMetadata(tools.Metadata{
 			Effect: policy.EffectSideEffecting,
+			Kind:   tools.ToolKindSubAgent,
 		})); err != nil {
 			return nil, err
 		}

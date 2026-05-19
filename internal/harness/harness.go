@@ -147,37 +147,16 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 
 		out.ToolCalls = append(out.ToolCalls, resp.ToolCalls...)
 		messages = append(messages, provider.AssistantToolCalls(resp.Text, resp.ToolCalls...))
-		for _, call := range resp.ToolCalls {
-			toolAttempted = true
-			if err := h.emit(runCtx, session, events.EventBeforeTool, map[string]any{
-				"tool": call.Name,
-			}); err != nil {
-				out.Status = StatusFailed
-				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
-			}
-			result, err := h.toolExecutor.Execute(contextWithSession(runCtx, session), call)
-			if err != nil {
-				if payload, ok := h.wallClockBudgetPayload(runCtx); ok {
-					return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
-				}
-				if emitErr := h.emit(runCtx, session, events.EventAfterTool, map[string]any{
-					"tool":  call.Name,
-					"error": err.Error(),
-				}); emitErr != nil {
-					out.Status = StatusFailed
-					return out, errors.Join(err, emitErr, h.finishExecution(runCtx, session, out.Status))
-				}
-				messages = append(messages, provider.ToolResultText(call, err.Error(), true))
-				continue
-			}
-			if err := h.emit(runCtx, session, events.EventAfterTool, map[string]any{
-				"tool": call.Name,
-			}); err != nil {
-				out.Status = StatusFailed
-				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
-			}
-			messages = append(messages, provider.ToolResultMessage(result))
+		toolAttempted = true
+		toolMessages, budgetPayload, err := h.executeToolCalls(runCtx, session, resp.ToolCalls)
+		if budgetPayload != nil {
+			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, budgetPayload)
 		}
+		if err != nil {
+			out.Status = StatusFailed
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
+		}
+		messages = append(messages, toolMessages...)
 	}
 
 	return h.truncateForBudget(runCtx, session, out, map[string]any{

@@ -68,9 +68,9 @@ func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, in
 	if len(steps) == 0 {
 		return input, nil
 	}
-	executor := rt.toolExecutor
-	if executor == nil {
-		executor = tools.NewExecutor()
+	executor := tools.NewExecutor()
+	if rt.toolExecutor != nil {
+		executor = rt.toolExecutor.NewScope()
 	}
 
 	current := input

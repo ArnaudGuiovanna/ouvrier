@@ -129,3 +129,25 @@ func TestExecutorHonorsCanceledContext(t *testing.T) {
 		t.Fatalf("Execute error = %v, want context.Canceled", err)
 	}
 }
+
+func TestExecutorOnlyMarksSubAgentHandlersAsParallel(t *testing.T) {
+	executor := NewExecutor()
+	if err := executor.Register("lookup", func(ctx context.Context) error { return nil }); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := executor.RegisterHandler("translate", handlerFunc(func(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {
+		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name}, nil
+	}), WithMetadata(Metadata{Kind: ToolKindSubAgent})); err != nil {
+		t.Fatalf("RegisterHandler returned error: %v", err)
+	}
+
+	if executor.CanRunParallelSubAgent("lookup") {
+		t.Fatal("lookup CanRunParallelSubAgent = true, want false")
+	}
+	if !executor.CanRunParallelSubAgent("translate") {
+		t.Fatal("translate CanRunParallelSubAgent = false, want true")
+	}
+	if executor.CanRunParallelSubAgent("missing") {
+		t.Fatal("missing CanRunParallelSubAgent = true, want false")
+	}
+}

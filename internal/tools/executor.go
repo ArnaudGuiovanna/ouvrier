@@ -49,6 +49,15 @@ func NewExecutor(options ...Option) *Executor {
 	return executor
 }
 
+func (e *Executor) NewScope() *Executor {
+	if e == nil {
+		return NewExecutor()
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return NewExecutor(WithPermissionPolicy(e.policy))
+}
+
 func (e *Executor) Register(name string, fn any, options ...RegisterOption) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -143,6 +152,11 @@ func (e *Executor) lookup(name string) (registeredTool, bool) {
 	defer e.mu.RUnlock()
 	tool, ok := e.tools[name]
 	return tool, ok
+}
+
+func (e *Executor) CanRunParallelSubAgent(name string) bool {
+	tool, ok := e.lookup(name)
+	return ok && tool.metadata.Kind == ToolKindSubAgent
 }
 
 func newRegisteredTool(name string, fn any) (registeredTool, error) {
