@@ -57,6 +57,33 @@ func TestMemoryStoreSavesExecutionAndSessionSnapshots(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreListsExecutionsInDeterministicOrder(t *testing.T) {
+	store := NewMemoryStore()
+	base := time.Date(2026, 5, 18, 14, 0, 0, 0, time.UTC)
+	for _, execution := range []Execution{
+		{ExecID: "exec_c", TraceID: "trace_c", Status: ExecutionCompleted, StartedAt: base.Add(2 * time.Minute)},
+		{ExecID: "exec_b", TraceID: "trace_b", Status: ExecutionRunning, StartedAt: base.Add(time.Minute)},
+		{ExecID: "exec_a", TraceID: "trace_a", Status: ExecutionFailed, StartedAt: base.Add(time.Minute)},
+	} {
+		if err := store.SaveExecution(context.Background(), execution); err != nil {
+			t.Fatalf("SaveExecution returned error: %v", err)
+		}
+	}
+
+	executions, err := store.Executions(context.Background())
+	if err != nil {
+		t.Fatalf("Executions returned error: %v", err)
+	}
+	gotIDs := executionIDs(executions)
+	wantIDs := []string{"exec_a", "exec_b", "exec_c"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
+		t.Fatalf("execution IDs = %v, want %v", gotIDs, wantIDs)
+	}
+	if executions[1].Status != ExecutionRunning {
+		t.Fatalf("second execution = %+v", executions[1])
+	}
+}
+
 func TestMemoryStoreReserveIdempotencyKey(t *testing.T) {
 	store := NewMemoryStore()
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 
 	runtimecore "ouvrier/internal/runtime"
 )
@@ -19,8 +20,8 @@ func (s *SQLiteStore) SaveSession(ctx context.Context, session runtimecore.Sessi
 
 	_, err = s.db.ExecContext(ctx, `INSERT INTO ouvrier_sessions (
 		session_id, exec_id, parent_session_id, trace_id, model, started_at,
-		max_iterations, max_tokens, max_cost_usd
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		max_iterations, max_tokens, max_cost_usd, max_wallclock_ns
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(session_id) DO UPDATE SET
 		exec_id = excluded.exec_id,
 		parent_session_id = excluded.parent_session_id,
@@ -29,7 +30,8 @@ func (s *SQLiteStore) SaveSession(ctx context.Context, session runtimecore.Sessi
 		started_at = excluded.started_at,
 		max_iterations = excluded.max_iterations,
 		max_tokens = excluded.max_tokens,
-		max_cost_usd = excluded.max_cost_usd`,
+		max_cost_usd = excluded.max_cost_usd,
+		max_wallclock_ns = excluded.max_wallclock_ns`,
 		session.SessionID,
 		session.ExecID,
 		session.ParentSessionID,
@@ -39,6 +41,7 @@ func (s *SQLiteStore) SaveSession(ctx context.Context, session runtimecore.Sessi
 		session.Budget.MaxIterations,
 		session.Budget.MaxTokens,
 		session.Budget.MaxCostUSD,
+		int64(session.Budget.MaxWallClock),
 	)
 	return err
 }
@@ -50,7 +53,7 @@ func (s *SQLiteStore) Session(ctx context.Context, sessionID string) (runtimecor
 	}
 
 	session, err := s.querySession(ctx, `SELECT session_id, exec_id, parent_session_id,
-		trace_id, model, started_at, max_iterations, max_tokens, max_cost_usd
+		trace_id, model, started_at, max_iterations, max_tokens, max_cost_usd, max_wallclock_ns
 		FROM ouvrier_sessions WHERE session_id = ?`, sessionID)
 	if missingSQLiteRow(err) {
 		return runtimecore.Session{}, false, nil
@@ -68,7 +71,7 @@ func (s *SQLiteStore) Sessions(ctx context.Context) ([]runtimecore.Session, erro
 	}
 
 	rows, err := s.db.QueryContext(ctx, `SELECT session_id, exec_id, parent_session_id,
-		trace_id, model, started_at, max_iterations, max_tokens, max_cost_usd
+		trace_id, model, started_at, max_iterations, max_tokens, max_cost_usd, max_wallclock_ns
 		FROM ouvrier_sessions ORDER BY started_at, session_id`)
 	if err != nil {
 		return nil, err
@@ -97,6 +100,7 @@ type sqliteSessionScanner interface {
 func scanSQLiteSession(scanner sqliteSessionScanner) (runtimecore.Session, error) {
 	var session runtimecore.Session
 	var startedAt string
+	var maxWallClockNS int64
 	err := scanner.Scan(
 		&session.SessionID,
 		&session.ExecID,
@@ -107,6 +111,7 @@ func scanSQLiteSession(scanner sqliteSessionScanner) (runtimecore.Session, error
 		&session.Budget.MaxIterations,
 		&session.Budget.MaxTokens,
 		&session.Budget.MaxCostUSD,
+		&maxWallClockNS,
 	)
 	if err != nil {
 		return runtimecore.Session{}, err
@@ -115,6 +120,7 @@ func scanSQLiteSession(scanner sqliteSessionScanner) (runtimecore.Session, error
 	if err != nil {
 		return runtimecore.Session{}, err
 	}
+	session.Budget.MaxWallClock = time.Duration(maxWallClockNS)
 	return session, nil
 }
 

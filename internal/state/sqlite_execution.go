@@ -63,3 +63,56 @@ func (s *SQLiteStore) Execution(ctx context.Context, execID string) (Execution, 
 	}
 	return execution, true, nil
 }
+
+func (s *SQLiteStore) Executions(ctx context.Context) ([]Execution, error) {
+	ctx, err := activeContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT exec_id, trace_id, status, started_at, completed_at
+		FROM ouvrier_executions ORDER BY started_at ASC, exec_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var executions []Execution
+	for rows.Next() {
+		execution, err := scanSQLiteExecution(rows)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return executions, nil
+}
+
+type sqliteExecutionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSQLiteExecution(scanner sqliteExecutionScanner) (Execution, error) {
+	var execution Execution
+	var status string
+	var startedAt string
+	var completedAt sql.NullString
+	if err := scanner.Scan(&execution.ExecID, &execution.TraceID, &status, &startedAt, &completedAt); err != nil {
+		return Execution{}, err
+	}
+
+	execution.Status = ExecutionStatus(status)
+	var err error
+	execution.StartedAt, err = parseSQLiteTime(startedAt)
+	if err != nil {
+		return Execution{}, err
+	}
+	execution.CompletedAt, err = parseNullableSQLiteTime(completedAt)
+	if err != nil {
+		return Execution{}, err
+	}
+	return execution, nil
+}

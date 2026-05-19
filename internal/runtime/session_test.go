@@ -10,7 +10,7 @@ func TestNewSessionBuildsStructuredRootSession(t *testing.T) {
 	session, err := NewSession("anthropic/claude-sonnet-4-6",
 		WithSessionIDs("exec_1", "sess_1", "trace_1"),
 		WithSessionClock(func() time.Time { return started }),
-		WithSessionBudget(Budget{MaxIterations: 25, MaxTokens: 10_000, MaxCostUSD: 1.5}),
+		WithSessionBudget(Budget{MaxIterations: 25, MaxTokens: 10_000, MaxCostUSD: 1.5, MaxWallClock: time.Minute}),
 	)
 	if err != nil {
 		t.Fatalf("NewSession returned error: %v", err)
@@ -34,7 +34,7 @@ func TestNewSessionBuildsStructuredRootSession(t *testing.T) {
 	if !session.StartedAt.Equal(started) {
 		t.Fatalf("StartedAt = %v, want %v", session.StartedAt, started)
 	}
-	if session.Budget.MaxIterations != 25 || session.Budget.MaxTokens != 10_000 || session.Budget.MaxCostUSD != 1.5 {
+	if session.Budget.MaxIterations != 25 || session.Budget.MaxTokens != 10_000 || session.Budget.MaxCostUSD != 1.5 || session.Budget.MaxWallClock != time.Minute {
 		t.Fatalf("Budget = %+v", session.Budget)
 	}
 }

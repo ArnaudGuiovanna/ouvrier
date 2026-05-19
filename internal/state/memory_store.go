@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -49,6 +50,26 @@ func (s *MemoryStore) Execution(ctx context.Context, execID string) (Execution, 
 	defer s.mu.RUnlock()
 	execution, ok := s.executions[execID]
 	return execution, ok, nil
+}
+
+func (s *MemoryStore) Executions(ctx context.Context) ([]Execution, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	executions := make([]Execution, 0, len(s.executions))
+	for _, execution := range s.executions {
+		executions = append(executions, execution)
+	}
+	sort.Slice(executions, func(i, j int) bool {
+		if executions[i].StartedAt.Equal(executions[j].StartedAt) {
+			return executions[i].ExecID < executions[j].ExecID
+		}
+		return executions[i].StartedAt.Before(executions[j].StartedAt)
+	})
+	return executions, nil
 }
 
 func (s *MemoryStore) SaveSession(ctx context.Context, session runtimecore.Session) error {

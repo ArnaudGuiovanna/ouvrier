@@ -10,6 +10,7 @@ import (
 type Store interface {
 	SaveExecution(context.Context, Execution) error
 	Execution(context.Context, string) (Execution, bool, error)
+	Executions(context.Context) ([]Execution, error)
 	SaveSession(context.Context, runtimecore.Session) error
 	Session(context.Context, string) (runtimecore.Session, bool, error)
 	Sessions(context.Context) ([]runtimecore.Session, error)

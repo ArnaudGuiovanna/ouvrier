@@ -35,6 +35,7 @@ func newHTTPHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler,
 	}
 
 	mux := http.NewServeMux()
+	registerHTTPAdminRoutes(mux, runtime)
 	for _, route := range routes {
 		route.runtime = runtime
 		if err := registerHTTPRoute(mux, route); err != nil {
@@ -174,9 +175,13 @@ func writeJSONStatus(w http.ResponseWriter, code int, status string) {
 }
 
 func writeJSONOutput(w http.ResponseWriter, code int, status, output string) {
+	writeJSON(w, code, httpStatusResponse{Status: status, Output: output})
+}
+
+func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(httpStatusResponse{Status: status, Output: output})
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func serveHTTP(addr string, handler http.Handler) error {

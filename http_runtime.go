@@ -26,6 +26,7 @@ type httpRuntime struct {
 	mcpConnector mcpConnector
 	stateStore   state.Store
 	eventStream  *events.EventStream
+	adminToken   string
 }
 
 func defaultHTTPRuntime() httpRuntime {

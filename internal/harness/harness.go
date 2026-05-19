@@ -66,6 +66,16 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 }
 
 func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
+	runCtx := ctx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	var cancel context.CancelFunc
+	if h.budget.MaxWallClock > 0 {
+		runCtx, cancel = context.WithTimeout(runCtx, h.budget.MaxWallClock)
+		defer cancel()
+	}
+
 	session, err := runtimecore.NewSession(h.model,
 		runtimecore.WithSessionBudget(h.budget),
 	)
@@ -76,37 +86,40 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 	messages := []provider.Message{provider.UserText(input)}
 	out := Outcome{Session: session}
 	toolAttempted := false
-	if err := h.startExecution(ctx, session); err != nil {
+	if err := h.startExecution(runCtx, session); err != nil {
 		out.Status = StatusFailed
 		return out, err
 	}
 
 	for out.Iterations < h.budget.MaxIterations {
 		out.Iterations++
-		if err := h.emit(ctx, session, events.EventBeforeLLM, map[string]any{
+		if err := h.emit(runCtx, session, events.EventBeforeLLM, map[string]any{
 			"iteration": out.Iterations,
 			"model":     h.model,
 		}); err != nil {
 			out.Status = StatusFailed
-			return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 		}
-		resp, err := h.completeWithRetry(ctx, provider.Request{
+		resp, err := h.completeWithRetry(runCtx, provider.Request{
 			Model:    h.model,
 			System:   h.systemPrompt,
 			Messages: append([]provider.Message(nil), messages...),
 			Tools:    append([]provider.ToolSpec(nil), h.tools...),
 		}, !toolAttempted)
 		if err != nil {
+			if payload, ok := h.wallClockBudgetPayload(runCtx); ok {
+				return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
+			}
 			out.Status = StatusFailed
-			emitErr := h.emit(ctx, session, events.EventAfterLLM, map[string]any{
+			emitErr := h.emit(runCtx, session, events.EventAfterLLM, map[string]any{
 				"iteration": out.Iterations,
 				"error":     err.Error(),
 			})
-			return out, errors.Join(err, emitErr, h.finishExecution(ctx, session, out.Status))
+			return out, errors.Join(err, emitErr, h.finishExecution(runCtx, session, out.Status))
 		}
 
 		out.Usage.Add(resp.Usage)
-		if err := h.emit(ctx, session, events.EventAfterLLM, map[string]any{
+		if err := h.emit(runCtx, session, events.EventAfterLLM, map[string]any{
 			"iteration":     out.Iterations,
 			"stop_reason":   string(resp.StopReason),
 			"tool_calls":    len(resp.ToolCalls),
@@ -115,56 +128,59 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			"cost_usd":      resp.Usage.CostUSD,
 		}); err != nil {
 			out.Status = StatusFailed
-			return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 		}
 		if resp.Text != "" {
 			out.Text = resp.Text
 		}
 		if payload, exceeded := h.usageBudgetExceeded(out.Usage); exceeded {
-			return h.truncateForBudget(ctx, session, out, payload)
+			return h.truncateForBudget(runCtx, session, out, payload)
 		}
 		if len(resp.ToolCalls) == 0 {
-			if err := h.validateResult(ctx, session, out.Text); err != nil {
+			if err := h.validateResult(runCtx, session, out.Text); err != nil {
 				out.Status = StatusFailed
-				return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))
+				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 			}
 			out.Status = StatusCompleted
-			return out, h.finishExecution(ctx, session, out.Status)
+			return out, h.finishExecution(runCtx, session, out.Status)
 		}
 
 		out.ToolCalls = append(out.ToolCalls, resp.ToolCalls...)
 		messages = append(messages, provider.AssistantToolCalls(resp.Text, resp.ToolCalls...))
 		for _, call := range resp.ToolCalls {
 			toolAttempted = true
-			if err := h.emit(ctx, session, events.EventBeforeTool, map[string]any{
+			if err := h.emit(runCtx, session, events.EventBeforeTool, map[string]any{
 				"tool": call.Name,
 			}); err != nil {
 				out.Status = StatusFailed
-				return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))
+				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 			}
-			result, err := h.toolExecutor.Execute(ctx, call)
+			result, err := h.toolExecutor.Execute(runCtx, call)
 			if err != nil {
-				if emitErr := h.emit(ctx, session, events.EventAfterTool, map[string]any{
+				if payload, ok := h.wallClockBudgetPayload(runCtx); ok {
+					return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
+				}
+				if emitErr := h.emit(runCtx, session, events.EventAfterTool, map[string]any{
 					"tool":  call.Name,
 					"error": err.Error(),
 				}); emitErr != nil {
 					out.Status = StatusFailed
-					return out, errors.Join(err, emitErr, h.finishExecution(ctx, session, out.Status))
+					return out, errors.Join(err, emitErr, h.finishExecution(runCtx, session, out.Status))
 				}
 				messages = append(messages, provider.ToolResultText(call, err.Error(), true))
 				continue
 			}
-			if err := h.emit(ctx, session, events.EventAfterTool, map[string]any{
+			if err := h.emit(runCtx, session, events.EventAfterTool, map[string]any{
 				"tool": call.Name,
 			}); err != nil {
 				out.Status = StatusFailed
-				return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))
+				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
 			}
 			messages = append(messages, provider.ToolResultMessage(result))
 		}
 	}
 
-	return h.truncateForBudget(ctx, session, out, map[string]any{
+	return h.truncateForBudget(runCtx, session, out, map[string]any{
 		"budget":         "iterations",
 		"max_iterations": h.budget.MaxIterations,
 		"iterations":     out.Iterations,
@@ -273,6 +289,16 @@ func (h *Harness) usageBudgetExceeded(usage provider.Usage) (map[string]any, boo
 		}, true
 	}
 	return nil, false
+}
+
+func (h *Harness) wallClockBudgetPayload(ctx context.Context) (map[string]any, bool) {
+	if h.budget.MaxWallClock <= 0 || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, false
+	}
+	return map[string]any{
+		"budget":           "wallclock",
+		"max_wallclock_ms": h.budget.MaxWallClock.Milliseconds(),
+	}, true
 }
 
 func (h *Harness) truncateForBudget(ctx context.Context, session runtimecore.Session, out Outcome, payload map[string]any) (Outcome, error) {

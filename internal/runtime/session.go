@@ -13,6 +13,7 @@ type Budget struct {
 	MaxIterations int
 	MaxTokens     int
 	MaxCostUSD    float64
+	MaxWallClock  time.Duration
 }
 
 type Session struct {

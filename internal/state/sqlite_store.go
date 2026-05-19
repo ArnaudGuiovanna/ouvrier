@@ -83,11 +83,41 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sqlite state store: %w", err)
 		}
 	}
+	if err := s.ensureColumn(ctx, "ouvrier_sessions", "max_wallclock_ns", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate sqlite state store: %w", err)
+	}
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", sqliteSchemaVersion))
 	if err != nil {
 		return fmt.Errorf("set sqlite state schema version: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLiteStore) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition)
+	return err
 }
 
 func ensureSQLiteParent(path string) error {
@@ -167,7 +197,8 @@ var sqliteSchemaStatements = []string{
 		started_at TEXT NOT NULL,
 		max_iterations INTEGER NOT NULL,
 		max_tokens INTEGER NOT NULL,
-		max_cost_usd REAL NOT NULL
+		max_cost_usd REAL NOT NULL,
+		max_wallclock_ns INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS ouvrier_idempotency_keys (
 		key TEXT PRIMARY KEY,

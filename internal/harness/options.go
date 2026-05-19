@@ -16,6 +16,7 @@ const (
 	DefaultMaxIterations   = 25
 	DefaultMaxTokens       = 500_000
 	DefaultMaxCostUSD      = 5.00
+	DefaultMaxWallClock    = 10 * time.Minute
 	DefaultProviderRetries = 3
 )
 
@@ -41,6 +42,7 @@ func defaultConfig() config {
 			MaxIterations: DefaultMaxIterations,
 			MaxTokens:     DefaultMaxTokens,
 			MaxCostUSD:    DefaultMaxCostUSD,
+			MaxWallClock:  DefaultMaxWallClock,
 		},
 		toolExecutor:    tools.NewExecutor(),
 		providerRetries: DefaultProviderRetries,
@@ -82,6 +84,9 @@ func WithBudget(budget runtimecore.Budget) Option {
 		if budget.MaxCostUSD < 0 {
 			return errors.New("max cost USD must be greater than or equal to zero")
 		}
+		if budget.MaxWallClock < 0 {
+			return errors.New("max wallclock must be greater than or equal to zero")
+		}
 		if budget.MaxIterations == 0 {
 			budget.MaxIterations = cfg.budget.MaxIterations
 		}
@@ -90,6 +95,9 @@ func WithBudget(budget runtimecore.Budget) Option {
 		}
 		if budget.MaxCostUSD == 0 {
 			budget.MaxCostUSD = cfg.budget.MaxCostUSD
+		}
+		if budget.MaxWallClock == 0 {
+			budget.MaxWallClock = cfg.budget.MaxWallClock
 		}
 		cfg.budget = budget
 		return nil

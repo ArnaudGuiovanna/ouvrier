@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"ouvrier/internal/events"
 	"ouvrier/internal/harness"
@@ -160,6 +161,7 @@ func TestRunStoresConfiguredTokenAndCostBudgetOnSession(t *testing.T) {
 			MaxIterations: 7,
 			MaxTokens:     40,
 			MaxCostUSD:    0.50,
+			MaxWallClock:  time.Minute,
 		}),
 	)
 	if err != nil {
@@ -173,9 +175,51 @@ func TestRunStoresConfiguredTokenAndCostBudgetOnSession(t *testing.T) {
 	if out.Status != harness.StatusCompleted {
 		t.Fatalf("Status = %q, want completed", out.Status)
 	}
-	wantBudget := runtimecore.Budget{MaxIterations: 7, MaxTokens: 40, MaxCostUSD: 0.50}
+	wantBudget := runtimecore.Budget{MaxIterations: 7, MaxTokens: 40, MaxCostUSD: 0.50, MaxWallClock: time.Minute}
 	if out.Session.Budget != wantBudget {
 		t.Fatalf("Session budget = %+v, want %+v", out.Session.Budget, wantBudget)
+	}
+}
+
+func TestRunStopsWhenWallClockBudgetExceeded(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	p := &blockingHarnessProvider{started: make(chan struct{})}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithBudget(runtimecore.Budget{
+			MaxIterations: 5,
+			MaxTokens:     100,
+			MaxCostUSD:    1,
+			MaxWallClock:  10 * time.Millisecond,
+		}),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusTruncated {
+		t.Fatalf("Status = %q, want truncated", out.Status)
+	}
+	select {
+	case <-p.started:
+	default:
+		t.Fatal("provider was not called")
+	}
+
+	event, ok := findEvent(stream.List(), events.EventBudgetExceeded)
+	if !ok {
+		t.Fatalf("events = %+v, want budget exceeded event", stream.List())
+	}
+	if event.Payload["budget"] != "wallclock" || event.Payload["max_wallclock_ms"] != int64(10) {
+		t.Fatalf("budget event = %+v, want wallclock details", event)
 	}
 }
 
@@ -613,4 +657,22 @@ func findEvent(recorded []events.Event, kind events.EventKind) (events.Event, bo
 
 type harnessSchemaReply struct {
 	Status string `json:"status"`
+}
+
+type blockingHarnessProvider struct {
+	started chan struct{}
+}
+
+func (p *blockingHarnessProvider) Name() string {
+	return "blocking"
+}
+
+func (p *blockingHarnessProvider) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
+	select {
+	case <-p.started:
+	default:
+		close(p.started)
+	}
+	<-ctx.Done()
+	return provider.Response{}, ctx.Err()
 }

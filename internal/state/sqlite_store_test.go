@@ -35,7 +35,7 @@ func TestSQLiteStorePersistsExecutionAndSessionAcrossReopen(t *testing.T) {
 		TraceID:         "trace_1",
 		Model:           "openai/gpt-5.1",
 		StartedAt:       started,
-		Budget:          runtimecore.Budget{MaxIterations: 7, MaxTokens: 4096, MaxCostUSD: 0.42},
+		Budget:          runtimecore.Budget{MaxIterations: 7, MaxTokens: 4096, MaxCostUSD: 0.42, MaxWallClock: 2 * time.Minute},
 	})
 	if err != nil {
 		t.Fatalf("SaveSession returned error: %v", err)
@@ -66,8 +66,35 @@ func TestSQLiteStorePersistsExecutionAndSessionAcrossReopen(t *testing.T) {
 	if gotSession.Model != "openai/gpt-5.1" || gotSession.ParentSessionID != "sess_parent" {
 		t.Fatalf("Session = %+v", gotSession)
 	}
-	if gotSession.Budget.MaxIterations != 7 || gotSession.Budget.MaxTokens != 4096 || gotSession.Budget.MaxCostUSD != 0.42 {
+	if gotSession.Budget.MaxIterations != 7 || gotSession.Budget.MaxTokens != 4096 || gotSession.Budget.MaxCostUSD != 0.42 || gotSession.Budget.MaxWallClock != 2*time.Minute {
 		t.Fatalf("Session budget = %+v", gotSession.Budget)
+	}
+}
+
+func TestSQLiteStoreListsExecutionsInDeterministicOrder(t *testing.T) {
+	store := newTestSQLiteStore(t, filepath.Join(t.TempDir(), "state.db"))
+	base := time.Date(2026, 5, 18, 14, 0, 0, 0, time.UTC)
+	for _, execution := range []Execution{
+		{ExecID: "exec_c", TraceID: "trace_c", Status: ExecutionCompleted, StartedAt: base.Add(2 * time.Minute)},
+		{ExecID: "exec_b", TraceID: "trace_b", Status: ExecutionRunning, StartedAt: base.Add(time.Minute)},
+		{ExecID: "exec_a", TraceID: "trace_a", Status: ExecutionFailed, StartedAt: base.Add(time.Minute)},
+	} {
+		if err := store.SaveExecution(context.Background(), execution); err != nil {
+			t.Fatalf("SaveExecution returned error: %v", err)
+		}
+	}
+
+	executions, err := store.Executions(context.Background())
+	if err != nil {
+		t.Fatalf("Executions returned error: %v", err)
+	}
+	gotIDs := executionIDs(executions)
+	wantIDs := []string{"exec_a", "exec_b", "exec_c"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(wantIDs) {
+		t.Fatalf("execution IDs = %v, want %v", gotIDs, wantIDs)
+	}
+	if executions[1].Status != ExecutionRunning {
+		t.Fatalf("second execution = %+v", executions[1])
 	}
 }
 
@@ -178,4 +205,12 @@ func newTestSQLiteStore(t *testing.T, path string) *SQLiteStore {
 		_ = store.Close()
 	})
 	return store
+}
+
+func executionIDs(executions []Execution) []string {
+	ids := make([]string, 0, len(executions))
+	for _, execution := range executions {
+		ids = append(ids, execution.ExecID)
+	}
+	return ids
 }
