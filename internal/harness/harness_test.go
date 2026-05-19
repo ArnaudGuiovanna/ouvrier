@@ -682,6 +682,102 @@ func TestRunValidatesResultSchemaAndRecordsViolation(t *testing.T) {
 	}
 }
 
+func TestRunEmitsSchemaValidationPassedWhenResultSchemaMatches(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	contract, err := schema.FromType(reflect.TypeFor[harnessSchemaReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       `{"status":"ok"}`,
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithResultSchema(contract),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+
+	event, ok := findEvent(stream.List(), events.EventSchemaValidationPassed)
+	if !ok {
+		t.Fatalf("events = %+v, want schema validation passed event", stream.List())
+	}
+	if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["schema"] != contract.Name {
+		t.Fatalf("event payload = %+v, want schema %q", event.Payload, contract.Name)
+	}
+	if _, ok := event.Payload["output"]; ok {
+		t.Fatalf("event payload = %+v, must not include raw output", event.Payload)
+	}
+}
+
+func TestRunPassesSchemaValidationPassedThroughHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventSchemaValidationPassed, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	contract, err := schema.FromType(reflect.TypeFor[harnessSchemaReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       `{"status":"ok"}`,
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+		harness.WithResultSchema(contract),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+
+	event, ok := findEvent(stream.List(), events.EventSchemaValidationPassed)
+	if !ok {
+		t.Fatalf("events = %+v, want schema validation passed event", stream.List())
+	}
+	if event.Payload["checked"] != true {
+		t.Fatalf("event payload = %+v, want hook enrichment", event.Payload)
+	}
+}
+
 func TestRunAppendsCoreEventsAndRunsHooks(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

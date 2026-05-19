@@ -297,7 +297,9 @@ func (h *Harness) validateResult(ctx context.Context, session runtimecore.Sessio
 		recordErr := h.recordSchemaViolation(ctx, session, err)
 		return errors.Join(err, recordErr)
 	}
-	return nil
+	return h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
+		"schema": h.resultSchema.Name,
+	})
 }
 
 func (h *Harness) recordSchemaViolation(ctx context.Context, session runtimecore.Session, validationErr error) error {
