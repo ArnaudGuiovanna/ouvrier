@@ -100,6 +100,12 @@ func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, in
 		if step.ResultSchema != nil {
 			harnessOptions = append(harnessOptions, harness.WithResultSchema(step.ResultSchema))
 		}
+		if step.Retry != nil {
+			harnessOptions = append(harnessOptions,
+				harness.WithProviderRetries(step.Retry.ProviderRetries),
+				harness.WithRetryBackoff(step.Retry.Backoff),
+			)
+		}
 		if scope.parentSession != nil {
 			harnessOptions = append(harnessOptions, harness.WithParentSession(*scope.parentSession))
 		}

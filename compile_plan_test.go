@@ -71,6 +71,46 @@ func TestCompilePlansCompilesHTTPPipeOutput(t *testing.T) {
 	assertResultSchemaJSON(t, plan.Terminal.ResultSchema)
 }
 
+func TestCompilePlansCompilesPipeRetryPolicy(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Retry(2, ExponentialBackoff()),
+		),
+		Reply(JSON[planReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	retry := plans[0].Steps[0].Retry
+	if retry == nil {
+		t.Fatal("step Retry is nil")
+	}
+	if retry.ProviderRetries != 2 {
+		t.Fatalf("retry provider retries = %d, want 2", retry.ProviderRetries)
+	}
+	if retry.Backoff <= 0 {
+		t.Fatalf("retry backoff = %s, want > 0", retry.Backoff)
+	}
+}
+
+func TestCompilePlansLeavesPipeRetryPolicyUnsetByDefault(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[planReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	if retry := plans[0].Steps[0].Retry; retry != nil {
+		t.Fatalf("step Retry = %+v, want nil default policy", retry)
+	}
+}
+
 func assertResultSchemaJSON(t *testing.T, resultSchema *runtimeplan.ResultSchema) {
 	t.Helper()
 	if len(resultSchema.JSONSchema) == 0 {

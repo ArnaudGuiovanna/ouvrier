@@ -30,6 +30,12 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		}
 		step.ResultSchema = resultSchema
 	}
+	if pipe.config.retry != nil {
+		step.Retry = &runtimeplan.Retry{
+			ProviderRetries: pipe.config.retry.providerRetries,
+			Backoff:         pipe.config.retry.backoff,
+		}
+	}
 	return step, nil
 }
 

@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"reflect"
+	"time"
 
 	"ouvrier/internal/policy"
 )
@@ -40,6 +41,12 @@ type Step struct {
 	MCPServers   []MCPServer
 	SubAgents    []SubAgent
 	ResultSchema *ResultSchema
+	Retry        *Retry
+}
+
+type Retry struct {
+	ProviderRetries int
+	Backoff         time.Duration
 }
 
 type SubAgent struct {

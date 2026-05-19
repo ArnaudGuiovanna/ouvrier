@@ -87,6 +87,35 @@ func TestValidateRequiresPipeModel(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNegativePipeRetry(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("classify ticket",
+			ovr.Model("anthropic/claude-sonnet-4-6"),
+			ovr.Retry(-1),
+		),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if !errors.Is(err, ovr.ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
+
+func TestValidateRejectsDuplicatePipeRetry(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("classify ticket",
+			ovr.Model("anthropic/claude-sonnet-4-6"),
+			ovr.Retry(1),
+			ovr.Retry(2),
+		),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if !errors.Is(err, ovr.ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
+
 func TestValidateRequiresTerminalToBeLastBeforeNextPipeline(t *testing.T) {
 	err := ovr.Validate(
 		ovr.From("GET /health"),

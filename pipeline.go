@@ -3,6 +3,7 @@ package ovr
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // PipeOption configures a Pipe node.
@@ -17,6 +18,7 @@ type pipeConfig struct {
 	skills     []skillSpec
 	mcpServers []mcpSpec
 	subAgents  []subAgentSpec
+	retry      *retrySpec
 	err        error
 }
 
@@ -96,6 +98,69 @@ func (c *pipeConfig) setErr(err error) {
 	if c.err == nil {
 		c.err = err
 	}
+}
+
+// BackoffPolicy configures the delay between retry attempts.
+type BackoffPolicy interface {
+	retryBackoff() time.Duration
+}
+
+const defaultExponentialRetryBackoff = 100 * time.Millisecond
+
+type exponentialBackoffPolicy struct {
+	base time.Duration
+}
+
+// ExponentialBackoff configures retry attempts with an exponential delay.
+func ExponentialBackoff() BackoffPolicy {
+	return exponentialBackoffPolicy{base: defaultExponentialRetryBackoff}
+}
+
+func (p exponentialBackoffPolicy) retryBackoff() time.Duration {
+	return p.base
+}
+
+type retrySpec struct {
+	providerRetries int
+	backoff         time.Duration
+}
+
+type retryOption struct {
+	spec retrySpec
+	err  error
+}
+
+// Retry configures provider retries for transient errors before side effects run.
+func Retry(max int, policies ...BackoffPolicy) PipeOption {
+	option := retryOption{spec: retrySpec{providerRetries: max}}
+	if max < 0 {
+		option.err = fmt.Errorf("%w: Retry count must be greater than or equal to zero", ErrInvalidNode)
+		return option
+	}
+	if len(policies) > 1 {
+		option.err = fmt.Errorf("%w: Retry accepts at most one backoff policy", ErrInvalidNode)
+		return option
+	}
+	for _, policy := range policies {
+		if policy == nil {
+			option.err = fmt.Errorf("%w: Retry backoff policy is required", ErrInvalidNode)
+			return option
+		}
+		option.spec.backoff = policy.retryBackoff()
+	}
+	return option
+}
+
+func (o retryOption) applyPipe(config *pipeConfig) {
+	if o.err != nil {
+		config.setErr(o.err)
+		return
+	}
+	if config.retry != nil {
+		config.setErr(fmt.Errorf("%w: Pipe retry declared more than once", ErrInvalidNode))
+		return
+	}
+	config.retry = &o.spec
 }
 
 // PipelineSpec is a child pipeline declaration used by SubAgent.
