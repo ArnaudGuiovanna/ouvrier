@@ -130,7 +130,8 @@ type retryOption struct {
 	err  error
 }
 
-// Retry configures provider retries for transient errors before side effects run.
+// Retry configures transient provider retries and retry-safe tool retries.
+// Tool retries only apply to ReadOnly or Idempotent tools.
 func Retry(max int, policies ...BackoffPolicy) PipeOption {
 	option := retryOption{spec: retrySpec{providerRetries: max}}
 	if max < 0 {

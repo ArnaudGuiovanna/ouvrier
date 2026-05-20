@@ -137,11 +137,13 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	}()
 
 	if tool.handler != nil {
-		result, err := tool.handler.Execute(ctx, call)
-		if err != nil {
-			return errorResult(call, err), nil
-		}
-		return result, nil
+		return e.executeWithRetry(ctx, tool, call, func() (provider.ToolResult, error) {
+			result, err := tool.handler.Execute(ctx, call)
+			if err != nil {
+				return provider.ToolResult{}, toolExecutionFailure{err: err}
+			}
+			return result, nil
+		})
 	}
 
 	if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
@@ -154,7 +156,53 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	if err != nil {
 		return errorResult(call, err), nil
 	}
-	return toolResultFromValues(call, tool.fn.Call(args))
+	return e.executeWithRetry(ctx, tool, call, func() (provider.ToolResult, error) {
+		return toolResultFromValues(call, tool.fn.Call(args))
+	})
+}
+
+func (e *Executor) executeWithRetry(ctx context.Context, tool registeredTool, call provider.ToolCall, invoke func() (provider.ToolResult, error)) (provider.ToolResult, error) {
+	result, err := invoke()
+	retry := retryFromContext(ctx)
+	for attempt := 0; shouldRetryToolCall(tool, err, retry, attempt); attempt++ {
+		if observeErr := observeToolRetry(ctx, ToolRetryAudit{
+			ToolName:   call.Name,
+			ToolCallID: call.ID,
+			Attempt:    attempt + 1,
+			MaxRetries: retry.maxRetries,
+			Effect:     normalizeEffect(tool.metadata.Effect),
+			Err:        err,
+		}); observeErr != nil {
+			return provider.ToolResult{}, observeErr
+		}
+		if waitErr := waitToolRetryBackoff(ctx, retry.backoff, attempt); waitErr != nil {
+			return provider.ToolResult{}, waitErr
+		}
+		result, err = invoke()
+	}
+	if err != nil {
+		var failure toolExecutionFailure
+		if errors.As(err, &failure) {
+			return errorResult(call, failure.err), nil
+		}
+		return provider.ToolResult{}, err
+	}
+	return result, nil
+}
+
+func shouldRetryToolCall(tool registeredTool, err error, retry retryContext, attempt int) bool {
+	if err == nil || retry.maxRetries <= 0 || attempt >= retry.maxRetries {
+		return false
+	}
+	if !provider.IsTransientError(err) {
+		return false
+	}
+	switch normalizeEffect(tool.metadata.Effect) {
+	case policy.EffectReadOnly, policy.EffectIdempotent:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Executor) lookup(name string) (registeredTool, bool) {
@@ -353,12 +401,27 @@ func unwrapSingleValueArgument(typ reflect.Type, name string, raw json.RawMessag
 func toolResultFromValues(call provider.ToolCall, values []reflect.Value) (provider.ToolResult, error) {
 	errValue := values[len(values)-1]
 	if !errValue.IsNil() {
-		return errorResult(call, errValue.Interface().(error)), nil
+		return provider.ToolResult{}, toolExecutionFailure{err: errValue.Interface().(error)}
 	}
 	if len(values) == 1 {
 		return successResult(call, "ok")
 	}
 	return successResult(call, values[0].Interface())
+}
+
+type toolExecutionFailure struct {
+	err error
+}
+
+func (e toolExecutionFailure) Error() string {
+	if e.err == nil {
+		return "tool execution failed"
+	}
+	return e.err.Error()
+}
+
+func (e toolExecutionFailure) Unwrap() error {
+	return e.err
 }
 
 func successResult(call provider.ToolCall, value any) (provider.ToolResult, error) {

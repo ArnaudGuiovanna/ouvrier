@@ -91,6 +91,74 @@ func TestRunExecutesToolCallsThroughExecutor(t *testing.T) {
 	}
 }
 
+func TestRunRetriesTransientReadOnlyToolError(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "lookup",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need lookup", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	called := 0
+	executor := tools.NewExecutor()
+	if err := executor.Register("lookup", func(ctx context.Context, args harnessLookupArgs) (harnessLookupResult, error) {
+		called++
+		if called == 1 {
+			return harnessLookupResult{}, provider.TransientError(errors.New("temporary lookup failure"))
+		}
+		return harnessLookupResult{Answer: "workers"}, nil
+	}, tools.WithMetadata(tools.Metadata{Effect: policy.EffectReadOnly})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithProviderRetries(1),
+		harness.WithToolExecutor(executor),
+		harness.WithTools(provider.ToolSpec{Name: "lookup", Description: "Lookup data."}),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if called != 2 {
+		t.Fatalf("called = %d, want one transient retry", called)
+	}
+	second := p.requests[1]
+	last := second.Messages[len(second.Messages)-1]
+	result := last.Blocks[0].ToolResult
+	if result == nil || result.IsError {
+		t.Fatalf("tool result = %+v, want successful retried result", result)
+	}
+	event, ok := findEvent(stream.List(), events.EventToolCallFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want retry tool_call_failed event", stream.List())
+	}
+	if event.Payload["tool"] != "lookup" ||
+		event.Payload["tool_call_id"] != "call_1" ||
+		event.Payload["attempt"] != 1 ||
+		event.Payload["max_retries"] != 1 ||
+		event.Payload["retrying"] != true ||
+		event.Payload["transient"] != true {
+		t.Fatalf("event payload = %+v, want retrying transient tool failure", event.Payload)
+	}
+}
+
 type toolHandlerFunc func(context.Context, provider.ToolCall) (provider.ToolResult, error)
 
 func (f toolHandlerFunc) Execute(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {

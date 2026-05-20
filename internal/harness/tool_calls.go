@@ -95,6 +95,19 @@ func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, cal
 	if h.stateStore != nil {
 		toolCtx = tools.ContextWithIdempotencyStore(toolCtx, h.stateStore, session.ExecID)
 	}
+	toolCtx = tools.ContextWithToolRetry(toolCtx, h.providerRetries, h.retryBackoff)
+	toolCtx = tools.ContextWithToolRetryObserver(toolCtx, func(ctx context.Context, audit tools.ToolRetryAudit) error {
+		return h.emit(ctx, session, events.EventToolCallFailed, map[string]any{
+			"tool":         audit.ToolName,
+			"tool_call_id": audit.ToolCallID,
+			"attempt":      audit.Attempt,
+			"max_retries":  audit.MaxRetries,
+			"effect":       string(audit.Effect),
+			"error":        audit.Err.Error(),
+			"transient":    provider.IsTransientError(audit.Err),
+			"retrying":     true,
+		})
+	})
 	toolCtx = tools.ContextWithPermissionDecisionObserver(toolCtx, func(ctx context.Context, audit tools.PermissionDecisionAudit) error {
 		return h.emitPermissionDecision(ctx, session, audit)
 	})

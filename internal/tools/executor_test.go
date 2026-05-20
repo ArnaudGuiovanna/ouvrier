@@ -108,6 +108,68 @@ func TestExecutorReturnsToolErrorResult(t *testing.T) {
 	}
 }
 
+func TestExecutorRetriesTransientReadOnlyToolError(t *testing.T) {
+	executor := NewExecutor()
+	called := 0
+	err := executor.Register("lookup", func(ctx context.Context, args lookupArgs) (lookupResult, error) {
+		called++
+		if called == 1 {
+			return lookupResult{}, provider.TransientError(errors.New("temporary lookup failure"))
+		}
+		return lookupResult{Answer: args.Query}, nil
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	ctx := ContextWithToolRetry(context.Background(), 1, 0)
+	result, err := executor.Execute(ctx, provider.ToolCall{
+		ID:        "call_1",
+		Name:      "lookup",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("IsError = true, content=%s", result.Content)
+	}
+	if called != 2 {
+		t.Fatalf("called = %d, want retry after transient read-only error", called)
+	}
+}
+
+func TestExecutorDoesNotRetryTransientSideEffectingToolError(t *testing.T) {
+	executor := NewExecutor(WithPermissionPolicy(policy.NewDefaultPolicy(policy.AllowSideEffects("email"))))
+	called := 0
+	err := executor.Register("send_email", func(ctx context.Context, args lookupArgs) (lookupResult, error) {
+		called++
+		return lookupResult{}, provider.TransientError(errors.New("smtp timeout"))
+	}, WithMetadata(Metadata{
+		Effect:      policy.EffectSideEffecting,
+		SideEffects: []string{"email"},
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	ctx := ContextWithToolRetry(context.Background(), 3, 0)
+	result, err := executor.Execute(ctx, provider.ToolCall{
+		ID:        "call_1",
+		Name:      "send_email",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("IsError = false, want final tool error")
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want no retry for non-idempotent side effect", called)
+	}
+}
+
 func TestExecutorRejectsUnknownStructArgumentFields(t *testing.T) {
 	executor := NewExecutor()
 	called := false
@@ -292,6 +354,58 @@ func TestExecutorSkipsDuplicateIdempotentToolCall(t *testing.T) {
 	}
 	if !strings.Contains(string(second.Content), "idempotency key") {
 		t.Fatalf("second content = %s, want idempotency error", second.Content)
+	}
+}
+
+func TestExecutorRetriesTransientIdempotentToolErrorAfterSingleReservation(t *testing.T) {
+	store := state.NewMemoryStore()
+	ctx := ContextWithToolRetry(context.Background(), 1, 0)
+	ctx = ContextWithIdempotencyStore(ctx, store, "exec_1")
+	called := 0
+	executor := NewExecutor()
+	err := executor.Register("publish", func(ctx context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		called++
+		if called == 1 {
+			return "", provider.TransientError(errors.New("temporary publish failure"))
+		}
+		return args.Ticket.ID, nil
+	}, WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "publish",
+		Arguments: []byte(`{"ticket":{"id":"T-1"}}`),
+	}
+
+	first, err := executor.Execute(ctx, call)
+	if err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if first.IsError {
+		t.Fatalf("first IsError = true, content=%s", first.Content)
+	}
+	if called != 2 {
+		t.Fatalf("called = %d, want transient retry inside one idempotent reservation", called)
+	}
+
+	second, err := executor.Execute(ctx, call)
+	if err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+	if !second.IsError {
+		t.Fatal("second IsError = false, want duplicate idempotency error")
+	}
+	if called != 2 {
+		t.Fatalf("called = %d, want duplicate call skipped after reservation", called)
 	}
 }
 
