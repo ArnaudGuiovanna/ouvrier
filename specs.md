@@ -10,6 +10,12 @@
 
 Ouvrier est un framework Go pour créer rapidement des **middlewares agentiques** : de petits services autonomes qui exploitent un LLM pour augmenter n'importe quelle API existante (LMS, CRM, SaaS, plateformes de support, etc.).
 
+### 1.0 Direction produit
+
+Ouvrier est un framework Go pour construire des **middlewares agentiques composables**. Chaque worker Ouvrier est une unité autonome : un trigger, un agent, des tools, une sortie. Mais ces workers ne vivent pas isolés : ils peuvent s'appeler, se chaîner, se déléguer des tâches et publier des résultats typés. Ouvrier permet ainsi d'ajouter une couche d'intelligence programmable à une stack existante, sans imposer un monolithe IA central.
+
+Cette direction implique que chaque worker reste simple à déclarer et opère comme une brique d'infrastructure spécialisée. La composition entre workers doit rester explicite, typée, gouvernée par policy, observable de bout en bout et compatible avec les stacks existantes via HTTP, webhooks, queues, streams et MCP.
+
 ### 1.1 Promesse
 
 Un développeur décrit un trigger, un goal, des tools. Ouvrier produit un binaire statique prêt à tourner en production. De l'idée au déploiement en quelques minutes.
