@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"ouvrier/internal/mcpclient"
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 	"ouvrier/internal/tools"
 )
@@ -38,6 +39,9 @@ func (s *httpFakeMCPSession) RegisterTools(ctx context.Context, executor *tools.
 	err := executor.RegisterHandler(name, httpMCPHandlerFunc(func(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {
 		content, _ := json.Marshal(map[string]string{"answer": "from mcp"})
 		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: content}, nil
+	}), tools.WithMetadata(tools.Metadata{
+		Effect:      policy.EffectSideEffecting,
+		SideEffects: []string{"mcp:moodle-mcp"},
 	}))
 	if err != nil {
 		return nil, err
@@ -75,7 +79,13 @@ func TestNewHTTPHandlerRegistersMCPToolsWithHarnessRuntime(t *testing.T) {
 			MCP("moodle-mcp"),
 		),
 		Reply(JSON[httpTestReply]()),
-	}, httpRuntime{provider: scripted, mcpConnector: connector})
+	}, httpRuntime{
+		provider:     scripted,
+		mcpConnector: connector,
+		toolExecutor: tools.NewExecutor(tools.WithPermissionPolicy(
+			policy.NewDefaultPolicy(policy.AllowSideEffects("mcp:moodle-mcp")),
+		)),
+	})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}

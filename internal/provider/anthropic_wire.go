@@ -126,11 +126,7 @@ func anthropicBlockFromProvider(block Block) (anthropicBlock, error) {
 func anthropicToolsFromProvider(tools []ToolSpec) []anthropicTool {
 	out := make([]anthropicTool, 0, len(tools))
 	for _, tool := range tools {
-		out = append(out, anthropicTool{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: tool.InputSchema,
-		})
+		out = append(out, anthropicTool(tool))
 	}
 	return out
 }

@@ -127,7 +127,7 @@ func TestExecutorBlocksAllowedToolWhenPermissionAuditFails(t *testing.T) {
 	err := executor.Register("lookup", func(ctx context.Context) error {
 		called = true
 		return nil
-	})
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}

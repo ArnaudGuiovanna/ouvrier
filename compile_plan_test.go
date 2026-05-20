@@ -3,6 +3,7 @@ package ovr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -12,6 +13,10 @@ import (
 
 type planReply struct {
 	Status string `json:"status"`
+}
+
+type planOtherReply struct {
+	OK bool `json:"ok"`
 }
 
 func TestCompilePlansCompilesHTTPPipeOutput(t *testing.T) {
@@ -93,6 +98,39 @@ func TestCompilePlansCompilesPipeRetryPolicy(t *testing.T) {
 	}
 	if retry.Backoff <= 0 {
 		t.Fatalf("retry backoff = %s, want > 0", retry.Backoff)
+	}
+}
+
+func TestCompilePlansInjectsTerminalReplySchemaIntoFinalPipe(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[planReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	stepSchema := plans[0].Steps[0].ResultSchema
+	if stepSchema == nil {
+		t.Fatal("final step ResultSchema is nil")
+	}
+	if stepSchema.Type != reflect.TypeFor[planReply]() {
+		t.Fatalf("final step ResultSchema type = %v, want planReply", stepSchema.Type)
+	}
+}
+
+func TestCompilePlansRejectsMismatchedPipeOutputAndReplySchema(t *testing.T) {
+	_, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Output[planReply](),
+		),
+		Reply(JSON[planOtherReply]()),
+	})
+	if !errors.Is(err, ErrIncompatibleTerminal) {
+		t.Fatalf("compilePlans error = %v, want ErrIncompatibleTerminal", err)
 	}
 }
 

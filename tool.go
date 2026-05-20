@@ -81,6 +81,9 @@ func (o sideEffectingOption) applyTool(spec *toolSpec) {
 	spec.effect = policy.EffectSideEffecting
 	spec.idempotencyKey = ""
 	spec.sideEffects = append([]string(nil), o.labels...)
+	if len(spec.sideEffects) == 0 {
+		spec.setErr(fmt.Errorf("%w: Tool side effect label is required", ErrInvalidNode))
+	}
 }
 
 type idempotentOption struct {

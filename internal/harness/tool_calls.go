@@ -44,6 +44,15 @@ func (h *Harness) executeToolCalls(ctx context.Context, session runtimecore.Sess
 	return messages, nil, nil
 }
 
+func (h *Harness) allowsProviderRetryAfterToolCalls(calls []provider.ToolCall) bool {
+	for _, call := range calls {
+		if !h.toolExecutor.AllowsProviderRetryAfterToolCall(call.Name) {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *Harness) executeParallelToolCalls(ctx context.Context, session runtimecore.Session, calls []provider.ToolCall) ([]provider.Message, map[string]any, error) {
 	for _, call := range calls {
 		if err := h.emitBeforeToolCall(ctx, session, call); err != nil {
@@ -104,7 +113,7 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 		return provider.Message{}, outcome.budgetPayload, nil
 	}
 	if outcome.toolErr != nil {
-		if emitErr := h.emit(ctx, session, events.EventAfterTool, map[string]any{
+		if emitErr := h.emit(ctx, session, events.EventToolCallFailed, map[string]any{
 			"tool":  call.Name,
 			"error": outcome.toolErr.Error(),
 		}); emitErr != nil {
@@ -112,9 +121,13 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 		}
 		return provider.ToolResultText(call, outcome.toolErr.Error(), true), nil, nil
 	}
-	if err := h.emit(ctx, session, events.EventAfterTool, map[string]any{
-		"tool": call.Name,
-	}); err != nil {
+	eventKind := events.EventAfterTool
+	payload := map[string]any{"tool": call.Name}
+	if outcome.result.IsError {
+		eventKind = events.EventToolCallFailed
+		payload["error"] = "tool returned error result"
+	}
+	if err := h.emit(ctx, session, eventKind, payload); err != nil {
 		return provider.Message{}, nil, err
 	}
 	return provider.ToolResultMessage(outcome.result), nil, nil

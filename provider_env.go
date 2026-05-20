@@ -65,3 +65,7 @@ func providerRegistryFromEnv() (*provider.Registry, error) {
 
 	return provider.NewRegistry(providers...)
 }
+
+func adminTokenFromEnv() string {
+	return strings.TrimSpace(os.Getenv("PIP_ADMIN_TOKEN"))
+}

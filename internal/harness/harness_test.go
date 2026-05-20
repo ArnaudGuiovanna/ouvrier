@@ -10,6 +10,7 @@ import (
 
 	"ouvrier/internal/events"
 	"ouvrier/internal/harness"
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 	runtimecore "ouvrier/internal/runtime"
 	"ouvrier/internal/schema"
@@ -468,10 +469,15 @@ func TestRunDoesNotRetryTransientProviderErrorAfterToolCall(t *testing.T) {
 		}},
 		errors: []error{nil, provider.TransientError(errors.New("network reset"))},
 	}
-	executor := tools.NewExecutor()
+	executor := tools.NewExecutor(tools.WithPermissionPolicy(
+		policy.NewDefaultPolicy(policy.AllowSideEffects("lookup")),
+	))
 	if err := executor.Register("lookup", func(ctx context.Context, args harnessLookupArgs) (harnessLookupResult, error) {
 		return harnessLookupResult{Answer: "workers"}, nil
-	}); err != nil {
+	}, tools.WithMetadata(tools.Metadata{
+		Effect:      policy.EffectSideEffecting,
+		SideEffects: []string{"lookup"},
+	})); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	h, err := harness.New(p,
@@ -503,6 +509,115 @@ func TestRunDoesNotRetryTransientProviderErrorAfterToolCall(t *testing.T) {
 		event.Payload["retrying"] != false ||
 		event.Payload["transient"] != true {
 		t.Fatalf("event payload = %+v, want non-retry transient failure after tool call", event.Payload)
+	}
+}
+
+func TestRunRetriesTransientProviderErrorAfterReadOnlyToolCall(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "lookup",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need lookup", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+		errors: []error{nil, provider.TransientError(errors.New("network reset"))},
+	}
+	executor := tools.NewExecutor()
+	if err := executor.Register("lookup", func(ctx context.Context, args harnessLookupArgs) (harnessLookupResult, error) {
+		return harnessLookupResult{Answer: "workers"}, nil
+	}, tools.WithMetadata(tools.Metadata{Effect: policy.EffectReadOnly})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithProviderRetries(2),
+		harness.WithToolExecutor(executor),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if len(p.requests) != 3 {
+		t.Fatalf("provider calls = %d, want retry after read-only tool", len(p.requests))
+	}
+	event, ok := findEvent(stream.List(), events.EventLLMCallFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want LLM failed event for transient retry", stream.List())
+	}
+	if event.Payload["iteration"] != 2 ||
+		event.Payload["attempt"] != 1 ||
+		event.Payload["retrying"] != true ||
+		event.Payload["transient"] != true {
+		t.Fatalf("event payload = %+v, want retrying transient failure after read-only tool", event.Payload)
+	}
+}
+
+func TestRunRetriesTransientProviderErrorAfterIdempotentToolCall(t *testing.T) {
+	store := state.NewMemoryStore()
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "publish",
+		Arguments: []byte(`{"ticket":{"id":"T-1"}}`),
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need publish", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+		errors: []error{nil, provider.TransientError(errors.New("network reset"))},
+	}
+	called := 0
+	executor := tools.NewExecutor()
+	if err := executor.Register("publish", func(ctx context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		called++
+		return args.Ticket.ID, nil
+	}, tools.WithMetadata(tools.Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithProviderRetries(2),
+		harness.WithToolExecutor(executor),
+		harness.WithStateStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if len(p.requests) != 3 {
+		t.Fatalf("provider calls = %d, want retry after idempotent tool", len(p.requests))
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want one idempotent tool execution", called)
 	}
 }
 

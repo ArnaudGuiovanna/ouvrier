@@ -320,6 +320,9 @@ func (rt httpRuntime) recordTerminalSchemaViolation(ctx context.Context, contrac
 }
 
 func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult, kind events.EventKind, payload map[string]any) error {
+	if result.HasSession {
+		return rt.emitSessionEvent(ctx, result.Session, kind, payload)
+	}
 	if rt.eventStream == nil && rt.hookBus == nil {
 		return nil
 	}
@@ -327,10 +330,30 @@ func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult
 		Kind:    kind,
 		Payload: payload,
 	}
-	if result.HasSession {
-		event.ExecID = result.Session.ExecID
-		event.SessionID = result.Session.SessionID
-		event.TraceID = result.Session.TraceID
+	if rt.hookBus != nil {
+		var err error
+		event, err = rt.hookBus.Emit(ctx, event)
+		if err != nil {
+			return err
+		}
+	}
+	if rt.eventStream == nil {
+		return nil
+	}
+	_, err := rt.eventStream.Append(ctx, event)
+	return err
+}
+
+func (rt httpRuntime) emitSessionEvent(ctx context.Context, session runtimeplan.Session, kind events.EventKind, payload map[string]any) error {
+	if rt.eventStream == nil && rt.hookBus == nil {
+		return nil
+	}
+	event := events.Event{
+		Kind:      kind,
+		ExecID:    session.ExecID,
+		SessionID: session.SessionID,
+		TraceID:   session.TraceID,
+		Payload:   payload,
 	}
 	if rt.hookBus != nil {
 		var err error

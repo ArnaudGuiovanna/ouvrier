@@ -28,10 +28,6 @@ type httpRoute struct {
 	workerPool chan struct{}
 }
 
-type adminExecutionLister interface {
-	Executions(context.Context) ([]state.Execution, error)
-}
-
 func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
 	plans, err := compilePlans(nodes)
 	if err != nil {
@@ -103,39 +99,13 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	}
 	response.Sessions = len(sessions)
 
-	if lister, ok := rt.stateStore.(adminExecutionLister); ok {
-		executions, err := lister.Executions(req.Context())
-		if err != nil {
-			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
-			return
-		}
-		response.Executions = len(executions)
-		for _, execution := range executions {
-			response.ByStatus[string(execution.Status)]++
-		}
-		writeJSON(w, http.StatusOK, response)
+	executions, err := rt.stateStore.Executions(req.Context())
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
 		return
 	}
-
-	seenExecs := make(map[string]struct{})
-	for _, session := range sessions {
-		if session.ExecID == "" {
-			continue
-		}
-		if _, seen := seenExecs[session.ExecID]; seen {
-			continue
-		}
-		seenExecs[session.ExecID] = struct{}{}
-
-		execution, ok, err := rt.stateStore.Execution(req.Context(), session.ExecID)
-		if err != nil {
-			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
-			return
-		}
-		if !ok {
-			continue
-		}
-		response.Executions++
+	response.Executions = len(executions)
+	for _, execution := range executions {
 		response.ByStatus[string(execution.Status)]++
 	}
 	writeJSON(w, http.StatusOK, response)

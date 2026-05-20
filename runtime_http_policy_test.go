@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
+	"ouvrier/internal/tools"
 )
 
 func TestNewHTTPHandlerAppliesDefaultPolicyToTools(t *testing.T) {
@@ -65,5 +67,140 @@ func TestNewHTTPHandlerAppliesDefaultPolicyToTools(t *testing.T) {
 	result := last.Blocks[0].ToolResult
 	if !result.IsError || !strings.Contains(string(result.Content), "permission denied") {
 		t.Fatalf("tool result = %+v, want permission denial", result)
+	}
+}
+
+func TestNewHTTPHandlerDeniesSideEffectingToolByDefault(t *testing.T) {
+	call := provider.ToolCall{
+		ID:   "call_email",
+		Name: "send_email",
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: "need email", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: `{"status":"blocked"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	called := false
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("notify owner",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("send_email", func(ctx context.Context) error {
+				called = true
+				return nil
+			}, SideEffecting("email")),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if called {
+		t.Fatal("side-effecting tool was called without explicit allow policy")
+	}
+	result := scripted.requests[1].Messages[len(scripted.requests[1].Messages)-1].Blocks[0].ToolResult
+	if result == nil || !result.IsError || !strings.Contains(string(result.Content), "side effect email is not allowed") {
+		t.Fatalf("tool result = %+v, want denied email side effect", result)
+	}
+}
+
+func TestNewHTTPHandlerAllowsExplicitSideEffectingTool(t *testing.T) {
+	call := provider.ToolCall{
+		ID:   "call_email",
+		Name: "send_email",
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: "need email", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: `{"status":"sent"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	called := false
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("notify owner",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("send_email", func(ctx context.Context) error {
+				called = true
+				return nil
+			}, SideEffecting("email")),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{
+		provider: scripted,
+		toolExecutor: tools.NewExecutor(tools.WithPermissionPolicy(
+			policy.NewDefaultPolicy(policy.AllowSideEffects("email")),
+		)),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !called {
+		t.Fatal("side-effecting tool was not called after explicit allow policy")
+	}
+	result := scripted.requests[1].Messages[len(scripted.requests[1].Messages)-1].Blocks[0].ToolResult
+	if result == nil || result.IsError {
+		t.Fatalf("tool result = %+v, want successful email side effect", result)
+	}
+}
+
+func TestRunnerPermissionPolicyConfiguresHTTPRuntime(t *testing.T) {
+	call := provider.ToolCall{
+		ID:   "call_email",
+		Name: "send_email",
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: "need email", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: `{"status":"sent"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	called := false
+	runner := NewRunner(WithPermissionPolicy(AllowSideEffects("email")))
+	rt := httpRuntime{provider: scripted}
+	if err := runner.configureHTTPRuntime(&rt); err != nil {
+		t.Fatalf("configureHTTPRuntime returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("notify owner",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("send_email", func(ctx context.Context) error {
+				called = true
+				return nil
+			}, SideEffecting("email")),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, rt)
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !called {
+		t.Fatal("side-effecting tool was not called through Runner policy")
 	}
 }

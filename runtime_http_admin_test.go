@@ -60,6 +60,25 @@ func TestHTTPAdminRequiresBearerTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestDefaultHTTPRuntimeLoadsAdminTokenFromEnv(t *testing.T) {
+	t.Setenv("PIP_ADMIN_TOKEN", " env-admin-token ")
+	handler := newTestAdminHTTPHandler(t, defaultHTTPRuntime())
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/admin/health", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+
+	authorized := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.Header.Set("Authorization", "Bearer env-admin-token")
+	handler.ServeHTTP(authorized, req)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want %d", authorized.Code, http.StatusOK)
+	}
+}
+
 func TestHTTPAdminStatusSummarizesStateStoreExecutions(t *testing.T) {
 	store := state.NewMemoryStore()
 	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)

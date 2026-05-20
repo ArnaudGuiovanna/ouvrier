@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"ouvrier/internal/events"
@@ -94,7 +95,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 
 	messages := []provider.Message{provider.UserText(input)}
 	out := Outcome{Session: session}
-	toolAttempted := false
+	providerRetryAllowed := true
 	if err := h.startExecution(runCtx, session); err != nil {
 		out.Status = StatusFailed
 		return out, err
@@ -111,10 +112,10 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		}
 		resp, err := h.completeWithRetry(runCtx, session, out.Iterations, provider.Request{
 			Model:    h.model,
-			System:   h.systemPrompt,
+			System:   h.requestSystemPrompt(),
 			Messages: append([]provider.Message(nil), messages...),
 			Tools:    append([]provider.ToolSpec(nil), h.tools...),
-		}, !toolAttempted)
+		}, providerRetryAllowed)
 		if err != nil {
 			if payload, ok := h.wallClockBudgetPayload(runCtx); ok {
 				return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
@@ -161,7 +162,9 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 
 		out.ToolCalls = append(out.ToolCalls, resp.ToolCalls...)
 		messages = append(messages, provider.AssistantToolCalls(resp.Text, resp.ToolCalls...))
-		toolAttempted = true
+		if !h.allowsProviderRetryAfterToolCalls(resp.ToolCalls) {
+			providerRetryAllowed = false
+		}
 		toolMessages, budgetPayload, err := h.executeToolCalls(runCtx, session, resp.ToolCalls)
 		if budgetPayload != nil {
 			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, budgetPayload)
@@ -233,6 +236,24 @@ func waitRetryBackoff(ctx context.Context, backoff time.Duration, attempt int) e
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (h *Harness) requestSystemPrompt() string {
+	prompt := strings.TrimSpace(h.systemPrompt)
+	if h.resultSchema == nil {
+		return prompt
+	}
+	schemaPrompt := fmt.Sprintf(`Return only valid JSON that conforms to the required result schema.
+
+Schema name: %s
+JSON Schema:
+%s
+
+Do not include markdown, prose, or tool calls in the final answer.`, h.resultSchema.Name, string(h.resultSchema.JSONSchema))
+	if prompt == "" {
+		return schemaPrompt
+	}
+	return prompt + "\n\n" + schemaPrompt
 }
 
 func (h *Harness) newSession() (runtimecore.Session, error) {

@@ -3,6 +3,7 @@ package harness_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -42,7 +43,7 @@ func TestRunExecutesToolCallsThroughExecutor(t *testing.T) {
 			t.Fatalf("query = %q, want ouvrier", args.Query)
 		}
 		return harnessLookupResult{Answer: "workers"}, nil
-	})
+	}, tools.WithMetadata(tools.Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -267,6 +268,48 @@ func TestRunEmitsPermissionDecisionForDeniedToolCall(t *testing.T) {
 	result := last.Blocks[0].ToolResult
 	if result == nil || !result.IsError {
 		t.Fatalf("tool result = %+v, want permission error result", result)
+	}
+}
+
+func TestRunEmitsToolCallFailedForToolErrorResult(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_lookup", Name: "lookup", Arguments: []byte(`{"query":"ouvrier"}`)}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need lookup", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	executor := tools.NewExecutor()
+	if err := executor.Register("lookup", func(ctx context.Context, args harnessLookupArgs) (harnessLookupResult, error) {
+		return harnessLookupResult{}, errors.New("lookup unavailable")
+	}, tools.WithMetadata(tools.Metadata{Effect: policy.EffectReadOnly})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithToolExecutor(executor),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if _, ok := findEvent(stream.List(), events.EventToolCallFailed); !ok {
+		t.Fatalf("events = %+v, want tool_call_failed", stream.List())
+	}
+	if _, ok := findEvent(stream.List(), events.EventToolCallCompleted); ok {
+		t.Fatalf("events = %+v, want no tool_call_completed for failed result", stream.List())
 	}
 }
 

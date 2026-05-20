@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 )
 
@@ -22,7 +23,7 @@ func TestExecutorRunsRegisteredHandler(t *testing.T) {
 		}
 		content, _ := json.Marshal(map[string]string{"answer": "workers"})
 		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: content}, nil
-	}))
+	}), WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("RegisterHandler returned error: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestExecutorReturnsHandlerErrorAsToolResult(t *testing.T) {
 	executor := NewExecutor()
 	err := executor.RegisterHandler("mcp_lookup", handlerFunc(func(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {
 		return provider.ToolResult{}, context.DeadlineExceeded
-	}))
+	}), WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("RegisterHandler returned error: %v", err)
 	}

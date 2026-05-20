@@ -115,7 +115,7 @@ func (h *subAgentHandler) release() {
 }
 
 func (h *subAgentHandler) emitTask(ctx context.Context, parent runtimeplan.Session, kind events.EventKind, call provider.ToolCall, extra map[string]any) error {
-	if h.runtime.eventStream == nil {
+	if h.runtime.eventStream == nil && h.runtime.hookBus == nil {
 		return nil
 	}
 	payload := map[string]any{
@@ -126,14 +126,7 @@ func (h *subAgentHandler) emitTask(ctx context.Context, parent runtimeplan.Sessi
 	for key, value := range extra {
 		payload[key] = value
 	}
-	_, err := h.runtime.eventStream.Append(ctx, events.Event{
-		Kind:      kind,
-		ExecID:    parent.ExecID,
-		SessionID: parent.SessionID,
-		TraceID:   parent.TraceID,
-		Payload:   payload,
-	})
-	return err
+	return h.runtime.emitSessionEvent(ctx, parent, kind, payload)
 }
 
 func subAgentInput(raw json.RawMessage) (string, error) {

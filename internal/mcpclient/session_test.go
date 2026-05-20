@@ -7,6 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
 	"ouvrier/internal/tools"
 )
@@ -46,7 +47,9 @@ func TestSessionRegistersSDKToolsWithExecutor(t *testing.T) {
 	}
 	defer session.Close()
 
-	executor := tools.NewExecutor()
+	executor := tools.NewExecutor(tools.WithPermissionPolicy(
+		policy.NewDefaultPolicy(policy.AllowSideEffects("mcp:moodle-mcp")),
+	))
 	specs, err := session.RegisterTools(ctx, executor)
 	if err != nil {
 		t.Fatalf("RegisterTools returned error: %v", err)

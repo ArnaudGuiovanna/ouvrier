@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"fmt"
+	"reflect"
 
 	runtimeplan "ouvrier/internal/runtime"
 )
@@ -77,6 +78,9 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 				return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", i, err)
 			}
 			plan.Terminal = terminal
+			if err := reconcileTerminalResultSchema(&plan); err != nil {
+				return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", i, err)
+			}
 			next := i + 1
 			if next < len(nodes) {
 				if err := validateNextPipelineStart(nodes[next], next); err != nil {
@@ -90,6 +94,48 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 	}
 
 	return runtimeplan.Plan{}, 0, ErrTerminalMissing
+}
+
+func reconcileTerminalResultSchema(plan *runtimeplan.Plan) error {
+	if plan.Terminal.Kind != runtimeplan.TerminalReply || plan.Terminal.ResultSchema == nil || len(plan.Steps) == 0 {
+		return nil
+	}
+	last := &plan.Steps[len(plan.Steps)-1]
+	if last.ResultSchema == nil {
+		last.ResultSchema = plan.Terminal.ResultSchema
+		return nil
+	}
+	if !compatibleResultSchemas(last.ResultSchema, plan.Terminal.ResultSchema) {
+		return fmt.Errorf("%w: Reply JSON schema %s does not match Pipe Output schema %s",
+			ErrIncompatibleTerminal,
+			resultSchemaLabel(plan.Terminal.ResultSchema),
+			resultSchemaLabel(last.ResultSchema),
+		)
+	}
+	return nil
+}
+
+func compatibleResultSchemas(left, right *runtimeplan.ResultSchema) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	if left.Type != nil || right.Type != nil {
+		return left.Type == right.Type
+	}
+	return reflect.DeepEqual(left.JSONSchema, right.JSONSchema) || left.Name == right.Name
+}
+
+func resultSchemaLabel(contract *runtimeplan.ResultSchema) string {
+	if contract == nil {
+		return "<nil>"
+	}
+	if contract.Name != "" {
+		return contract.Name
+	}
+	if contract.Type != nil {
+		return contract.Type.String()
+	}
+	return "<unnamed>"
 }
 
 func validateNextPipelineStart(node Node, index int) error {

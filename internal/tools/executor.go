@@ -169,6 +169,19 @@ func (e *Executor) CanRunParallelSubAgent(name string) bool {
 	return ok && tool.metadata.Kind == ToolKindSubAgent
 }
 
+func (e *Executor) AllowsProviderRetryAfterToolCall(name string) bool {
+	tool, ok := e.lookup(name)
+	if !ok {
+		return false
+	}
+	switch normalizeEffect(tool.metadata.Effect) {
+	case policy.EffectReadOnly, policy.EffectIdempotent:
+		return true
+	default:
+		return false
+	}
+}
+
 func newRegisteredTool(name string, fn any) (registeredTool, error) {
 	value := reflect.ValueOf(fn)
 	if !value.IsValid() || value.Kind() != reflect.Func {

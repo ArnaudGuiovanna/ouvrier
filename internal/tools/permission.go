@@ -39,6 +39,7 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 		Kind:             policy.ActionToolCall,
 		ToolName:         tool.name,
 		ToolCallID:       call.ID,
+		ToolKind:         string(tool.metadata.Kind),
 		Effect:           normalizeEffect(tool.metadata.Effect),
 		IdempotencyKey:   tool.metadata.IdempotencyKey,
 		SideEffects:      append([]string(nil), tool.metadata.SideEffects...),

@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+.ouvrier/
 
 /bin/
 /dist/
@@ -9,4 +10,3 @@
 *.test
 *.out
 coverage.txt
-

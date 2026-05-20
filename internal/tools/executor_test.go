@@ -27,7 +27,7 @@ func TestExecutorRunsTypedGoTool(t *testing.T) {
 			t.Fatalf("query = %q, want ouvrier", args.Query)
 		}
 		return lookupResult{Answer: "workers"}, nil
-	})
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestExecutorRunsErrorOnlyGoTool(t *testing.T) {
 	executor := NewExecutor()
 	err := executor.Register("audit", func(ctx context.Context) error {
 		return nil
-	})
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestExecutorReturnsToolErrorResult(t *testing.T) {
 	boom := errors.New("lookup failed")
 	err := executor.Register("lookup", func(ctx context.Context, args lookupArgs) (lookupResult, error) {
 		return lookupResult{}, boom
-	})
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestExecutorRejectsUnknownStructArgumentFields(t *testing.T) {
 	err := executor.Register("lookup", func(ctx context.Context, args lookupArgs) (lookupResult, error) {
 		called = true
 		return lookupResult{Answer: "workers"}, nil
-	})
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestExecutorUnwrapsSingleValueObjectArgument(t *testing.T) {
 	executor := NewExecutor()
 	err := executor.Register("score", func(ctx context.Context, days int) (int, error) {
 		return days + 1, nil
-	}, WithMetadata(Metadata{ArgumentName: "days"}))
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly, ArgumentName: "days"}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestExecutorRejectsUnknownSingleValueObjectArguments(t *testing.T) {
 	err := executor.Register("score", func(ctx context.Context, days int) (int, error) {
 		called = true
 		return days, nil
-	}, WithMetadata(Metadata{ArgumentName: "days"}))
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly, ArgumentName: "days"}))
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestExecutorValidatesArgumentsAgainstInputSchema(t *testing.T) {
 			err := executor.Register("score", func(ctx context.Context, days int) (int, error) {
 				called = true
 				return days, nil
-			}, WithMetadata(Metadata{ArgumentName: "days", InputSchema: inputSchema}))
+			}, WithMetadata(Metadata{Effect: policy.EffectReadOnly, ArgumentName: "days", InputSchema: inputSchema}))
 			if err != nil {
 				t.Fatalf("Register returned error: %v", err)
 			}
@@ -373,5 +373,33 @@ func TestExecutorOnlyMarksSubAgentHandlersAsParallel(t *testing.T) {
 	}
 	if executor.CanRunParallelSubAgent("missing") {
 		t.Fatal("missing CanRunParallelSubAgent = true, want false")
+	}
+}
+
+func TestExecutorClassifiesProviderRetrySafeToolCalls(t *testing.T) {
+	executor := NewExecutor()
+	if err := executor.Register("default_side_effect", func(ctx context.Context) error { return nil }); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := executor.Register("lookup", func(ctx context.Context) error { return nil },
+		WithMetadata(Metadata{Effect: policy.EffectReadOnly})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := executor.Register("publish_once", func(ctx context.Context) error { return nil },
+		WithMetadata(Metadata{Effect: policy.EffectIdempotent, IdempotencyKey: "ticket.id"})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	if executor.AllowsProviderRetryAfterToolCall("default_side_effect") {
+		t.Fatal("default_side_effect retry-safe = true, want false")
+	}
+	if !executor.AllowsProviderRetryAfterToolCall("lookup") {
+		t.Fatal("lookup retry-safe = false, want true")
+	}
+	if !executor.AllowsProviderRetryAfterToolCall("publish_once") {
+		t.Fatal("publish_once retry-safe = false, want true")
+	}
+	if executor.AllowsProviderRetryAfterToolCall("missing") {
+		t.Fatal("missing retry-safe = true, want false")
 	}
 }

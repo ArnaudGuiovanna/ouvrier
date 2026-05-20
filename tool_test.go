@@ -132,6 +132,7 @@ func TestToolOptionRejectsInvalidToolDeclarations(t *testing.T) {
 		{name: "empty param name", opt: Tool("empty_param", listLearners, Param(" ", "description"))},
 		{name: "empty param description", opt: Tool("empty_param_description", listLearners, Param("days", " "))},
 		{name: "empty idempotency key", opt: Tool("empty_idempotency", auditLearner, Idempotent(" "))},
+		{name: "empty side effect label", opt: Tool("empty_side_effect", auditLearner, SideEffecting(" "))},
 	}
 
 	for _, tt := range tests {

@@ -166,7 +166,6 @@ func (o retryOption) applyPipe(config *pipeConfig) {
 // PipelineSpec is a child pipeline declaration used by SubAgent.
 type PipelineSpec struct {
 	nodes []Node
-	err   error
 }
 
 // Pipeline declares a child pipeline that can be exposed to a Pipe as a SubAgent.
@@ -257,9 +256,6 @@ func (s *subAgentSpec) setErr(err error) {
 }
 
 func (p PipelineSpec) validateSubAgentPipeline() error {
-	if p.err != nil {
-		return p.err
-	}
 	if len(p.nodes) == 0 {
 		return fmt.Errorf("%w: SubAgent pipeline must include at least one Pipe", ErrInvalidNode)
 	}

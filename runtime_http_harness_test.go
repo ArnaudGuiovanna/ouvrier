@@ -77,6 +77,9 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 	if scripted.requests[0].Messages[0].Text() != `{"title":"broken"}` {
 		t.Fatalf("provider input = %q", scripted.requests[0].Messages[0].Text())
 	}
+	if !strings.Contains(scripted.requests[0].System, "classify ticket") {
+		t.Fatalf("provider system prompt = %q, want Pipe goal", scripted.requests[0].System)
+	}
 }
 
 func TestNewHTTPHandlerPassesPathParamsAndJSONBodyToHarnessInput(t *testing.T) {
@@ -426,6 +429,53 @@ func TestNewHTTPHandlerRepairsPipeOutputSchemaViolationWhenConfigured(t *testing
 	}
 }
 
+func TestNewHTTPHandlerRepairsTerminalReplySchemaViolationWhenConfigured(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+			{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream, schemaRepairAttempts: 1})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(scripted.requests) != 2 {
+		t.Fatalf("provider calls = %d, want initial and repair", len(scripted.requests))
+	}
+	if !strings.Contains(scripted.requests[0].System, "JSON Schema") ||
+		!strings.Contains(scripted.requests[0].System, "ovr.httpTestReply") {
+		t.Fatalf("provider system prompt = %q, want terminal reply schema guidance", scripted.requests[0].System)
+	}
+	violations, err := store.SchemaViolations(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want original violation", len(violations))
+	}
+	if event, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaValidationPassed); !ok || event.Payload["repaired"] != true {
+		t.Fatalf("events = %+v, want repaired schema validation passed event", stream.List())
+	}
+}
+
 func TestNewHTTPHandlerValidatesTerminalReplySchemaWithoutPipeOutput(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
@@ -690,6 +740,13 @@ func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEventStream returned error: %v", err)
 	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventTaskCompleted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
 	scripted := &httpScriptedProvider{
 		responses: []provider.Response{
 			{
@@ -724,7 +781,7 @@ func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
 			SubAgent("translate", translator, MaxParallel(2)),
 		),
 		Reply(JSON[httpTestReply]()),
-	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream})
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream, hookBus: hooks})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -798,6 +855,9 @@ func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
 		}
 		if event.Kind == events.EventTaskCompleted && event.Payload["subagent"] == "translate" {
 			taskCompleted = true
+			if event.Payload["checked"] != true {
+				t.Fatalf("task completed event = %+v, want hook enrichment", event)
+			}
 		}
 	}
 	if !taskStarted || !taskCompleted {

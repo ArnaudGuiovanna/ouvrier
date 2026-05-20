@@ -40,6 +40,7 @@ func defaultHTTPRuntime() httpRuntime {
 		toolExecutor: tools.NewExecutor(),
 		mcpConnector: envMCPConnector{connector: mcpclient.NewEnvConnector()},
 		eventStream:  stream,
+		adminToken:   adminTokenFromEnv(),
 	}
 }
 
@@ -120,6 +121,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		}
 		harnessOptions := []harness.Option{
 			harness.WithModel(step.Model),
+			harness.WithSystemPrompt(step.Goal),
 			harness.WithToolExecutor(executor),
 			harness.WithTools(specs...),
 		}

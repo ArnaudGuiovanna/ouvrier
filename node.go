@@ -3,8 +3,7 @@ package ovr
 type nodeKind uint8
 
 const (
-	nodeKindInvalid nodeKind = iota
-	nodeKindFrom
+	nodeKindFrom nodeKind = iota
 	nodeKindPipe
 	nodeKindReply
 	nodeKindPush
@@ -15,19 +14,4 @@ const (
 type Node interface {
 	nodeKind() nodeKind
 	validateNode() error
-}
-
-type invalidNode struct {
-	err error
-}
-
-func (n invalidNode) nodeKind() nodeKind {
-	return nodeKindInvalid
-}
-
-func (n invalidNode) validateNode() error {
-	if n.err != nil {
-		return n.err
-	}
-	return ErrInvalidNode
 }
