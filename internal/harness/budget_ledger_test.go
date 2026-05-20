@@ -80,6 +80,55 @@ func TestSharedBudgetLedgerCountsUsageAcrossHarnesses(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotCallProviderWhenSharedBudgetAlreadyExceeded(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	ledger := harness.NewBudgetLedger(runtimecore.Budget{MaxIterations: 5, MaxTokens: 2, MaxCostUSD: 1})
+	ledger.Add(provider.Usage{InputTokens: 2, OutputTokens: 1})
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "should not run",
+			StopReason: provider.StopEndTurn,
+			Usage:      provider.Usage{InputTokens: 1, OutputTokens: 1},
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithBudgetLedger(ledger),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusTruncated {
+		t.Fatalf("Status = %q, want truncated", out.Status)
+	}
+	if out.Iterations != 0 {
+		t.Fatalf("Iterations = %d, want no LLM iteration", out.Iterations)
+	}
+	if len(p.requests) != 0 {
+		t.Fatalf("provider calls = %d, want none after exhausted budget", len(p.requests))
+	}
+
+	event, ok := findEvent(stream.List(), events.EventBudgetExceeded)
+	if !ok {
+		t.Fatalf("events = %+v, want budget exceeded", stream.List())
+	}
+	if event.Payload["budget"] != "tokens" ||
+		event.Payload["max_tokens"] != 2 ||
+		event.Payload["used_tokens"] != 3 ||
+		event.SessionID != out.Session.SessionID {
+		t.Fatalf("budget event = %+v, want exhausted shared budget on current session", event)
+	}
+}
+
 func TestBudgetLedgerRecordsConcurrentUsageExactly(t *testing.T) {
 	ledger := harness.NewBudgetLedger(runtimecore.Budget{MaxTokens: 99})
 	var wg sync.WaitGroup

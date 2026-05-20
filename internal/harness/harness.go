@@ -102,6 +102,9 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 	}
 
 	for out.Iterations < h.budget.MaxIterations {
+		if _, payload, exceeded := h.budgetLedger.Exceeded(); exceeded {
+			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
+		}
 		out.Iterations++
 		if err := h.emit(runCtx, session, events.EventBeforeLLM, map[string]any{
 			"iteration": out.Iterations,
