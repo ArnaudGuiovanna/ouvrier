@@ -170,6 +170,9 @@ func (h *Harness) emitPermissionDecision(ctx context.Context, session runtimecor
 	if audit.Action.IdempotencyKey != "" {
 		payload["idempotency_key_declared"] = true
 	}
+	if audit.Action.ToolKind != "" {
+		payload["tool_kind"] = audit.Action.ToolKind
+	}
 	if len(audit.Action.SideEffects) > 0 {
 		payload["side_effects"] = append([]string(nil), audit.Action.SideEffects...)
 	}

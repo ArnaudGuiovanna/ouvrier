@@ -310,6 +310,18 @@ ovr.Pipe("Rédige un email multilingue",
 - Les outcomes sont retournés dans l'ordre des appels ; `PartialOK()` peut tolérer certains échecs
 - Tous les événements enfants sont rattachés à la trace parent
 
+### 4.6 Composition worker-to-worker v0.1
+
+La composition worker-to-worker v0.1 DOIT être implémentée et testable via `SubAgent`. Un `SubAgent` est le chemin normatif pour qu'un worker appelle un autre worker Ouvrier dans le même binaire ou plan runtime : il expose un `Pipeline` comme tool gouverné, sans contourner le harnais. `Pipeline` décrit le sous-worker réutilisable ; `SubAgent` est son adaptation en tool ; `Push(Webhook(...))`, `Push(Queue(...))` et les triggers `Webhook`/`Stream` restent les chemins d'intégration inter-service ou asynchrones. Ils NE DOIVENT PAS remplacer les garanties de `SubAgent` quand la relation parent/enfant doit être observable, typée et gouvernée dans une même exécution.
+
+Le contrat entre workers DOIT être typé quand le sous-worker déclare `Output[T]()` et quand le parent répond avec `Reply(JSON[T]())`. Les valeurs échangées DOIVENT passer par `ResultSchema` : génération JSON Schema, validation stricte, violation observable et repair borné si activé. Une sortie non conforme NE DOIT PAS être considérée comme un résultat valide pour le parent.
+
+Chaque appel worker-to-worker DOIT propager `ExecID`, trace ID, budgets, cancellation et policy, et DOIT créer une session enfant avec lien parent/enfant explicite. `EventStream` et `StateStore` sont la source normative pour reconstruire l'arbre d'exécution, les appels de tools, les décisions de permission, les validations de schéma, les retries et les erreurs.
+
+Les échecs, retries et effets de bord DOIVENT suivre les mêmes règles qu'un tool call normal. Les retries ne sont autorisés que pour les sous-workers `ReadOnly()` ou `Idempotent(...)`, ou avant tout effet de bord observable ; les appels side-effecting non idempotents NE DOIVENT PAS être rejoués automatiquement. Les erreurs de timeout, budget, permission, schema, provider, transport ou child failure DOIVENT être structurées, propagées au parent et visibles dans la trace.
+
+Aucun worker-to-worker call ne peut contourner `ToolExecutor`, `PermissionPolicy`, `ResultSchema`, redaction des secrets ou `EventStream`. Les payloads, logs, traces, erreurs, prompts, tool arguments et résultats exposés à l'utilisateur ou à l'admin DOIVENT appliquer la redaction avant persistance ou affichage.
+
 ---
 
 ## 5. Tools, Skills, MCP
