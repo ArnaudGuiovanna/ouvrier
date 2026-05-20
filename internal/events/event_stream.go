@@ -102,9 +102,14 @@ func (s *EventStream) Since(id uint64) []Event {
 	return events
 }
 
-func cloneEvent(event Event) Event {
+func SanitizeEvent(event Event) Event {
+	event.Kind = CanonicalKind(event.Kind)
 	event.Payload = sanitizePayload(event.Payload)
 	return event
+}
+
+func cloneEvent(event Event) Event {
+	return SanitizeEvent(event)
 }
 
 func sanitizePayload(payload map[string]any) map[string]any {

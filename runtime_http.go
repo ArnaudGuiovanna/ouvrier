@@ -338,9 +338,20 @@ func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult
 		}
 	}
 	if rt.eventStream == nil {
+		if rt.stateStore == nil {
+			return nil
+		}
+		_, err := rt.stateStore.AddEvent(ctx, event)
+		return err
+	}
+	appended, err := rt.eventStream.Append(ctx, event)
+	if err != nil {
+		return err
+	}
+	if rt.stateStore == nil {
 		return nil
 	}
-	_, err := rt.eventStream.Append(ctx, event)
+	_, err = rt.stateStore.AddEvent(ctx, appended)
 	return err
 }
 
@@ -363,9 +374,20 @@ func (rt httpRuntime) emitSessionEvent(ctx context.Context, session runtimeplan.
 		}
 	}
 	if rt.eventStream == nil {
+		if rt.stateStore == nil {
+			return nil
+		}
+		_, err := rt.stateStore.AddEvent(ctx, event)
+		return err
+	}
+	appended, err := rt.eventStream.Append(ctx, event)
+	if err != nil {
+		return err
+	}
+	if rt.stateStore == nil {
 		return nil
 	}
-	_, err := rt.eventStream.Append(ctx, event)
+	_, err = rt.stateStore.AddEvent(ctx, appended)
 	return err
 }
 

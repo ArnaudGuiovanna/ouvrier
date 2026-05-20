@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"ouvrier/internal/events"
 	runtimecore "ouvrier/internal/runtime"
 )
 
@@ -15,6 +16,8 @@ type MemoryStore struct {
 	executions      map[string]Execution
 	sessions        map[string]runtimecore.Session
 	idempotency     map[string]string
+	events          []events.Event
+	nextEventID     uint64
 	violations      []SchemaViolation
 	nextViolationID uint64
 }
@@ -129,6 +132,39 @@ func (s *MemoryStore) ReserveIdempotency(ctx context.Context, key, execID string
 	}
 	s.idempotency[key] = execID
 	return "", true, nil
+}
+
+func (s *MemoryStore) AddEvent(ctx context.Context, event events.Event) (events.Event, error) {
+	if err := checkContext(ctx); err != nil {
+		return events.Event{}, err
+	}
+
+	event = events.SanitizeEvent(event)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextEventID++
+	event.ID = s.nextEventID
+	if event.At.IsZero() {
+		event.At = time.Now().UTC()
+	}
+	s.events = append(s.events, event)
+	return events.SanitizeEvent(event), nil
+}
+
+func (s *MemoryStore) Events(ctx context.Context, execID string) ([]events.Event, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	recorded := make([]events.Event, 0, len(s.events))
+	for _, event := range s.events {
+		if execID == "" || event.ExecID == execID {
+			recorded = append(recorded, events.SanitizeEvent(event))
+		}
+	}
+	return recorded, nil
 }
 
 func (s *MemoryStore) AddSchemaViolation(ctx context.Context, violation SchemaViolation) (SchemaViolation, error) {

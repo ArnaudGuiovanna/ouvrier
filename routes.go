@@ -84,9 +84,12 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 		Status:   "ok",
 		ByStatus: map[string]int{},
 	}
-	if rt.eventStream != nil {
-		response.Events = len(rt.eventStream.List())
+	recorded, err := rt.adminEvents(req.Context(), "")
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
 	}
+	response.Events = len(recorded)
 	if rt.stateStore == nil {
 		writeJSON(w, http.StatusOK, response)
 		return
@@ -115,11 +118,12 @@ func (rt httpRuntime) serveAdminTraces(w http.ResponseWriter, req *http.Request)
 	if !rt.authorizeAdmin(w, req) {
 		return
 	}
-	events := []events.Event{}
-	if rt.eventStream != nil {
-		events = rt.eventStream.List()
+	recorded, err := rt.adminEvents(req.Context(), "")
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
 	}
-	traces := summarizeAdminTraces(events, parseAdminTraceLimit(req.URL.Query().Get("last")))
+	traces := summarizeAdminTraces(recorded, parseAdminTraceLimit(req.URL.Query().Get("last")))
 	writeJSON(w, http.StatusOK, adminTracesResponse{
 		Status: "ok",
 		Traces: traces,
@@ -166,12 +170,13 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 		response.SchemaViolations = len(violations)
 	}
 
-	if rt.eventStream != nil {
-		for _, event := range rt.eventStream.List() {
-			if event.ExecID == execID {
-				response.Events = append(response.Events, adminEventResponseFromEvent(event))
-			}
-		}
+	recorded, err := rt.adminEvents(req.Context(), execID)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	for _, event := range recorded {
+		response.Events = append(response.Events, adminEventResponseFromEvent(event))
 	}
 	if response.Execution == nil && len(response.Events) == 0 {
 		writeJSONStatus(w, http.StatusNotFound, "not_found")
@@ -179,6 +184,32 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (rt httpRuntime) adminEvents(ctx context.Context, execID string) ([]events.Event, error) {
+	if rt.stateStore != nil {
+		recorded, err := rt.stateStore.Events(ctx, execID)
+		if err != nil {
+			return nil, err
+		}
+		if len(recorded) > 0 || rt.eventStream == nil {
+			return recorded, nil
+		}
+	}
+	if rt.eventStream == nil {
+		return nil, nil
+	}
+	recorded := rt.eventStream.List()
+	if execID == "" {
+		return recorded, nil
+	}
+	filtered := make([]events.Event, 0, len(recorded))
+	for _, event := range recorded {
+		if event.ExecID == execID {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered, nil
 }
 
 func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request) {

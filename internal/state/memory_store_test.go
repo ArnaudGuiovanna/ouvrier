@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"ouvrier/internal/events"
 	runtimecore "ouvrier/internal/runtime"
 )
 
@@ -101,6 +102,47 @@ func TestMemoryStoreReserveIdempotencyKey(t *testing.T) {
 	}
 	if reserved || existing != "exec_1" {
 		t.Fatalf("second reserve existing=%q reserved=%v, want exec_1 false", existing, reserved)
+	}
+}
+
+func TestMemoryStoreRecordsEvents(t *testing.T) {
+	store := NewMemoryStore()
+	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)
+
+	first, err := store.AddEvent(context.Background(), events.Event{
+		At:        at,
+		Kind:      events.EventBeforeTool,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"tool":    "load_ticket",
+			"api_key": "secret-key",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	_, err = store.AddEvent(context.Background(), events.Event{Kind: events.EventAfterLLM, ExecID: "exec_2"})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+
+	if first.ID != 1 {
+		t.Fatalf("first ID = %d, want 1", first.ID)
+	}
+	recorded, err := store.Events(context.Background(), "exec_1")
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("events = %d, want 1", len(recorded))
+	}
+	if recorded[0].Kind != events.EventToolCallStarted || !recorded[0].At.Equal(at) {
+		t.Fatalf("event = %+v", recorded[0])
+	}
+	if recorded[0].Payload["api_key"] != "[REDACTED]" || recorded[0].Payload["tool"] != "load_ticket" {
+		t.Fatalf("payload = %+v, want redacted secret and visible tool", recorded[0].Payload)
 	}
 }
 

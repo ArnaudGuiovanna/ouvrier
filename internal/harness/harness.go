@@ -519,8 +519,19 @@ func (h *Harness) emit(ctx context.Context, session runtimecore.Session, kind ev
 		}
 	}
 	if h.eventStream == nil {
+		if h.stateStore == nil {
+			return nil
+		}
+		_, err := h.stateStore.AddEvent(ctx, event)
+		return err
+	}
+	appended, err := h.eventStream.Append(ctx, event)
+	if err != nil {
+		return err
+	}
+	if h.stateStore == nil {
 		return nil
 	}
-	_, err := h.eventStream.Append(ctx, event)
+	_, err = h.stateStore.AddEvent(ctx, appended)
 	return err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"ouvrier/internal/events"
 	runtimecore "ouvrier/internal/runtime"
 )
 
@@ -15,6 +16,8 @@ type Store interface {
 	Session(context.Context, string) (runtimecore.Session, bool, error)
 	Sessions(context.Context) ([]runtimecore.Session, error)
 	ReserveIdempotency(context.Context, string, string) (string, bool, error)
+	AddEvent(context.Context, events.Event) (events.Event, error)
+	Events(context.Context, string) ([]events.Event, error)
 	AddSchemaViolation(context.Context, SchemaViolation) (SchemaViolation, error)
 	SchemaViolations(context.Context, string) ([]SchemaViolation, error)
 }

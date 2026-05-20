@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"ouvrier/internal/events"
 	runtimecore "ouvrier/internal/runtime"
 )
 
@@ -147,6 +148,52 @@ func TestSQLiteStoreReserveIdempotencyIsAtomic(t *testing.T) {
 		if !got.reserved && got.existing != winner {
 			t.Fatalf("loser existing = %q, want %q", got.existing, winner)
 		}
+	}
+}
+
+func TestSQLiteStorePersistsEventsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)
+
+	store := newTestSQLiteStore(t, path)
+	first, err := store.AddEvent(context.Background(), events.Event{
+		At:        at,
+		Kind:      events.EventBeforeTool,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"tool":    "load_ticket",
+			"api_key": "secret-key",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	_, err = store.AddEvent(context.Background(), events.Event{Kind: events.EventAfterLLM, ExecID: "exec_2"})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	if first.ID == 0 {
+		t.Fatal("first ID = 0, want generated ID")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	reopened := newTestSQLiteStore(t, path)
+	recorded, err := reopened.Events(context.Background(), "exec_1")
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("events = %d, want 1", len(recorded))
+	}
+	if recorded[0].Kind != events.EventToolCallStarted || !recorded[0].At.Equal(at) {
+		t.Fatalf("event = %+v", recorded[0])
+	}
+	if recorded[0].Payload["api_key"] != "[REDACTED]" || recorded[0].Payload["tool"] != "load_ticket" {
+		t.Fatalf("payload = %+v, want redacted secret and visible tool", recorded[0].Payload)
 	}
 }
 

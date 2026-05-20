@@ -665,6 +665,50 @@ func TestRunPersistsSessionAndExecutionWhenStateStoreConfigured(t *testing.T) {
 	}
 }
 
+func TestRunPersistsEventsToStateStore(t *testing.T) {
+	store := state.NewMemoryStore()
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	recorded, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if len(recorded) == 0 {
+		t.Fatal("events = 0, want persisted harness events")
+	}
+	var started, completed bool
+	for _, event := range recorded {
+		if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+			t.Fatalf("event = %+v, want session identifiers", event)
+		}
+		if event.Kind == events.EventSessionStarted {
+			started = true
+		}
+		if event.Kind == events.EventPipeCompleted {
+			completed = true
+		}
+	}
+	if !started || !completed {
+		t.Fatalf("events = %+v, want session start and pipe completed", recorded)
+	}
+}
+
 func TestRunWithParentSessionCreatesChildWithoutFinishingExecution(t *testing.T) {
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
