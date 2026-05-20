@@ -29,11 +29,14 @@ func TestAnthropicClassifiesHTTPStatusErrors(t *testing.T) {
 	tests := []struct {
 		name      string
 		code      int
+		kind      provider.ErrorKind
 		transient bool
 	}{
-		{name: "rate limit", code: http.StatusTooManyRequests, transient: true},
-		{name: "server error", code: http.StatusBadGateway, transient: true},
-		{name: "bad request", code: http.StatusBadRequest, transient: false},
+		{name: "rate limit", code: http.StatusTooManyRequests, kind: provider.ErrorRateLimit, transient: true},
+		{name: "server error", code: http.StatusBadGateway, kind: provider.ErrorTransient, transient: true},
+		{name: "auth", code: http.StatusUnauthorized, kind: provider.ErrorAuth, transient: false},
+		{name: "validation", code: http.StatusBadRequest, kind: provider.ErrorValidation, transient: false},
+		{name: "not found", code: http.StatusNotFound, kind: provider.ErrorPermanent, transient: false},
 	}
 
 	for _, tt := range tests {
@@ -60,6 +63,13 @@ func TestAnthropicClassifiesHTTPStatusErrors(t *testing.T) {
 			}
 			if provider.IsTransientError(err) != tt.transient {
 				t.Fatalf("IsTransientError(%v) = %v, want %v", err, provider.IsTransientError(err), tt.transient)
+			}
+			var classified provider.ClassifiedError
+			if !errors.As(err, &classified) {
+				t.Fatalf("Complete error = %v, want ClassifiedError", err)
+			}
+			if classified.Kind != tt.kind {
+				t.Fatalf("error kind = %q, want %q", classified.Kind, tt.kind)
 			}
 		})
 	}

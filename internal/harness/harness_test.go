@@ -451,6 +451,29 @@ func TestRunRetriesTransientProviderErrorBeforeSideEffects(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotRetryAuthProviderError(t *testing.T) {
+	authErr := provider.AuthError(errors.New("invalid api key"))
+	p := &scriptedProvider{err: authErr}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithProviderRetries(3),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, authErr) {
+		t.Fatalf("Run error = %v, want auth error", err)
+	}
+	if out.Status != harness.StatusFailed {
+		t.Fatalf("Status = %q, want failed", out.Status)
+	}
+	if len(p.requests) != 1 {
+		t.Fatalf("provider calls = %d, want no retry for auth error", len(p.requests))
+	}
+}
+
 func TestRunDoesNotRetryTransientProviderErrorAfterToolCall(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

@@ -11,8 +11,11 @@ import (
 type ErrorKind string
 
 const (
-	ErrorTransient ErrorKind = "transient"
-	ErrorPermanent ErrorKind = "permanent"
+	ErrorTransient  ErrorKind = "transient"
+	ErrorRateLimit  ErrorKind = "rate_limit"
+	ErrorAuth       ErrorKind = "auth"
+	ErrorValidation ErrorKind = "validation"
+	ErrorPermanent  ErrorKind = "permanent"
 )
 
 type ClassifiedError struct {
@@ -45,9 +48,30 @@ func PermanentError(err error) error {
 	return ClassifiedError{Kind: ErrorPermanent, Err: err}
 }
 
+func RateLimitError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return ClassifiedError{Kind: ErrorRateLimit, Err: err}
+}
+
+func AuthError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return ClassifiedError{Kind: ErrorAuth, Err: err}
+}
+
+func ValidationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return ClassifiedError{Kind: ErrorValidation, Err: err}
+}
+
 func IsTransientError(err error) bool {
 	var classified ClassifiedError
-	return errors.As(err, &classified) && classified.Kind == ErrorTransient
+	return errors.As(err, &classified) && (classified.Kind == ErrorTransient || classified.Kind == ErrorRateLimit)
 }
 
 func transportError(providerName string, err error) error {
@@ -63,8 +87,16 @@ func statusError(providerName, status string, code int, detail string) error {
 		message += ": " + detail
 	}
 	err := errors.New(message)
-	if code == http.StatusTooManyRequests || code >= 500 {
+	switch {
+	case code == http.StatusTooManyRequests:
+		return RateLimitError(err)
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return AuthError(err)
+	case code == http.StatusBadRequest || code == http.StatusUnprocessableEntity:
+		return ValidationError(err)
+	case code >= 500:
 		return TransientError(err)
+	default:
+		return PermanentError(err)
 	}
-	return PermanentError(err)
 }
