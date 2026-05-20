@@ -1,6 +1,7 @@
 package ovr
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -143,6 +144,39 @@ func TestNewHTTPHandlerLogsDirectSinkInputToEventStream(t *testing.T) {
 	assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
 }
 
+func TestNewHTTPHandlerPassesLogSinkEventThroughHookBus(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventSinkLogged, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["checked"] = true
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Sink(Log()),
+	}, httpRuntime{eventStream: stream, hookBus: hooks})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"event":"created"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	event := assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
+	if event.Payload["checked"] != true {
+		t.Fatalf("sink_logged payload = %+v, want hook enrichment", event.Payload)
+	}
+}
+
 func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
 	scripted := &httpScriptedProvider{
@@ -197,7 +231,10 @@ func TestNewHTTPHandlerLogsPipelineOutputSinkToEventStream(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
 	}
-	assertSinkLoggedEvent(t, stream, "output", `{"status":"classified"}`)
+	event := assertSinkLoggedEvent(t, stream, "output", `{"status":"classified"}`)
+	if event.ExecID == "" || event.SessionID == "" || event.TraceID == "" {
+		t.Fatalf("sink_logged event = %+v, want session identifiers", event)
+	}
 }
 
 func TestNewHTTPHandlerRedactsSensitiveLogSinkJSONOutput(t *testing.T) {
@@ -393,7 +430,7 @@ func TestNewHTTPHandlerRejectsNonHTTPPipeline(t *testing.T) {
 	}
 }
 
-func assertSinkLoggedEvent(t *testing.T, stream *events.EventStream, payloadKey, wantPayload string) {
+func assertSinkLoggedEvent(t *testing.T, stream *events.EventStream, payloadKey, wantPayload string) events.Event {
 	t.Helper()
 
 	var matches []events.Event
@@ -412,6 +449,7 @@ func assertSinkLoggedEvent(t *testing.T, stream *events.EventStream, payloadKey,
 	if got != wantPayload {
 		t.Fatalf("sink_logged payload[%q] = %q, want %q", payloadKey, got, wantPayload)
 	}
+	return matches[0]
 }
 
 func assertNoSinkLoggedEvent(t *testing.T, stream *events.EventStream) {

@@ -95,7 +95,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
 				return
 			}
-			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, input, "input"); err != nil {
+			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, planRunResult{Output: input}, "input"); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
@@ -161,7 +161,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
 	case runtimeplan.TerminalSink:
-		if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, output, "output"); err != nil {
+		if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, result, "output"); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
@@ -411,28 +411,22 @@ func postWebhook(ctx context.Context, url, output string) error {
 	return nil
 }
 
-func (rt httpRuntime) applySinkTerminal(ctx context.Context, terminal runtimeplan.Terminal, output, payloadKey string) error {
+func (rt httpRuntime) applySinkTerminal(ctx context.Context, terminal runtimeplan.Terminal, result planRunResult, payloadKey string) error {
+	output := result.Output
 	if terminal.SinkFilePath == "" {
 		if terminal.SinkLog {
-			return rt.appendLogSinkEvent(ctx, payloadKey, output)
+			return rt.appendLogSinkEvent(ctx, result, payloadKey, output)
 		}
 		return nil
 	}
 	return writeFileSink(terminal.SinkFilePath, output)
 }
 
-func (rt httpRuntime) appendLogSinkEvent(ctx context.Context, payloadKey, output string) error {
-	if rt.eventStream == nil {
-		return nil
-	}
-	_, err := rt.eventStream.Append(ctx, events.Event{
-		Kind: events.EventSinkLogged,
-		Payload: map[string]any{
-			"target":   "log",
-			payloadKey: terminalLogPayload(output),
-		},
+func (rt httpRuntime) appendLogSinkEvent(ctx context.Context, result planRunResult, payloadKey, output string) error {
+	return rt.emitRuntimeEvent(ctx, result, events.EventSinkLogged, map[string]any{
+		"target":   "log",
+		payloadKey: terminalLogPayload(output),
 	})
-	return err
 }
 
 func terminalLogPayload(output string) any {
