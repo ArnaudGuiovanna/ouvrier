@@ -835,11 +835,13 @@ func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
 		t.Fatalf("sessions = %+v, want root session", sessions)
 	}
 	var child bool
+	var childSessionID string
 	for _, session := range sessions {
 		if session.ParentSessionID == "" {
 			continue
 		}
 		child = true
+		childSessionID = session.SessionID
 		if session.ParentSessionID != rootSessionID || session.ExecID != execID || session.TraceID != traceID {
 			t.Fatalf("child session = %+v, want parent %q exec %q trace %q", session, rootSessionID, execID, traceID)
 		}
@@ -857,6 +859,9 @@ func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
 			taskCompleted = true
 			if event.Payload["checked"] != true {
 				t.Fatalf("task completed event = %+v, want hook enrichment", event)
+			}
+			if event.Payload["child_session_id"] != childSessionID {
+				t.Fatalf("task completed event = %+v, want child session %q", event, childSessionID)
 			}
 		}
 	}

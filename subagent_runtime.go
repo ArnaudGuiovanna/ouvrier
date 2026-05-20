@@ -75,18 +75,20 @@ func (h *subAgentHandler) Execute(ctx context.Context, call provider.ToolCall) (
 	if ledger, ok := harness.BudgetLedgerFromContext(ctx); ok {
 		scope.budgetLedger = ledger
 	}
-	output, err := h.runtime.runSteps(ctx, h.spec.Pipeline.Steps, input, scope)
+	result, err := h.runtime.runStepsResult(ctx, h.spec.Pipeline.Steps, input, scope)
 	if err != nil {
-		emitErr := h.emitTask(ctx, parent, events.EventTaskFailed, call, map[string]any{"error": err.Error()})
+		payload := subAgentTaskSessionPayload(result)
+		payload["error"] = err.Error()
+		emitErr := h.emitTask(ctx, parent, events.EventTaskFailed, call, payload)
 		return provider.ToolResult{}, errors.Join(err, emitErr)
 	}
-	if err := h.emitTask(ctx, parent, events.EventTaskCompleted, call, nil); err != nil {
+	if err := h.emitTask(ctx, parent, events.EventTaskCompleted, call, subAgentTaskSessionPayload(result)); err != nil {
 		return provider.ToolResult{}, err
 	}
 
-	content := json.RawMessage(output)
+	content := json.RawMessage(result.Output)
 	if !json.Valid(content) {
-		content, err = json.Marshal(output)
+		content, err = json.Marshal(result.Output)
 		if err != nil {
 			return provider.ToolResult{}, fmt.Errorf("marshal subagent result: %w", err)
 		}
@@ -127,6 +129,17 @@ func (h *subAgentHandler) emitTask(ctx context.Context, parent runtimeplan.Sessi
 		payload[key] = value
 	}
 	return h.runtime.emitSessionEvent(ctx, parent, kind, payload)
+}
+
+func subAgentTaskSessionPayload(result planRunResult) map[string]any {
+	if !result.HasSession {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"child_exec_id":    result.Session.ExecID,
+		"child_session_id": result.Session.SessionID,
+		"child_trace_id":   result.Session.TraceID,
+	}
 }
 
 func subAgentInput(raw json.RawMessage) (string, error) {
