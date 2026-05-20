@@ -885,6 +885,14 @@ func TestRunValidatesResultSchemaAndRecordsViolation(t *testing.T) {
 	if !foundViolationEvent {
 		t.Fatalf("events = %+v, want schema violation event", stream.List())
 	}
+
+	persistedEvents, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findEvent(persistedEvents, events.EventSchemaViolation); !ok {
+		t.Fatalf("persisted events = %+v, want schema violation event", persistedEvents)
+	}
 }
 
 func TestRunRepairsInvalidResultSchemaWithinBound(t *testing.T) {

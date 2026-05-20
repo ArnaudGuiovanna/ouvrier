@@ -18,6 +18,7 @@ type Store interface {
 	ReserveIdempotency(context.Context, string, string) (string, bool, error)
 	AddEvent(context.Context, events.Event) (events.Event, error)
 	Events(context.Context, string) ([]events.Event, error)
+	EventsSince(context.Context, string, uint64) ([]events.Event, error)
 	AddSchemaViolation(context.Context, SchemaViolation) (SchemaViolation, error)
 	SchemaViolations(context.Context, string) ([]SchemaViolation, error)
 }

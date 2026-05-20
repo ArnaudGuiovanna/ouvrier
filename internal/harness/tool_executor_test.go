@@ -270,6 +270,56 @@ func TestRunEmitsPermissionDecisionForAllowedToolCallThroughEventStreamAndHookBu
 	}
 }
 
+func TestRunPersistsToolAndPermissionEventsToStateStore(t *testing.T) {
+	store := state.NewMemoryStore()
+	call := provider.ToolCall{
+		ID:        "call_1",
+		Name:      "lookup",
+		Arguments: []byte(`{"query":"ouvrier"}`),
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{
+			{Text: "need lookup", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: "done", StopReason: provider.StopEndTurn},
+		},
+	}
+	executor := tools.NewExecutor()
+	if err := executor.Register("lookup", func(ctx context.Context, args harnessLookupArgs) (harnessLookupResult, error) {
+		return harnessLookupResult{Answer: "workers"}, nil
+	}, tools.WithMetadata(tools.Metadata{Effect: policy.EffectReadOnly})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithToolExecutor(executor),
+		harness.WithStateStore(store),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	recorded, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	for _, kind := range []events.EventKind{
+		events.EventToolCallStarted,
+		events.EventPermissionDecision,
+		events.EventToolCallCompleted,
+	} {
+		if _, ok := findEvent(recorded, kind); !ok {
+			t.Fatalf("persisted events = %+v, want %s", recorded, kind)
+		}
+	}
+}
+
 func TestRunEmitsPermissionDecisionForDeniedToolCall(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

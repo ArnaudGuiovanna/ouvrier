@@ -146,6 +146,47 @@ func TestMemoryStoreRecordsEvents(t *testing.T) {
 	}
 }
 
+func TestMemoryStorePreservesEventIDsAndFiltersEventsSince(t *testing.T) {
+	store := NewMemoryStore()
+
+	first, err := store.AddEvent(context.Background(), events.Event{
+		ID:     7,
+		Kind:   events.EventSessionStarted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	second, err := store.AddEvent(context.Background(), events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	_, err = store.AddEvent(context.Background(), events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_2",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+
+	if first.ID != 7 {
+		t.Fatalf("first ID = %d, want preserved ID 7", first.ID)
+	}
+	if second.ID != 8 {
+		t.Fatalf("second ID = %d, want generated ID after preserved ID", second.ID)
+	}
+	recorded, err := store.EventsSince(context.Background(), "exec_1", 7)
+	if err != nil {
+		t.Fatalf("EventsSince returned error: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].ID != 8 {
+		t.Fatalf("events since 7 = %+v, want exec_1 event 8", recorded)
+	}
+}
+
 func TestMemoryStoreRecordsSchemaViolations(t *testing.T) {
 	store := NewMemoryStore()
 	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)

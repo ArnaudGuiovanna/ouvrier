@@ -142,8 +142,19 @@ func (s *MemoryStore) AddEvent(ctx context.Context, event events.Event) (events.
 	event = events.SanitizeEvent(event)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.nextEventID++
-	event.ID = s.nextEventID
+	if event.ID == 0 {
+		s.nextEventID++
+		event.ID = s.nextEventID
+	} else {
+		for _, existing := range s.events {
+			if existing.ID == event.ID {
+				return events.Event{}, errors.New("event ID already exists")
+			}
+		}
+		if event.ID > s.nextEventID {
+			s.nextEventID = event.ID
+		}
+	}
 	if event.At.IsZero() {
 		event.At = time.Now().UTC()
 	}
@@ -158,13 +169,30 @@ func (s *MemoryStore) Events(ctx context.Context, execID string) ([]events.Event
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.eventsSinceLocked(execID, 0), nil
+}
+
+func (s *MemoryStore) EventsSince(ctx context.Context, execID string, afterID uint64) ([]events.Event, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.eventsSinceLocked(execID, afterID), nil
+}
+
+func (s *MemoryStore) eventsSinceLocked(execID string, afterID uint64) []events.Event {
 	recorded := make([]events.Event, 0, len(s.events))
 	for _, event := range s.events {
-		if execID == "" || event.ExecID == execID {
+		if (execID == "" || event.ExecID == execID) && event.ID > afterID {
 			recorded = append(recorded, events.SanitizeEvent(event))
 		}
 	}
-	return recorded, nil
+	sort.Slice(recorded, func(i, j int) bool {
+		return recorded[i].ID < recorded[j].ID
+	})
+	return recorded
 }
 
 func (s *MemoryStore) AddSchemaViolation(ctx context.Context, violation SchemaViolation) (SchemaViolation, error) {

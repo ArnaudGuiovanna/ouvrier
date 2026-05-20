@@ -127,6 +127,15 @@ The `ouvrier` CLI TUI must use Charm Bracelet Bubble Tea.
 
 ## v0.1 Backlog
 
+GitHub Issues is the official operational backlog for v0.1. Use milestone
+`v0.1` in `ArnaudGuiovanna/ouvrier` as the source of truth for work tracking,
+priorities, and closure state.
+
+The sections below remain implementation context and historical planning
+material derived from `specs.md` and the PDF. When the Markdown backlog and
+GitHub Issues disagree, update GitHub Issues first and treat the mismatch as a
+backlog hygiene task rather than running two separate backlogs.
+
 ### Current Implementation Snapshot
 
 Status date: 2026-05-18.

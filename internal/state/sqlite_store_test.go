@@ -197,6 +197,52 @@ func TestSQLiteStorePersistsEventsAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestSQLiteStorePreservesEventIDsAndFiltersEventsSinceAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store := newTestSQLiteStore(t, path)
+
+	first, err := store.AddEvent(context.Background(), events.Event{
+		ID:     9,
+		Kind:   events.EventSessionStarted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	second, err := store.AddEvent(context.Background(), events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	_, err = store.AddEvent(context.Background(), events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_2",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	if first.ID != 9 {
+		t.Fatalf("first ID = %d, want preserved ID 9", first.ID)
+	}
+	if second.ID != 10 {
+		t.Fatalf("second ID = %d, want generated ID after preserved ID", second.ID)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	reopened := newTestSQLiteStore(t, path)
+	recorded, err := reopened.EventsSince(context.Background(), "exec_1", 9)
+	if err != nil {
+		t.Fatalf("EventsSince returned error: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].ID != 10 {
+		t.Fatalf("events since 9 = %+v, want exec_1 event 10", recorded)
+	}
+}
+
 func TestSQLiteStoreRecordsSchemaViolations(t *testing.T) {
 	store := newTestSQLiteStore(t, filepath.Join(t.TempDir(), "state.db"))
 	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)
