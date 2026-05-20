@@ -603,6 +603,7 @@ func adminExecutionResponseFromState(execution state.Execution) *adminExecutionR
 }
 
 func adminEventResponseFromEvent(event events.Event) adminEventResponse {
+	event = events.SanitizeEvent(event)
 	return adminEventResponse{
 		ID:        event.ID,
 		At:        event.At,

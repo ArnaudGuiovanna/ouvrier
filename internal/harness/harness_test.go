@@ -978,6 +978,23 @@ func TestRunRepairsInvalidResultSchemaWithinBound(t *testing.T) {
 	if event, ok := findEvent(stream.List(), events.EventSchemaValidationPassed); !ok || event.Payload["repaired"] != true {
 		t.Fatalf("events = %+v, want repaired schema validation passed event", stream.List())
 	}
+	llmStarted := 0
+	llmCompleted := 0
+	repairLLMCompleted := false
+	for _, event := range stream.List() {
+		switch event.Kind {
+		case events.EventLLMCallStarted:
+			llmStarted++
+		case events.EventLLMCallCompleted:
+			llmCompleted++
+			if event.Payload["repair"] == true && event.Payload["attempt"] == 1 {
+				repairLLMCompleted = true
+			}
+		}
+	}
+	if llmStarted != 2 || llmCompleted != 2 || !repairLLMCompleted {
+		t.Fatalf("events = %+v, want normal and repair LLM start/completion", stream.List())
+	}
 }
 
 func TestRunFailsWhenSchemaRepairAttemptsAreExhausted(t *testing.T) {
@@ -1247,6 +1264,55 @@ func TestRunAppendsCoreEventsAndRunsHooks(t *testing.T) {
 	}
 	if recorded[4].Payload["status"] != string(harness.StatusCompleted) {
 		t.Fatalf("pipe completed payload = %+v, want completed status", recorded[4].Payload)
+	}
+}
+
+func TestRunBlocksProviderCallWhenBeforeLLMHookFails(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	blocked := errors.New("policy denied LLM call")
+	if err := hooks.Register(events.EventBeforeLLM, func(ctx context.Context, event events.Event) (events.Event, error) {
+		return event, blocked
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "should not run",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, blocked) {
+		t.Fatalf("Run error = %v, want blocking hook error", err)
+	}
+	if out.Status != harness.StatusFailed {
+		t.Fatalf("Status = %q, want failed", out.Status)
+	}
+	if len(p.requests) != 0 {
+		t.Fatalf("provider calls = %d, want none after blocking before-LLM hook", len(p.requests))
+	}
+	if _, ok := findEvent(stream.List(), events.EventBeforeLLM); ok {
+		t.Fatalf("events = %+v, blocked before-LLM event must not be appended", stream.List())
+	}
+	event, ok := findEvent(stream.List(), events.EventPipeFailed)
+	errorText, _ := event.Payload["error"].(string)
+	if !ok ||
+		event.Payload["status"] != string(harness.StatusFailed) ||
+		!strings.Contains(errorText, "hook") {
+		t.Fatalf("events = %+v, want pipe failed event after blocking hook", stream.List())
 	}
 }
 

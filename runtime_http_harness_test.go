@@ -229,10 +229,29 @@ func TestNewHTTPHandlerPersistsHarnessStateWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions returned error: %v", err)
 	}
-	if len(sessions) != 1 {
-		t.Fatalf("sessions = %d, want 1", len(sessions))
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %d, want pipeline and pipe sessions", len(sessions))
 	}
-	execution, ok, err := store.Execution(context.Background(), sessions[0].ExecID)
+	var pipelineSessionID, pipeParentID, pipeSessionID, execID, traceID, pipeExecID, pipeTraceID string
+	for _, session := range sessions {
+		if session.ParentSessionID == "" {
+			pipelineSessionID = session.SessionID
+			execID = session.ExecID
+			traceID = session.TraceID
+			continue
+		}
+		pipeParentID = session.ParentSessionID
+		pipeSessionID = session.SessionID
+		pipeExecID = session.ExecID
+		pipeTraceID = session.TraceID
+	}
+	if pipelineSessionID == "" || pipeSessionID == "" {
+		t.Fatalf("sessions = %+v, want pipeline parent and pipe child", sessions)
+	}
+	if pipeParentID != pipelineSessionID || pipeExecID != execID || pipeTraceID != traceID {
+		t.Fatalf("sessions = %+v, want pipe child of pipeline with shared exec/trace", sessions)
+	}
+	execution, ok, err := store.Execution(context.Background(), execID)
 	if err != nil {
 		t.Fatalf("Execution returned error: %v", err)
 	}
@@ -294,6 +313,117 @@ func TestNewHTTPHandlerEmitsPipelineEventsThroughHookBus(t *testing.T) {
 	}
 	if _, ok := completed.Payload["output"]; ok {
 		t.Fatalf("pipeline completed payload = %+v, must not include raw output", completed.Payload)
+	}
+}
+
+func TestNewHTTPHandlerUsesStablePipelineTraceAcrossMultiplePipes(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: `{"status":"normalized"}`, StopReason: provider.StopEndTurn},
+			{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("normalize ticket", Model("anthropic/claude-sonnet-4-6")),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	recorded := stream.List()
+	started, ok := findRuntimeHTTPEvent(recorded, events.EventPipelineStarted)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline started event", recorded)
+	}
+	if started.ExecID == "" || started.SessionID == "" || started.TraceID == "" {
+		t.Fatalf("pipeline started event = %+v, want execution identifiers", started)
+	}
+
+	pipeSessions := map[string]bool{}
+	for _, event := range recorded {
+		switch event.Kind {
+		case events.EventPipelineStarted, events.EventPipelineCompleted, events.EventPipeStarted, events.EventPipeCompleted:
+			if event.ExecID != started.ExecID || event.TraceID != started.TraceID {
+				t.Fatalf("event = %+v, want exec/trace %s/%s", event, started.ExecID, started.TraceID)
+			}
+			if event.Kind == events.EventPipeStarted {
+				pipeSessions[event.SessionID] = true
+			}
+		}
+	}
+	if len(pipeSessions) != 2 {
+		t.Fatalf("pipe sessions = %+v, want one child session per Pipe", pipeSessions)
+	}
+
+	persisted, err := store.Events(context.Background(), started.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findRuntimeHTTPEvent(persisted, events.EventPipelineStarted); !ok {
+		t.Fatalf("persisted events = %+v, want pipeline started event", persisted)
+	}
+	if _, ok := findRuntimeHTTPEvent(persisted, events.EventPipelineCompleted); !ok {
+		t.Fatalf("persisted events = %+v, want pipeline completed event", persisted)
+	}
+}
+
+func TestNewHTTPHandlerEmitsPipelineFailedWhenStartHookBlocks(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventPipelineStarted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		return event, context.Canceled
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, eventStream: stream, hookBus: hooks})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if len(scripted.requests) != 0 {
+		t.Fatalf("provider calls = %d, want none when pipeline start hook blocks", len(scripted.requests))
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineStarted); ok {
+		t.Fatalf("events = %+v, blocked pipeline_started event must not be appended", stream.List())
+	}
+	failed, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline_failed event", stream.List())
+	}
+	if failed.ExecID == "" || failed.TraceID == "" || failed.Payload["error"] == "" {
+		t.Fatalf("pipeline failed event = %+v, want IDs and error payload", failed)
 	}
 }
 
@@ -922,35 +1052,45 @@ func TestNewHTTPHandlerRunsSubAgentToolThroughChildSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sessions returned error: %v", err)
 	}
-	if len(sessions) != 2 {
-		t.Fatalf("sessions = %d, want root and child", len(sessions))
+	if len(sessions) != 3 {
+		t.Fatalf("sessions = %d, want pipeline, root pipe, and subagent child", len(sessions))
 	}
-	var rootSessionID, execID, traceID string
+	var pipelineSessionID, rootSessionID, execID, traceID string
 	for _, session := range sessions {
 		if session.ParentSessionID == "" {
-			rootSessionID = session.SessionID
+			pipelineSessionID = session.SessionID
 			execID = session.ExecID
 			traceID = session.TraceID
 			break
 		}
 	}
-	if rootSessionID == "" {
-		t.Fatalf("sessions = %+v, want root session", sessions)
+	if pipelineSessionID == "" {
+		t.Fatalf("sessions = %+v, want pipeline session", sessions)
 	}
-	var child bool
+	var rootPipe bool
 	var childSessionID string
 	for _, session := range sessions {
-		if session.ParentSessionID == "" {
-			continue
-		}
-		child = true
-		childSessionID = session.SessionID
-		if session.ParentSessionID != rootSessionID || session.ExecID != execID || session.TraceID != traceID {
-			t.Fatalf("child session = %+v, want parent %q exec %q trace %q", session, rootSessionID, execID, traceID)
+		if session.ParentSessionID == pipelineSessionID {
+			rootPipe = true
+			rootSessionID = session.SessionID
 		}
 	}
-	if !child {
-		t.Fatalf("sessions = %+v, want root and child lineage", sessions)
+	if !rootPipe {
+		t.Fatalf("sessions = %+v, want root pipe child of pipeline %q", sessions, pipelineSessionID)
+	}
+	var subagentChild bool
+	for _, session := range sessions {
+		if session.ParentSessionID != rootSessionID {
+			continue
+		}
+		subagentChild = true
+		childSessionID = session.SessionID
+		if session.ExecID != execID || session.TraceID != traceID {
+			t.Fatalf("child session = %+v, want exec %q trace %q", session, execID, traceID)
+		}
+	}
+	if !subagentChild {
+		t.Fatalf("sessions = %+v, want subagent child of root pipe %q", sessions, rootSessionID)
 	}
 
 	var taskStarted, taskCompleted bool

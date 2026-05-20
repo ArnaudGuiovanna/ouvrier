@@ -111,7 +111,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			"model":     h.model,
 		}); err != nil {
 			out.Status = StatusFailed
-			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
 		resp, err := h.completeWithRetry(runCtx, session, out.Iterations, provider.Request{
 			Model:    h.model,
@@ -124,7 +124,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 				return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
 			}
 			out.Status = StatusFailed
-			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
 
 		out.Usage.Add(resp.Usage)
@@ -137,7 +137,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			"cost_usd":      resp.Usage.CostUSD,
 		}); err != nil {
 			out.Status = StatusFailed
-			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
 		if resp.Text != "" {
 			out.Text = resp.Text
@@ -157,7 +157,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			out.Text = validated
 			if err != nil {
 				out.Status = StatusFailed
-				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
+				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 			}
 			out.Status = StatusCompleted
 			return out, h.finishExecution(runCtx, session, out.Status)
@@ -174,7 +174,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		}
 		if err != nil {
 			out.Status = StatusFailed
-			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status))
+			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
 		messages = append(messages, toolMessages...)
 		if _, payload, exceeded := h.budgetLedger.Exceeded(); exceeded {
@@ -316,15 +316,19 @@ func (h *Harness) startExecution(ctx context.Context, session runtimecore.Sessio
 	})
 }
 
-func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Session, status Status) error {
+func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Session, status Status, eventErr ...error) error {
 	pipeKind := events.EventPipeFailed
 	if status == StatusCompleted {
 		pipeKind = events.EventPipeCompleted
 	}
-	emitErr := h.emit(ctx, session, pipeKind, map[string]any{
+	payload := map[string]any{
 		"model":  h.model,
 		"status": string(status),
-	})
+	}
+	if len(eventErr) > 0 && eventErr[0] != nil {
+		payload["error"] = eventErr[0].Error()
+	}
+	emitErr := h.emit(ctx, session, pipeKind, payload)
 	emitErr = errors.Join(emitErr, h.emit(ctx, session, events.EventSessionEnd, map[string]any{
 		"status": string(status),
 	}))
@@ -411,6 +415,14 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			return currentText, usage, err
 		}
 
+		if err := h.emit(ctx, session, events.EventBeforeLLM, map[string]any{
+			"iteration": iteration,
+			"model":     h.model,
+			"repair":    true,
+			"attempt":   attempt,
+		}); err != nil {
+			return currentText, usage, err
+		}
 		resp, err := h.completeWithRetry(ctx, session, iteration, provider.Request{
 			Model:  h.model,
 			System: h.systemPrompt,
@@ -428,6 +440,18 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			return currentText, usage, errors.Join(err, emitErr)
 		}
 		usage.Add(resp.Usage)
+		if err := h.emit(ctx, session, events.EventAfterLLM, map[string]any{
+			"iteration":     iteration,
+			"stop_reason":   string(resp.StopReason),
+			"tool_calls":    len(resp.ToolCalls),
+			"input_tokens":  resp.Usage.InputTokens,
+			"output_tokens": resp.Usage.OutputTokens,
+			"cost_usd":      resp.Usage.CostUSD,
+			"repair":        true,
+			"attempt":       attempt,
+		}); err != nil {
+			return currentText, usage, err
+		}
 		if len(resp.ToolCalls) > 0 {
 			err := errors.New("schema repair returned tool calls")
 			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
@@ -518,12 +542,14 @@ func (h *Harness) emit(ctx context.Context, session runtimecore.Session, kind ev
 		TraceID:   session.TraceID,
 		Payload:   payload,
 	}
+	event = events.SanitizeEvent(event)
 	if h.hookBus != nil {
 		var err error
 		event, err = h.hookBus.Emit(ctx, event)
 		if err != nil {
 			return err
 		}
+		event = events.SanitizeEvent(event)
 	}
 	if h.eventStream == nil {
 		if h.stateStore == nil {

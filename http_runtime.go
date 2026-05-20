@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"ouvrier/internal/events"
 	"ouvrier/internal/harness"
@@ -66,20 +67,87 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 }
 
 func (rt httpRuntime) runPlanResult(ctx context.Context, plan runtimeplan.Plan, input string) (planRunResult, error) {
-	result := planRunResult{Output: input}
-	if err := rt.emitPipelineEvent(ctx, result, plan, events.EventPipelineStarted, "started", nil); err != nil {
-		return result, err
+	pipelineSession, err := newHTTPPipelineSession(plan)
+	if err != nil {
+		return planRunResult{Output: input}, err
+	}
+	pipelineResult := planRunResult{Output: input, Session: pipelineSession, HasSession: true}
+
+	if err := rt.startPipelineExecution(ctx, pipelineSession, plan); err != nil {
+		return pipelineResult, err
 	}
 
-	result, err := rt.runStepsResult(ctx, plan.Steps, input, planRunScope{})
+	result, err := rt.runStepsResult(ctx, plan.Steps, input, planRunScope{parentSession: &pipelineSession})
 	if err != nil {
-		emitErr := rt.emitPipelineEvent(ctx, result, plan, events.EventPipelineFailed, "failed", err)
+		if !result.HasSession {
+			result.Session = pipelineSession
+			result.HasSession = true
+		}
+		emitErr := rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err)
 		return result, errors.Join(err, emitErr)
 	}
-	if err := rt.emitPipelineEvent(ctx, result, plan, events.EventPipelineCompleted, "completed", nil); err != nil {
+	if err := rt.finishPipelineExecution(ctx, pipelineSession, plan, "completed", nil); err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func newHTTPPipelineSession(plan runtimeplan.Plan) (runtimeplan.Session, error) {
+	return runtimeplan.NewSession(httpPipelineSessionModel(plan), runtimeplan.WithSessionBudget(runtimeplan.Budget{
+		MaxIterations: harness.DefaultMaxIterations,
+		MaxTokens:     harness.DefaultMaxTokens,
+		MaxCostUSD:    harness.DefaultMaxCostUSD,
+		MaxWallClock:  harness.DefaultMaxWallClock,
+	}))
+}
+
+func httpPipelineSessionModel(plan runtimeplan.Plan) string {
+	for _, step := range plan.Steps {
+		if step.Model != "" {
+			return step.Model
+		}
+	}
+	return "runtime/http"
+}
+
+func (rt httpRuntime) startPipelineExecution(ctx context.Context, session runtimeplan.Session, plan runtimeplan.Plan) error {
+	if rt.stateStore != nil {
+		if err := rt.stateStore.SaveExecution(ctx, state.Execution{
+			ExecID:    session.ExecID,
+			TraceID:   session.TraceID,
+			Status:    state.ExecutionRunning,
+			StartedAt: session.StartedAt,
+		}); err != nil {
+			return err
+		}
+		if err := rt.stateStore.SaveSession(ctx, session); err != nil {
+			return err
+		}
+	}
+	if err := rt.emitPipelineEvent(ctx, planRunResult{Session: session, HasSession: true}, plan, events.EventPipelineStarted, "started", nil); err != nil {
+		return errors.Join(err, rt.finishPipelineExecution(ctx, session, plan, "failed", err))
+	}
+	return nil
+}
+
+func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runtimeplan.Session, plan runtimeplan.Plan, status string, eventErr error) error {
+	kind := events.EventPipelineCompleted
+	stateStatus := state.ExecutionCompleted
+	if status != "completed" {
+		kind = events.EventPipelineFailed
+		stateStatus = state.ExecutionFailed
+	}
+	emitErr := rt.emitPipelineEvent(ctx, planRunResult{Session: session, HasSession: true}, plan, kind, status, eventErr)
+	if rt.stateStore == nil {
+		return emitErr
+	}
+	return errors.Join(emitErr, rt.stateStore.SaveExecution(ctx, state.Execution{
+		ExecID:      session.ExecID,
+		TraceID:     session.TraceID,
+		Status:      stateStatus,
+		StartedAt:   session.StartedAt,
+		CompletedAt: time.Now().UTC(),
+	}))
 }
 
 type planRunScope struct {

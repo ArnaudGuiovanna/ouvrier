@@ -127,15 +127,19 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 	}
 	if outcome.toolErr != nil {
 		if emitErr := h.emit(ctx, session, events.EventToolCallFailed, map[string]any{
-			"tool":  call.Name,
-			"error": outcome.toolErr.Error(),
+			"tool":         call.Name,
+			"tool_call_id": call.ID,
+			"error":        outcome.toolErr.Error(),
 		}); emitErr != nil {
 			return provider.Message{}, nil, errors.Join(outcome.toolErr, emitErr)
 		}
 		return provider.ToolResultText(call, outcome.toolErr.Error(), true), nil, nil
 	}
 	eventKind := events.EventAfterTool
-	payload := map[string]any{"tool": call.Name}
+	payload := map[string]any{
+		"tool":         call.Name,
+		"tool_call_id": call.ID,
+	}
 	if outcome.result.IsError {
 		eventKind = events.EventToolCallFailed
 		payload["error"] = "tool returned error result"
@@ -148,7 +152,8 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 
 func (h *Harness) emitBeforeToolCall(ctx context.Context, session runtimecore.Session, call provider.ToolCall) error {
 	return h.emit(ctx, session, events.EventBeforeTool, map[string]any{
-		"tool": call.Name,
+		"tool":         call.Name,
+		"tool_call_id": call.ID,
 	})
 }
 

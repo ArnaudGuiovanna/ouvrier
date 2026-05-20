@@ -314,8 +314,12 @@ func TestRunPersistsToolAndPermissionEventsToStateStore(t *testing.T) {
 		events.EventPermissionDecision,
 		events.EventToolCallCompleted,
 	} {
-		if _, ok := findEvent(recorded, kind); !ok {
+		event, ok := findEvent(recorded, kind)
+		if !ok {
 			t.Fatalf("persisted events = %+v, want %s", recorded, kind)
+		}
+		if event.Payload["tool_call_id"] != "call_1" {
+			t.Fatalf("%s payload = %+v, want tool_call_id", kind, event.Payload)
 		}
 	}
 }
@@ -423,8 +427,12 @@ func TestRunEmitsToolCallFailedForToolErrorResult(t *testing.T) {
 	if out.Status != harness.StatusCompleted {
 		t.Fatalf("Status = %q, want completed", out.Status)
 	}
-	if _, ok := findEvent(stream.List(), events.EventToolCallFailed); !ok {
+	event, ok := findEvent(stream.List(), events.EventToolCallFailed)
+	if !ok {
 		t.Fatalf("events = %+v, want tool_call_failed", stream.List())
+	}
+	if event.Payload["tool_call_id"] != "call_lookup" {
+		t.Fatalf("tool_call_failed payload = %+v, want tool_call_id", event.Payload)
 	}
 	if _, ok := findEvent(stream.List(), events.EventToolCallCompleted); ok {
 		t.Fatalf("events = %+v, want no tool_call_completed for failed result", stream.List())

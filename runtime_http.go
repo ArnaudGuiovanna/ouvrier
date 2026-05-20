@@ -339,12 +339,14 @@ func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult
 		Kind:    kind,
 		Payload: payload,
 	}
+	event = events.SanitizeEvent(event)
 	if rt.hookBus != nil {
 		var err error
 		event, err = rt.hookBus.Emit(ctx, event)
 		if err != nil {
 			return err
 		}
+		event = events.SanitizeEvent(event)
 	}
 	if rt.eventStream == nil {
 		if rt.stateStore == nil {
@@ -375,12 +377,14 @@ func (rt httpRuntime) emitSessionEvent(ctx context.Context, session runtimeplan.
 		TraceID:   session.TraceID,
 		Payload:   payload,
 	}
+	event = events.SanitizeEvent(event)
 	if rt.hookBus != nil {
 		var err error
 		event, err = rt.hookBus.Emit(ctx, event)
 		if err != nil {
 			return err
 		}
+		event = events.SanitizeEvent(event)
 	}
 	if rt.eventStream == nil {
 		if rt.stateStore == nil {
