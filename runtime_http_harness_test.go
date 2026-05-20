@@ -476,6 +476,89 @@ func TestNewHTTPHandlerRepairsTerminalReplySchemaViolationWhenConfigured(t *test
 	}
 }
 
+func TestNewHTTPHandlerExposesSchemaRepairThroughAdminState(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
+			{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream, schemaRepairAttempts: 1})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	violations, err := store.SchemaViolations(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 || violations[0].ExecID == "" {
+		t.Fatalf("violations = %+v, want one violation with exec ID", violations)
+	}
+
+	status := httptest.NewRecorder()
+	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+	if status.Code != http.StatusOK {
+		t.Fatalf("admin status = %d, want %d", status.Code, http.StatusOK)
+	}
+	var statusBody struct {
+		Status                 string `json:"status"`
+		SchemaViolations       int    `json:"schema_violations"`
+		SchemaValidationPassed int    `json:"schema_validation_passed"`
+		SchemaValidationFailed int    `json:"schema_validation_failed"`
+		SchemaRepairsStarted   int    `json:"schema_repairs_started"`
+		SchemaRepairsCompleted int    `json:"schema_repairs_completed"`
+	}
+	decodeAdminJSON(t, status, &statusBody)
+	if statusBody.Status != "ok" || statusBody.SchemaViolations != 1 {
+		t.Fatalf("admin status body = %+v, want schema violation count", statusBody)
+	}
+	if statusBody.SchemaValidationPassed != 1 || statusBody.SchemaValidationFailed != 1 {
+		t.Fatalf("admin schema validation counts = %+v, want one failed and one repaired pass", statusBody)
+	}
+	if statusBody.SchemaRepairsStarted != 1 || statusBody.SchemaRepairsCompleted != 1 {
+		t.Fatalf("admin schema repair counts = %+v, want started/completed", statusBody)
+	}
+
+	trace := httptest.NewRecorder()
+	handler.ServeHTTP(trace, httptest.NewRequest(http.MethodGet, "/admin/traces/"+violations[0].ExecID, nil))
+	if trace.Code != http.StatusOK {
+		t.Fatalf("admin trace = %d, want %d", trace.Code, http.StatusOK)
+	}
+	var traceBody struct {
+		Status           string `json:"status"`
+		SchemaViolations int    `json:"schema_violations"`
+		Events           []struct {
+			Kind    string         `json:"kind"`
+			Payload map[string]any `json:"payload"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, trace, &traceBody)
+	if traceBody.Status != "ok" || traceBody.SchemaViolations != 1 {
+		t.Fatalf("admin trace body = %+v, want schema violation count", traceBody)
+	}
+	assertAdminTraceHasSchemaEvent(t, traceBody.Events, events.EventSchemaValidationFailed, false)
+	assertAdminTraceHasSchemaEvent(t, traceBody.Events, events.EventSchemaRepairStarted, false)
+	assertAdminTraceHasSchemaEvent(t, traceBody.Events, events.EventSchemaRepairCompleted, false)
+	assertAdminTraceHasSchemaEvent(t, traceBody.Events, events.EventSchemaValidationPassed, true)
+}
+
 func TestNewHTTPHandlerValidatesTerminalReplySchemaWithoutPipeOutput(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":1}`, StopReason: provider.StopEndTurn},
@@ -728,6 +811,26 @@ func findRuntimeHTTPEvent(recorded []events.Event, kind events.EventKind) (event
 		}
 	}
 	return events.Event{}, false
+}
+
+func assertAdminTraceHasSchemaEvent(t *testing.T, recorded []struct {
+	Kind    string         `json:"kind"`
+	Payload map[string]any `json:"payload"`
+}, kind events.EventKind, repaired bool) {
+	t.Helper()
+	for _, event := range recorded {
+		if event.Kind != string(kind) {
+			continue
+		}
+		if event.Payload["schema"] != "ovr.httpTestReply" {
+			t.Fatalf("event payload = %+v, want schema ovr.httpTestReply", event.Payload)
+		}
+		if repaired && event.Payload["repaired"] != true {
+			t.Fatalf("event payload = %+v, want repaired=true", event.Payload)
+		}
+		return
+	}
+	t.Fatalf("events = %+v, want %s", recorded, kind)
 }
 
 type httpSubAgentReply struct {

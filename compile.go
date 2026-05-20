@@ -122,7 +122,10 @@ func compatibleResultSchemas(left, right *runtimeplan.ResultSchema) bool {
 	if left.Type != nil || right.Type != nil {
 		return left.Type == right.Type
 	}
-	return reflect.DeepEqual(left.JSONSchema, right.JSONSchema) || left.Name == right.Name
+	if len(left.JSONSchema) > 0 || len(right.JSONSchema) > 0 {
+		return reflect.DeepEqual(left.JSONSchema, right.JSONSchema)
+	}
+	return left.Name == right.Name
 }
 
 func resultSchemaLabel(contract *runtimeplan.ResultSchema) string {

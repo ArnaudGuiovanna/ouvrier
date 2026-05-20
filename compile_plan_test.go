@@ -134,6 +134,15 @@ func TestCompilePlansRejectsMismatchedPipeOutputAndReplySchema(t *testing.T) {
 	}
 }
 
+func TestCompatibleResultSchemasRejectsSameNameWithDifferentJSONSchema(t *testing.T) {
+	left := &runtimeplan.ResultSchema{Name: "same", JSONSchema: []byte(`{"type":"object"}`)}
+	right := &runtimeplan.ResultSchema{Name: "same", JSONSchema: []byte(`{"type":"string"}`)}
+
+	if compatibleResultSchemas(left, right) {
+		t.Fatal("compatibleResultSchemas returned true for same name with different JSON Schema")
+	}
+}
+
 func TestCompilePlansLeavesPipeRetryPolicyUnsetByDefault(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /tickets"),

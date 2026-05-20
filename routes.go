@@ -90,6 +90,11 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 		return
 	}
 	response.Events = len(recorded)
+	response.SchemaValidationPassed = countAdminEventsByKind(recorded, events.EventSchemaValidationPassed)
+	response.SchemaValidationFailed = countAdminEventsByKind(recorded, events.EventSchemaValidationFailed)
+	response.SchemaRepairsStarted = countAdminEventsByKind(recorded, events.EventSchemaRepairStarted)
+	response.SchemaRepairsCompleted = countAdminEventsByKind(recorded, events.EventSchemaRepairCompleted)
+	response.SchemaViolations = response.SchemaValidationFailed
 	if rt.stateStore == nil {
 		writeJSON(w, http.StatusOK, response)
 		return
@@ -111,6 +116,12 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	for _, execution := range executions {
 		response.ByStatus[string(execution.Status)]++
 	}
+	violations, err := rt.stateStore.SchemaViolations(req.Context(), "")
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	response.SchemaViolations = len(violations)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -210,6 +221,16 @@ func (rt httpRuntime) adminEvents(ctx context.Context, execID string) ([]events.
 		}
 	}
 	return filtered, nil
+}
+
+func countAdminEventsByKind(recorded []events.Event, kind events.EventKind) int {
+	count := 0
+	for _, event := range recorded {
+		if events.CanonicalKind(event.Kind) == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request) {
@@ -320,6 +341,10 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 				writeJSONStatus(w, http.StatusAccepted, "accepted")
 				return
 			}
+			if err := rt.validateDirectTerminalReplyOutput(req.Context(), route.plan); err != nil {
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
 			writeJSONStatus(w, http.StatusOK, "ok")
 		case runtimeplan.TerminalPush:
 			if err := applyPushTerminal(req.Context(), route.plan.Terminal, input); err != nil {
@@ -418,11 +443,16 @@ type adminHealthResponse struct {
 }
 
 type adminStatusResponse struct {
-	Status     string         `json:"status"`
-	Sessions   int            `json:"sessions"`
-	Executions int            `json:"executions"`
-	ByStatus   map[string]int `json:"by_status"`
-	Events     int            `json:"events"`
+	Status                 string         `json:"status"`
+	Sessions               int            `json:"sessions"`
+	Executions             int            `json:"executions"`
+	ByStatus               map[string]int `json:"by_status"`
+	Events                 int            `json:"events"`
+	SchemaViolations       int            `json:"schema_violations"`
+	SchemaValidationPassed int            `json:"schema_validation_passed"`
+	SchemaValidationFailed int            `json:"schema_validation_failed"`
+	SchemaRepairsStarted   int            `json:"schema_repairs_started"`
+	SchemaRepairsCompleted int            `json:"schema_repairs_completed"`
 }
 
 type adminTracesResponse struct {

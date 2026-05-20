@@ -23,6 +23,7 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 const maxHTTPRequestBodyBytes = 1 << 20
+const directReplyOKOutput = `{"status":"ok"}`
 
 type httpStatusResponse struct {
 	Status string `json:"status"`
@@ -72,6 +73,10 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 	case runtimeplan.TerminalReply:
 		if r.plan.Terminal.Async {
 			writeJSONStatus(w, http.StatusAccepted, "accepted")
+			return
+		}
+		if err := r.runtime.validateDirectTerminalReplyOutput(req.Context(), r.plan); err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
 		writeJSONStatus(w, http.StatusOK, "ok")
@@ -272,6 +277,10 @@ func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
 	return schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(output))
 }
 
+func (rt httpRuntime) validateDirectTerminalReplyOutput(ctx context.Context, plan runtimeplan.Plan) error {
+	return rt.validateObservedTerminalReplyOutput(ctx, plan, planRunResult{Output: directReplyOKOutput})
+}
+
 func (rt httpRuntime) validateObservedTerminalReplyOutput(ctx context.Context, plan runtimeplan.Plan, result planRunResult) error {
 	if terminalReplySchemaAlreadyValidated(plan) {
 		return nil
@@ -296,7 +305,7 @@ func terminalReplySchemaAlreadyValidated(plan runtimeplan.Plan) bool {
 	if lastStep.ResultSchema == nil {
 		return false
 	}
-	return lastStep.ResultSchema.Name == plan.Terminal.ResultSchema.Name
+	return compatibleResultSchemas(lastStep.ResultSchema, plan.Terminal.ResultSchema)
 }
 
 func (rt httpRuntime) recordTerminalSchemaViolation(ctx context.Context, contract *runtimeplan.ResultSchema, result planRunResult, validationErr error) error {

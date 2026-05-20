@@ -135,6 +135,96 @@ func TestHTTPAdminStatusSummarizesStateStoreExecutions(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminStatusIncludesSchemaConformanceFromStateStore(t *testing.T) {
+	store := state.NewMemoryStore()
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:    "exec_1",
+		TraceID:   "trace_1",
+		Status:    state.ExecutionFailed,
+		StartedAt: now,
+	})
+	saveAdminSession(t, store, runtimecore.Session{
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Model:     "anthropic/claude-sonnet-4-6",
+		StartedAt: now,
+	})
+	addAdminSchemaViolation(t, store, state.SchemaViolation{
+		ExecID:     "exec_1",
+		SessionID:  "sess_1",
+		SchemaName: "ovr.httpTestReply",
+		Error:      "status must be string",
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaValidationFailed,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema": "ovr.httpTestReply",
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaRepairStarted,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema": "ovr.httpTestReply",
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaRepairCompleted,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema": "ovr.httpTestReply",
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaValidationPassed,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema":   "ovr.httpTestReply",
+			"repaired": true,
+		},
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status                 string `json:"status"`
+		SchemaViolations       int    `json:"schema_violations"`
+		SchemaValidationPassed int    `json:"schema_validation_passed"`
+		SchemaValidationFailed int    `json:"schema_validation_failed"`
+		SchemaRepairsStarted   int    `json:"schema_repairs_started"`
+		SchemaRepairsCompleted int    `json:"schema_repairs_completed"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" {
+		t.Fatalf("status body = %q, want ok", body.Status)
+	}
+	if body.SchemaViolations != 1 {
+		t.Fatalf("schema_violations = %d, want 1", body.SchemaViolations)
+	}
+	if body.SchemaValidationPassed != 1 || body.SchemaValidationFailed != 1 {
+		t.Fatalf("schema validation counts = passed %d failed %d, want 1/1", body.SchemaValidationPassed, body.SchemaValidationFailed)
+	}
+	if body.SchemaRepairsStarted != 1 || body.SchemaRepairsCompleted != 1 {
+		t.Fatalf("schema repair counts = started %d completed %d, want 1/1", body.SchemaRepairsStarted, body.SchemaRepairsCompleted)
+	}
+}
+
 func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -313,6 +403,78 @@ func TestHTTPAdminTraceByExecutionReadsPersistentEventsFromStateStore(t *testing
 	}
 }
 
+func TestHTTPAdminTraceByExecutionIncludesPersistentSchemaConformance(t *testing.T) {
+	store := state.NewMemoryStore()
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:    "exec_1",
+		TraceID:   "trace_1",
+		Status:    state.ExecutionCompleted,
+		StartedAt: now,
+	})
+	saveAdminSession(t, store, runtimecore.Session{
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Model:     "anthropic/claude-sonnet-4-6",
+		StartedAt: now,
+	})
+	addAdminSchemaViolation(t, store, state.SchemaViolation{
+		ExecID:     "exec_1",
+		SessionID:  "sess_1",
+		SchemaName: "ovr.httpTestReply",
+		Error:      "status must be string",
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaValidationFailed,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema": "ovr.httpTestReply",
+			"error":  "status must be string",
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaRepairCompleted,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema": "ovr.httpTestReply",
+		},
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces/exec_1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status           string `json:"status"`
+		SchemaViolations int    `json:"schema_violations"`
+		Events           []struct {
+			Kind    string         `json:"kind"`
+			Payload map[string]any `json:"payload"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || body.SchemaViolations != 1 {
+		t.Fatalf("body = %+v, want ok with one schema violation", body)
+	}
+	if len(body.Events) != 2 {
+		t.Fatalf("events = %d, want schema validation and repair events", len(body.Events))
+	}
+	if body.Events[0].Kind != string(events.EventSchemaValidationFailed) || body.Events[1].Kind != string(events.EventSchemaRepairCompleted) {
+		t.Fatalf("events = %+v, want schema validation failed then repair completed", body.Events)
+	}
+	if body.Events[0].Payload["schema"] != "ovr.httpTestReply" || body.Events[1].Payload["schema"] != "ovr.httpTestReply" {
+		t.Fatalf("event payloads = %+v, want schema names visible", body.Events)
+	}
+}
+
 func TestHTTPAdminTraceByExecutionIncludesRedactedEventPayload(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -407,5 +569,12 @@ func addAdminStoreEvent(t *testing.T, store state.Store, event events.Event) {
 	t.Helper()
 	if _, err := store.AddEvent(context.Background(), event); err != nil {
 		t.Fatalf("AddEvent returned error: %v", err)
+	}
+}
+
+func addAdminSchemaViolation(t *testing.T, store state.Store, violation state.SchemaViolation) {
+	t.Helper()
+	if _, err := store.AddSchemaViolation(context.Background(), violation); err != nil {
+		t.Fatalf("AddSchemaViolation returned error: %v", err)
 	}
 }

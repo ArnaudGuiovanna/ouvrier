@@ -380,7 +380,14 @@ func (h *Harness) validateResult(ctx context.Context, session runtimecore.Sessio
 			return text, provider.Usage{}, errors.Join(err, recordErr)
 		}
 		if h.schemaRepairs <= 0 {
-			return text, provider.Usage{}, err
+			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
+				"schema":       h.resultSchema.Name,
+				"attempt":      0,
+				"max_attempts": 0,
+				"reason":       "disabled",
+				"error":        err.Error(),
+			})
+			return text, provider.Usage{}, errors.Join(err, emitErr)
 		}
 		return h.repairResult(ctx, session, iteration, text, err)
 	}

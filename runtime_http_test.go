@@ -15,10 +15,15 @@ import (
 
 	"ouvrier/internal/events"
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 )
 
 type httpTestReply struct {
 	Status string `json:"status"`
+}
+
+type httpDirectMismatchReply struct {
+	Message string `json:"message"`
 }
 
 func TestNewHTTPHandlerServesDirectGETReply(t *testing.T) {
@@ -43,6 +48,38 @@ func TestNewHTTPHandlerServesDirectGETReply(t *testing.T) {
 	}
 	if body.Status != "ok" {
 		t.Fatalf("status body = %q, want ok", body.Status)
+	}
+}
+
+func TestNewHTTPHandlerValidatesDirectReplySchema(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("GET /health"),
+		Reply(JSON[httpDirectMismatchReply]()),
+	}, httpRuntime{stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	violations, err := store.SchemaViolations(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 || violations[0].SchemaName != "ovr.httpDirectMismatchReply" {
+		t.Fatalf("violations = %+v, want direct reply schema violation", violations)
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaValidationFailed); !ok {
+		t.Fatalf("events = %+v, want schema validation failed event", stream.List())
 	}
 }
 

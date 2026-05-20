@@ -893,6 +893,13 @@ func TestRunValidatesResultSchemaAndRecordsViolation(t *testing.T) {
 	if _, ok := findEvent(persistedEvents, events.EventSchemaViolation); !ok {
 		t.Fatalf("persisted events = %+v, want schema violation event", persistedEvents)
 	}
+	failed, ok := findEvent(persistedEvents, events.EventSchemaRepairFailed)
+	if !ok {
+		t.Fatalf("persisted events = %+v, want schema repair failed event", persistedEvents)
+	}
+	if failed.Payload["reason"] != "disabled" || failed.Payload["max_attempts"] != 0 {
+		t.Fatalf("schema repair failed payload = %+v, want disabled reason with zero attempts", failed.Payload)
+	}
 }
 
 func TestRunRepairsInvalidResultSchemaWithinBound(t *testing.T) {

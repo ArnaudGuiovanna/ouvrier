@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -22,6 +23,7 @@ func FromType(typ reflect.Type) (*runtimecore.ResultSchema, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate result schema for %s: %w", typ, err)
 	}
+	tightenGeneratedSchema(generated, typ)
 	raw, err := json.Marshal(generated)
 	if err != nil {
 		return nil, fmt.Errorf("marshal result schema for %s: %w", typ, err)
@@ -76,4 +78,94 @@ func resolve(contract *runtimecore.ResultSchema) (*jsonschema.Resolved, error) {
 		return nil, fmt.Errorf("validate result schema %s: resolve schema: %w", contract.Name, err)
 	}
 	return resolved, nil
+}
+
+func tightenGeneratedSchema(generated *jsonschema.Schema, typ reflect.Type) {
+	if generated == nil || typ == nil {
+		return
+	}
+	tightenSchemaForType(generated, typ)
+}
+
+func tightenSchemaForType(generated *jsonschema.Schema, typ reflect.Type) {
+	if generated == nil || typ == nil {
+		return
+	}
+	if typ.Kind() == reflect.Pointer {
+		tightenNullableSchemaForType(generated, typ.Elem())
+		return
+	}
+	tightenNonNullableSchemaForType(generated, typ)
+}
+
+func tightenNullableSchemaForType(generated *jsonschema.Schema, typ reflect.Type) {
+	if generated == nil || typ == nil {
+		return
+	}
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		tightenStructProperties(generated, typ)
+	case reflect.Slice, reflect.Array:
+		tightenSchemaForType(generated.Items, typ.Elem())
+	case reflect.Map:
+		tightenSchemaForType(generated.AdditionalProperties, typ.Elem())
+	}
+}
+
+func tightenNonNullableSchemaForType(generated *jsonschema.Schema, typ reflect.Type) {
+	for typ.Kind() == reflect.Pointer {
+		tightenNullableSchemaForType(generated, typ)
+		return
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		setSingleSchemaType(generated, "object")
+		tightenStructProperties(generated, typ)
+	case reflect.Slice, reflect.Array:
+		setSingleSchemaType(generated, "array")
+		tightenSchemaForType(generated.Items, typ.Elem())
+	case reflect.Map:
+		setSingleSchemaType(generated, "object")
+		tightenSchemaForType(generated.AdditionalProperties, typ.Elem())
+	}
+}
+
+func tightenStructProperties(generated *jsonschema.Schema, typ reflect.Type) {
+	if generated == nil || generated.Properties == nil {
+		return
+	}
+	for _, field := range reflect.VisibleFields(typ) {
+		if field.PkgPath != "" && !field.Anonymous {
+			continue
+		}
+		name, ok := jsonFieldName(field)
+		if !ok {
+			continue
+		}
+		property, ok := generated.Properties[name]
+		if !ok {
+			continue
+		}
+		tightenSchemaForType(property, field.Type)
+	}
+}
+
+func jsonFieldName(field reflect.StructField) (string, bool) {
+	tag := field.Tag.Get("json")
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "-" {
+		return "", false
+	}
+	if name != "" {
+		return name, true
+	}
+	return field.Name, true
+}
+
+func setSingleSchemaType(generated *jsonschema.Schema, typ string) {
+	generated.Type = typ
+	generated.Types = nil
 }
