@@ -10,11 +10,15 @@ import (
 // Runner owns advanced runtime configuration for Ouvrier pipelines.
 type Runner struct {
 	permissionPolicy PermissionPolicy
+	stateStore       StateStore
+	hooks            *Hooks
 	err              error
 }
 
 type runnerConfig struct {
 	permissionPolicy PermissionPolicy
+	stateStore       StateStore
+	hooks            *Hooks
 	err              error
 }
 
@@ -33,6 +37,8 @@ func NewRunner(options ...RunnerOption) *Runner {
 	}
 	return &Runner{
 		permissionPolicy: cfg.permissionPolicy,
+		stateStore:       cfg.stateStore,
+		hooks:            cfg.hooks,
 		err:              cfg.err,
 	}
 }
@@ -45,6 +51,28 @@ func WithPermissionPolicy(permissionPolicy PermissionPolicy) RunnerOption {
 			return
 		}
 		cfg.permissionPolicy = permissionPolicy
+	}
+}
+
+// WithStateStore installs a custom durable execution store.
+func WithStateStore(store StateStore) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if store == nil {
+			cfg.setErr(errors.New("state store is required"))
+			return
+		}
+		cfg.stateStore = store
+	}
+}
+
+// WithHooks installs advanced lifecycle hooks for the runner.
+func WithHooks(hooks *Hooks) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if hooks == nil {
+			cfg.setErr(errors.New("hooks are required"))
+			return
+		}
+		cfg.hooks = hooks
 	}
 }
 
@@ -76,9 +104,26 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 }
 
 func (r *Runner) defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
-	rt, closeRuntime, err := defaultHTTPRuntimeForRun()
-	if err != nil {
-		return httpRuntime{}, nil, err
+	var (
+		rt           httpRuntime
+		closeRuntime func() error
+		err          error
+	)
+	if r != nil && r.stateStore != nil {
+		rt = defaultHTTPRuntime()
+		rt.stateStore = publicStateStoreAdapter{store: r.stateStore}
+		closeRuntime = func() error {
+			closer, ok := r.stateStore.(interface{ Close() error })
+			if !ok {
+				return nil
+			}
+			return closer.Close()
+		}
+	} else {
+		rt, closeRuntime, err = defaultHTTPRuntimeForRun()
+		if err != nil {
+			return httpRuntime{}, nil, err
+		}
 	}
 	if err := r.configureHTTPRuntime(&rt); err != nil {
 		_ = closeRuntime()
@@ -98,6 +143,13 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 		rt.toolExecutor = tools.NewExecutor(tools.WithPermissionPolicy(
 			internalPermissionPolicyAdapter{public: r.permissionPolicy},
 		))
+	}
+	if r.hooks != nil {
+		hookBus, err := r.hooks.hookBus()
+		if err != nil {
+			return err
+		}
+		rt.hookBus = hookBus
 	}
 	return nil
 }

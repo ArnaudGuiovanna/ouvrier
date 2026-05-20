@@ -50,3 +50,47 @@ func TestRunnerRejectsNilPermissionPolicy(t *testing.T) {
 		t.Fatalf("Run error = %v, want permission policy context", err)
 	}
 }
+
+func TestRunnerRejectsNilStateStore(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithStateStore(nil))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "state store is required") {
+		t.Fatalf("Run error = %v, want state store context", err)
+	}
+}
+
+func TestRunnerRejectsNilHooks(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithHooks(nil))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "hooks are required") {
+		t.Fatalf("Run error = %v, want hooks context", err)
+	}
+}
+
+func TestPublicHooksRejectInvalidRegistration(t *testing.T) {
+	hooks := ovr.NewHooks()
+	if err := hooks.Register("", func(ctx context.Context, event ovr.Event) (ovr.Event, error) {
+		return event, nil
+	}); err == nil {
+		t.Fatal("Register returned nil for empty event kind")
+	}
+	if err := hooks.Register(ovr.EventPipelineStarted, nil); err == nil {
+		t.Fatal("Register returned nil for nil hook")
+	}
+}

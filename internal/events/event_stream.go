@@ -30,7 +30,8 @@ const redactedPayloadValue = "[REDACTED]"
 type Option func(*config) error
 
 type config struct {
-	now func() time.Time
+	now       func() time.Time
+	initialID uint64
 }
 
 func NewEventStream(opts ...Option) (*EventStream, error) {
@@ -43,7 +44,7 @@ func NewEventStream(opts ...Option) (*EventStream, error) {
 			return nil, err
 		}
 	}
-	return &EventStream{now: cfg.now}, nil
+	return &EventStream{now: cfg.now, nextID: cfg.initialID}, nil
 }
 
 func WithClock(now func() time.Time) Option {
@@ -52,6 +53,13 @@ func WithClock(now func() time.Time) Option {
 			return errors.New("event stream clock is required")
 		}
 		cfg.now = now
+		return nil
+	}
+}
+
+func WithInitialID(id uint64) Option {
+	return func(cfg *config) error {
+		cfg.initialID = id
 		return nil
 	}
 }

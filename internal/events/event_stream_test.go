@@ -199,6 +199,21 @@ func TestEventStreamSinceFiltersByID(t *testing.T) {
 	}
 }
 
+func TestEventStreamStartsAfterInitialID(t *testing.T) {
+	stream, err := NewEventStream(WithInitialID(41))
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+
+	event, err := stream.Append(context.Background(), Event{Kind: EventSessionStarted})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+	if event.ID != 42 {
+		t.Fatalf("event ID = %d, want 42", event.ID)
+	}
+}
+
 func assertSensitivePayloadRedacted(t *testing.T, payload map[string]any) {
 	t.Helper()
 	for _, key := range []string{"authorization", "token", "api_key", "password", "secret", "cookie"} {

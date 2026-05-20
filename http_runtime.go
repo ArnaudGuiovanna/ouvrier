@@ -52,6 +52,12 @@ func defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 		return httpRuntime{}, nil, err
 	}
 	rt.stateStore = store
+	if err := seedHTTPEventStreamFromStore(&rt, store); err != nil {
+		if closer, ok := store.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return httpRuntime{}, nil, err
+	}
 	return rt, func() error {
 		closer, ok := store.(interface{ Close() error })
 		if !ok {
@@ -59,6 +65,31 @@ func defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 		}
 		return closer.Close()
 	}, nil
+}
+
+func seedHTTPEventStreamFromStore(rt *httpRuntime, store state.Store) error {
+	if rt == nil || rt.eventStream == nil || store == nil {
+		return nil
+	}
+	recorded, err := store.EventsSince(context.Background(), "", 0)
+	if err != nil {
+		return err
+	}
+	var maxID uint64
+	for _, event := range recorded {
+		if event.ID > maxID {
+			maxID = event.ID
+		}
+	}
+	if maxID == 0 {
+		return nil
+	}
+	stream, err := events.NewEventStream(events.WithInitialID(maxID))
+	if err != nil {
+		return err
+	}
+	rt.eventStream = stream
+	return nil
 }
 
 func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input string) (string, error) {
