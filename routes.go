@@ -39,12 +39,31 @@ func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
 		if plan.Trigger.Kind != runtimeplan.TriggerHTTP {
 			return nil, fmt.Errorf("%w: only HTTP triggers are supported by this runtime slice", ErrRunNotImplemented)
 		}
-		routes = append(routes, httpRoute{
-			method:     plan.Trigger.Method,
-			path:       plan.Trigger.Path,
-			plan:       plan,
-			workerPool: newWorkerPool(plan.Trigger.WorkerPool),
-		})
+		routes = append(routes, httpRouteFromHTTPPlan(plan))
+	}
+	return routes, nil
+}
+
+func httpCompatibleRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
+	plans, err := compilePlans(nodes)
+	if err != nil {
+		return nil, err
+	}
+
+	routes := make([]httpRoute, 0, len(plans))
+	for _, plan := range plans {
+		switch plan.Trigger.Kind {
+		case runtimeplan.TriggerHTTP:
+			routes = append(routes, httpRouteFromHTTPPlan(plan))
+		case runtimeplan.TriggerWebhook:
+			route, err := httpRouteFromWebhookPlan(plan)
+			if err != nil {
+				return nil, err
+			}
+			routes = append(routes, route)
+		default:
+			return nil, fmt.Errorf("%w: only HTTP-compatible triggers are supported by this runtime slice", ErrRunNotImplemented)
+		}
 	}
 	return routes, nil
 }
@@ -60,20 +79,37 @@ func webhookRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
 		if plan.Trigger.Kind != runtimeplan.TriggerWebhook {
 			return nil, fmt.Errorf("%w: only webhook triggers are supported by this runtime slice", ErrRunNotImplemented)
 		}
-		path, err := webhookRoutePath(plan.Trigger.Value)
+		route, err := httpRouteFromWebhookPlan(plan)
 		if err != nil {
 			return nil, err
 		}
-		plan.Trigger.Method = http.MethodPost
-		plan.Trigger.Path = path
-		routes = append(routes, httpRoute{
-			method:     http.MethodPost,
-			path:       path,
-			plan:       plan,
-			workerPool: newWorkerPool(plan.Trigger.WorkerPool),
-		})
+		routes = append(routes, route)
 	}
 	return routes, nil
+}
+
+func httpRouteFromHTTPPlan(plan runtimeplan.Plan) httpRoute {
+	return httpRoute{
+		method:     plan.Trigger.Method,
+		path:       plan.Trigger.Path,
+		plan:       plan,
+		workerPool: newWorkerPool(plan.Trigger.WorkerPool),
+	}
+}
+
+func httpRouteFromWebhookPlan(plan runtimeplan.Plan) (httpRoute, error) {
+	path, err := webhookRoutePath(plan.Trigger.Value)
+	if err != nil {
+		return httpRoute{}, err
+	}
+	plan.Trigger.Method = http.MethodPost
+	plan.Trigger.Path = path
+	return httpRoute{
+		method:     http.MethodPost,
+		path:       path,
+		plan:       plan,
+		workerPool: newWorkerPool(plan.Trigger.WorkerPool),
+	}, nil
 }
 
 func webhookRoutePath(provider string) (string, error) {

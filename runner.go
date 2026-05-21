@@ -145,28 +145,34 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 	}
 
 	var serveErr error
-	switch plansTriggerKind(plans) {
-	case runtimeplan.TriggerHTTP:
-		handler, err := newHTTPHandlerWithRuntime(nodes, runtime)
+	if plansHTTPCompatible(plans) {
+		handler, err := newHTTPCompatibleHandlerWithRuntime(nodes, runtime)
 		if err != nil {
 			_ = closeRuntime()
 			return err
 		}
 		serveErr = serveHTTP(addr, handler)
-	case runtimeplan.TriggerWebhook:
-		handler, err := newWebhookHandlerWithRuntime(nodes, runtime)
-		if err != nil {
-			_ = closeRuntime()
-			return err
-		}
-		serveErr = serveHTTP(addr, handler)
-	case runtimeplan.TriggerCron:
+	} else if plansTriggerKind(plans) == runtimeplan.TriggerCron {
 		serveErr = serveCronPlans(runtime, plans)
-	default:
+	} else {
 		serveErr = fmt.Errorf("%w: mixed or unsupported trigger runtime", ErrRunNotImplemented)
 	}
 	closeErr := closeRuntime()
 	return errors.Join(serveErr, closeErr)
+}
+
+func plansHTTPCompatible(plans []runtimeplan.Plan) bool {
+	if len(plans) == 0 {
+		return false
+	}
+	for _, plan := range plans {
+		switch plan.Trigger.Kind {
+		case runtimeplan.TriggerHTTP, runtimeplan.TriggerWebhook:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func plansTriggerKind(plans []runtimeplan.Plan) runtimeplan.TriggerKind {
