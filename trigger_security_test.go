@@ -1,6 +1,7 @@
 package ovr
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -182,6 +183,31 @@ func TestNewHTTPHandlerDoesNotDuplicateIdempotentTriggerSideEffects(t *testing.T
 	}
 }
 
+func TestNewHTTPHandlerReturnsFailureWhenTriggerIdempotencyStoreFails(t *testing.T) {
+	store := failingTriggerIdempotencyStore{MemoryStore: state.NewMemoryStore()}
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /hooks", IdempotencyKey("X-Delivery-ID")),
+		Sink(Log()),
+	}, httpRuntime{stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/hooks", strings.NewReader(`{"event":"push"}`))
+	req.Header.Set("X-Delivery-ID", "delivery-1")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	assertNoSinkLoggedEvent(t, stream)
+}
+
 func TestNewHTTPHandlerRejectsSignedTriggerWithoutSignature(t *testing.T) {
 	t.Setenv("OVR_TEST_WEBHOOK_SECRET", "secret")
 	stream, err := events.NewEventStream()
@@ -285,4 +311,12 @@ func assertSignatureDecisionEvent(t *testing.T, stream *events.EventStream, deci
 		return
 	}
 	t.Fatalf("events = %+v, want signature decision %q", stream.List(), decision)
+}
+
+type failingTriggerIdempotencyStore struct {
+	*state.MemoryStore
+}
+
+func (s failingTriggerIdempotencyStore) ReserveIdempotency(ctx context.Context, key, execID string) (string, bool, error) {
+	return "", false, errors.New("reserve idempotency failed")
 }
