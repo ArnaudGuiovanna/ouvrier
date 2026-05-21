@@ -31,6 +31,7 @@ type Harness struct {
 	schemaRepairs   int
 	providerRetries int
 	retryBackoff    time.Duration
+	promptCache     bool
 	sequentialTools bool
 }
 
@@ -75,6 +76,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		schemaRepairs:   cfg.schemaRepairs,
 		providerRetries: cfg.providerRetries,
 		retryBackoff:    cfg.retryBackoff,
+		promptCache:     cfg.promptCache,
 		sequentialTools: cfg.sequentialTools,
 	}, nil
 }
@@ -120,6 +122,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			System:   h.requestSystemPrompt(),
 			Messages: append([]provider.Message(nil), messages...),
 			Tools:    append([]provider.ToolSpec(nil), h.tools...),
+			CacheKey: h.requestCacheKey(),
 		}, providerRetryAllowed)
 		if err != nil {
 			if payload, ok := h.wallClockBudgetPayload(runCtx); ok {
@@ -426,8 +429,9 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			return currentText, usage, err
 		}
 		resp, err := h.completeWithRetry(ctx, session, iteration, provider.Request{
-			Model:  h.model,
-			System: h.systemPrompt,
+			Model:    h.model,
+			System:   h.systemPrompt,
+			CacheKey: h.requestCacheKeyFor(h.systemPrompt, nil),
 			Messages: []provider.Message{
 				provider.UserText(schemaRepairPrompt(h.resultSchema, currentText, currentErr)),
 			},

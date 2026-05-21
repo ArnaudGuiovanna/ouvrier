@@ -27,6 +27,7 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 			MaxCostUSD:   pipe.config.budget.MaxCostUSD,
 			MaxWallClock: pipe.config.budget.MaxWallClock,
 		},
+		NoCache:         pipe.config.noCache,
 		SequentialTools: pipe.config.sequential,
 	}
 	if pipe.config.output != nil {

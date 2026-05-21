@@ -232,6 +232,7 @@ type Summary struct {
 
 ovr.Pipe("Summarize the ticket.",
 	ovr.Model("anthropic/claude-sonnet-4-6"),
+	ovr.NoCache(),
 	ovr.Output[Summary](),
 )
 ```
@@ -239,6 +240,8 @@ ovr.Pipe("Summarize the ticket.",
 Ouvrier generates JSON Schema from `T`, injects it into the harness prompt, and
 validates final JSON strictly. Violations are recorded in `EventStream` and
 `StateStore`; bounded repair is supported by the harness where enabled.
+Static prompt-cache hints are enabled by default; `NoCache()` disables them for
+one `Pipe`.
 
 ### Outputs
 
