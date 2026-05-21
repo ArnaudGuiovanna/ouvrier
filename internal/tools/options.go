@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"ouvrier/internal/policy"
 )
@@ -22,6 +23,7 @@ type Metadata struct {
 	PartialOK        bool
 	ArgumentName     string
 	InputSchema      json.RawMessage
+	Timeout          time.Duration
 }
 
 type Option func(*Executor)
@@ -41,6 +43,9 @@ func WithMetadata(metadata Metadata) RegisterOption {
 		metadata.SideEffects = cleanLabels(metadata.SideEffects)
 		metadata.ArgumentName = strings.TrimSpace(metadata.ArgumentName)
 		metadata.InputSchema = append(json.RawMessage(nil), metadata.InputSchema...)
+		if metadata.Timeout < 0 {
+			metadata.Timeout = 0
+		}
 		tool.metadata = metadata
 	}
 }

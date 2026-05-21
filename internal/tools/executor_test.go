@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
@@ -105,6 +106,34 @@ func TestExecutorReturnsToolErrorResult(t *testing.T) {
 	}
 	if !strings.Contains(string(result.Content), "lookup failed") {
 		t.Fatalf("content = %s, want tool error", result.Content)
+	}
+}
+
+func TestExecutorAppliesToolTimeout(t *testing.T) {
+	executor := NewExecutor()
+	err := executor.Register("slow_lookup", func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}, WithMetadata(Metadata{
+		Effect:  policy.EffectReadOnly,
+		Timeout: 10 * time.Millisecond,
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), provider.ToolCall{
+		ID:   "call_1",
+		Name: "slow_lookup",
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("IsError = false, want timeout error result")
+	}
+	if !strings.Contains(string(result.Content), context.DeadlineExceeded.Error()) {
+		t.Fatalf("content = %s, want context deadline exceeded", result.Content)
 	}
 }
 

@@ -236,6 +236,12 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		if step.ResultSchema != nil {
 			harnessOptions = append(harnessOptions, harness.WithResultSchema(step.ResultSchema))
 		}
+		if runtimeBudgetConfigured(step.Budget) {
+			harnessOptions = append(harnessOptions, harness.WithBudget(step.Budget))
+		}
+		if step.SequentialTools {
+			harnessOptions = append(harnessOptions, harness.WithSequentialTools())
+		}
 		if rt.schemaRepairAttempts > 0 {
 			harnessOptions = append(harnessOptions, harness.WithSchemaRepairAttempts(rt.schemaRepairAttempts))
 		}
@@ -360,6 +366,7 @@ func registerRuntimeTools(executor *tools.Executor, runtimeTools []runtimeplan.T
 				RequiresApproval: tool.RequiresApproval,
 				ArgumentName:     tool.ArgumentName,
 				InputSchema:      tool.InputSchema,
+				Timeout:          tool.Timeout,
 			})); err != nil {
 				return nil, err
 			}
@@ -371,4 +378,11 @@ func registerRuntimeTools(executor *tools.Executor, runtimeTools []runtimeplan.T
 		})
 	}
 	return specs, nil
+}
+
+func runtimeBudgetConfigured(budget runtimeplan.Budget) bool {
+	return budget.MaxIterations > 0 ||
+		budget.MaxTokens > 0 ||
+		budget.MaxCostUSD > 0 ||
+		budget.MaxWallClock > 0
 }

@@ -3,6 +3,9 @@ package ovr
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +42,9 @@ func newHTTPHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler,
 	if err != nil {
 		return nil, err
 	}
+	if err := validateHTTPSignatureConfig(routes); err != nil {
+		return nil, err
+	}
 	runtime.adminRoutes = routes
 
 	mux := http.NewServeMux()
@@ -68,6 +74,10 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		r.servePipeline(w, req)
 		return
 	}
+	input, ok := r.prepareRequestInput(w, req)
+	if !ok {
+		return
+	}
 
 	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
@@ -82,11 +92,6 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush:
 		if r.plan.Terminal.PushWebhookURL != "" {
-			input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
-			if err != nil {
-				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
-				return
-			}
 			if err := applyPushTerminal(req.Context(), r.plan.Terminal, input); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
@@ -95,11 +100,6 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	case runtimeplan.TerminalSink:
 		if r.plan.Terminal.SinkFilePath != "" || r.plan.Terminal.SinkLog {
-			input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
-			if err != nil {
-				writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
-				return
-			}
 			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, planRunResult{Output: input}, "input"); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
@@ -112,9 +112,8 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
-	input, err := buildHTTPRequestInput(req, r.plan.Trigger.Path)
-	if err != nil {
-		writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
+	input, ok := r.prepareRequestInput(w, req)
+	if !ok {
 		return
 	}
 
@@ -195,6 +194,81 @@ func (r httpRoute) releaseWorker() {
 	<-r.workerPool
 }
 
+func validateHTTPSignatureConfig(routes []httpRoute) error {
+	for _, route := range routes {
+		env := strings.TrimSpace(route.plan.Trigger.SignatureEnv)
+		if env == "" {
+			continue
+		}
+		if strings.TrimSpace(os.Getenv(env)) == "" {
+			return fmt.Errorf("%w: VerifySignature secret env var %s is not set", ErrInvalidNode, env)
+		}
+	}
+	return nil
+}
+
+func (r httpRoute) prepareRequestInput(w http.ResponseWriter, req *http.Request) (string, bool) {
+	body, err := readHTTPRequestInput(req)
+	if err != nil {
+		writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
+		return "", false
+	}
+	if !r.verifyRequestSignature(w, req, []byte(body)) {
+		return "", false
+	}
+	input, err := buildHTTPPipelineInput(body, httpPathParams(req, r.plan.Trigger.Path))
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_request")
+		return "", false
+	}
+	return input, true
+}
+
+func (r httpRoute) verifyRequestSignature(w http.ResponseWriter, req *http.Request, payload []byte) bool {
+	env := strings.TrimSpace(r.plan.Trigger.SignatureEnv)
+	headerName := strings.TrimSpace(r.plan.Trigger.SignatureHeader)
+	if env == "" && headerName == "" {
+		return true
+	}
+	headerValue := strings.TrimSpace(req.Header.Get(headerName))
+	if headerValue == "" {
+		writeJSONStatus(w, http.StatusUnauthorized, "signature_missing")
+		return false
+	}
+	secret := os.Getenv(env)
+	if secret == "" {
+		writeJSONStatus(w, http.StatusInternalServerError, "signature_secret_missing")
+		return false
+	}
+	if !validHMACSHA256Signature(secret, payload, headerValue) {
+		writeJSONStatus(w, http.StatusForbidden, "signature_invalid")
+		return false
+	}
+	return true
+}
+
+func validHMACSHA256Signature(secret string, payload []byte, rawSignature string) bool {
+	provided, ok := decodeHMACSHA256Signature(rawSignature)
+	if !ok {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(payload)
+	return hmac.Equal(provided, mac.Sum(nil))
+}
+
+func decodeHMACSHA256Signature(raw string) ([]byte, bool) {
+	signature := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(signature), "sha256=") {
+		signature = signature[len("sha256="):]
+	}
+	decoded, err := hex.DecodeString(signature)
+	if err != nil || len(decoded) != sha256.Size {
+		return nil, false
+	}
+	return decoded, true
+}
+
 func readHTTPRequestInput(req *http.Request) (string, error) {
 	if req.Body == nil {
 		return "", nil
@@ -207,15 +281,6 @@ func readHTTPRequestInput(req *http.Request) (string, error) {
 		return "", errors.New("request body too large")
 	}
 	return string(body), nil
-}
-
-func buildHTTPRequestInput(req *http.Request, routePath string) (string, error) {
-	body, err := readHTTPRequestInput(req)
-	if err != nil {
-		return "", err
-	}
-	pathParams := httpPathParams(req, routePath)
-	return buildHTTPPipelineInput(body, pathParams)
 }
 
 func buildHTTPPipelineInput(body string, pathParams map[string]string) (string, error) {

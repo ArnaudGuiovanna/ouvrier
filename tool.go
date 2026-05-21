@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"ouvrier/internal/policy"
 )
@@ -24,6 +25,7 @@ type toolSpec struct {
 	idempotencyKey   string
 	sideEffects      []string
 	requiresApproval bool
+	timeout          time.Duration
 	err              error
 }
 
@@ -113,6 +115,31 @@ func RequiresApproval() ToolOption {
 
 func (requiresApprovalOption) applyTool(spec *toolSpec) {
 	spec.requiresApproval = true
+}
+
+type toolTimeoutOption struct {
+	duration time.Duration
+	err      error
+}
+
+// ToolTimeout configures the maximum wall-clock duration for one Tool invocation.
+func ToolTimeout(value string) ToolOption {
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return toolTimeoutOption{err: fmt.Errorf("%w: Tool timeout must be a valid duration", ErrInvalidNode)}
+	}
+	if duration <= 0 {
+		return toolTimeoutOption{err: fmt.Errorf("%w: Tool timeout must be greater than zero", ErrInvalidNode)}
+	}
+	return toolTimeoutOption{duration: duration}
+}
+
+func (o toolTimeoutOption) applyTool(spec *toolSpec) {
+	if o.err != nil {
+		spec.setErr(o.err)
+		return
+	}
+	spec.timeout = o.duration
 }
 
 func cleanToolLabels(labels []string) []string {

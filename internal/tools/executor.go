@@ -128,6 +128,12 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	if result, allowed, err := e.authorizeToolCall(ctx, tool, call); err != nil || !allowed {
 		return result, err
 	}
+	toolCtx := ctx
+	var cancel context.CancelFunc
+	if tool.metadata.Timeout > 0 {
+		toolCtx, cancel = context.WithTimeout(ctx, tool.metadata.Timeout)
+		defer cancel()
+	}
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -137,8 +143,8 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	}()
 
 	if tool.handler != nil {
-		return e.executeWithRetry(ctx, tool, call, func() (provider.ToolResult, error) {
-			result, err := tool.handler.Execute(ctx, call)
+		return e.executeWithRetry(toolCtx, tool, call, func() (provider.ToolResult, error) {
+			result, err := tool.handler.Execute(toolCtx, call)
 			if err != nil {
 				return provider.ToolResult{}, toolExecutionFailure{err: err}
 			}
@@ -149,14 +155,14 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
 		return errorResult(call, err), nil
 	}
-	if err := reserveIdempotency(ctx, tool, call.Arguments); err != nil {
+	if err := reserveIdempotency(toolCtx, tool, call.Arguments); err != nil {
 		return errorResult(call, err), nil
 	}
-	args, err := buildCallArgs(ctx, tool.typ, tool.metadata, call.Arguments)
+	args, err := buildCallArgs(toolCtx, tool.typ, tool.metadata, call.Arguments)
 	if err != nil {
 		return errorResult(call, err), nil
 	}
-	return e.executeWithRetry(ctx, tool, call, func() (provider.ToolResult, error) {
+	return e.executeWithRetry(toolCtx, tool, call, func() (provider.ToolResult, error) {
 		return toolResultFromValues(call, tool.fn.Call(args))
 	})
 }

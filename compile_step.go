@@ -22,6 +22,12 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		Tools:      runtimeToolsFromPipe(pipe.config.tools),
 		MCPServers: runtimeMCPServersFromPipe(pipe.config.mcpServers),
 		SubAgents:  subAgents,
+		Budget: runtimeplan.Budget{
+			MaxTokens:    pipe.config.budget.MaxTokens,
+			MaxCostUSD:   pipe.config.budget.MaxCostUSD,
+			MaxWallClock: pipe.config.budget.MaxWallClock,
+		},
+		SequentialTools: pipe.config.sequential,
 	}
 	if pipe.config.output != nil {
 		resultSchema, err := resultSchemaFromType(pipe.config.output.typ)
@@ -95,6 +101,7 @@ func runtimeToolsFromPipe(tools []toolSpec) []runtimeplan.Tool {
 			IdempotencyKey:   tool.idempotencyKey,
 			SideEffects:      append([]string(nil), tool.sideEffects...),
 			RequiresApproval: tool.requiresApproval,
+			Timeout:          tool.timeout,
 		})
 	}
 	return out

@@ -92,6 +92,81 @@ func TestNewHTTPHandlerRunsSubAgentToolCallsInBoundedParallelAndPreservesResultO
 	}
 }
 
+func TestNewHTTPHandlerSequentialToolsRunsSubAgentToolCallsOneAtATime(t *testing.T) {
+	scripted := newParallelSubAgentProvider(1)
+	translator := Pipeline(
+		Pipe("translate text",
+			Model(parallelSubAgentChildModel),
+			Output[httpSubAgentReply](),
+		),
+	)
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /emails"),
+		Pipe("draft multilingual email",
+			Model(parallelSubAgentRootModel),
+			SequentialTools(),
+			SubAgent("translate", translator, MaxParallel(2)),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/emails", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(rec, req)
+	}()
+
+	if !scripted.waitForTwoActive(300 * time.Millisecond) {
+		cancel()
+		waitForParallelSubAgentHandler(t, done)
+		t.Fatalf("timed out waiting for first subagent call; max active = %d", scripted.maxActive())
+	}
+	if scripted.waitForMaxActiveAtLeast(2, 100*time.Millisecond) {
+		cancel()
+		scripted.releaseChildren()
+		waitForParallelSubAgentHandler(t, done)
+		t.Fatalf("SequentialTools allowed %d concurrent subagent calls", scripted.maxActive())
+	}
+	scripted.releaseChildren()
+	waitForParallelSubAgentHandler(t, done)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if violation := scripted.violation(); violation != "" {
+		t.Fatal(violation)
+	}
+	if maxActive := scripted.maxActive(); maxActive != 1 {
+		t.Fatalf("max active subagent calls = %d, want exactly 1", maxActive)
+	}
+
+	rootRequests := scripted.rootRequestsSnapshot()
+	if len(rootRequests) != 2 {
+		t.Fatalf("root provider requests = %d, want initial request and request after ToolResults", len(rootRequests))
+	}
+	gotResults, err := parallelSubAgentToolResults(rootRequests[1])
+	if err != nil {
+		t.Fatalf("decode root ToolResults: %v", err)
+	}
+	wantResults := []parallelSubAgentToolResult{
+		{ID: "call_1", Text: "translated one"},
+		{ID: "call_2", Text: "translated two"},
+		{ID: "call_3", Text: "translated three"},
+		{ID: "call_4", Text: "translated four"},
+	}
+	if !reflect.DeepEqual(gotResults, wantResults) {
+		t.Fatalf("ToolResults = %+v, want %+v", gotResults, wantResults)
+	}
+}
+
 func TestNewHTTPHandlerPropagatesRequestCancellationToSubAgentChildTask(t *testing.T) {
 	scripted := newCancelPropagationSubAgentProvider()
 	stream, err := events.NewEventStream()
@@ -539,6 +614,26 @@ func (p *parallelSubAgentProvider) waitForTwoActive(timeout time.Duration) bool 
 		return true
 	case <-time.After(timeout):
 		return false
+	}
+}
+
+func (p *parallelSubAgentProvider) waitForMaxActiveAtLeast(min int, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		p.mu.Lock()
+		maxSeen := p.maxSeen
+		p.mu.Unlock()
+		if maxSeen >= min {
+			return true
+		}
+		select {
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
+		}
 	}
 }
 
