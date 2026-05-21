@@ -64,7 +64,8 @@ func TestHTTPAdminTriggerRunsExistingHTTPRouteThroughHarness(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerWritesPipelineOutputToFileSink(t *testing.T) {
-	outputPath := filepath.Join(t.TempDir(), "admin-trigger-output.json")
+	outputRoot := t.TempDir()
+	outputPath := filepath.Join(outputRoot, "admin-trigger-output.json")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
 	}
@@ -76,6 +77,7 @@ func TestHTTPAdminTriggerWritesPipelineOutputToFileSink(t *testing.T) {
 		adminToken:   "secret-admin-token",
 		provider:     scripted,
 		toolExecutor: outputAllowedExecutor("file"),
+		sandbox:      fileSinkSandbox(t, outputRoot),
 	})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
@@ -143,11 +145,12 @@ func TestHTTPAdminTriggerPushesDirectInputToWebhook(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
-	outputPath := filepath.Join(t.TempDir(), "admin-trigger-input.json")
+	outputRoot := t.TempDir()
+	outputPath := filepath.Join(outputRoot, "admin-trigger-input.json")
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /events"),
 		Sink(File(outputPath)),
-	}, httpRuntime{adminToken: "secret-admin-token", toolExecutor: outputAllowedExecutor("file")})
+	}, httpRuntime{adminToken: "secret-admin-token", toolExecutor: outputAllowedExecutor("file"), sandbox: fileSinkSandbox(t, outputRoot)})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}

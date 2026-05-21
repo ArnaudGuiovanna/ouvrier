@@ -215,7 +215,8 @@ func TestNewHTTPHandlerPassesLogSinkEventThroughHookBus(t *testing.T) {
 }
 
 func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
-	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
+	outputRoot := t.TempDir()
+	outputPath := filepath.Join(outputRoot, "tickets.jsonl")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
 	}
@@ -223,7 +224,7 @@ func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Sink(File(outputPath)),
-	}, httpRuntime{provider: scripted, toolExecutor: outputAllowedExecutor("file")})
+	}, httpRuntime{provider: scripted, toolExecutor: outputAllowedExecutor("file"), sandbox: fileSinkSandbox(t, outputRoot)})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -306,7 +307,8 @@ func TestNewHTTPHandlerFileSinkDoesNotLogToEventStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEventStream returned error: %v", err)
 	}
-	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
+	outputRoot := t.TempDir()
+	outputPath := filepath.Join(outputRoot, "tickets.jsonl")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
 	}
@@ -314,7 +316,7 @@ func TestNewHTTPHandlerFileSinkDoesNotLogToEventStream(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Sink(File(outputPath)),
-	}, httpRuntime{provider: scripted, eventStream: stream, toolExecutor: outputAllowedExecutor("file")})
+	}, httpRuntime{provider: scripted, eventStream: stream, toolExecutor: outputAllowedExecutor("file"), sandbox: fileSinkSandbox(t, outputRoot)})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}

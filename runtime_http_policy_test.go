@@ -12,6 +12,7 @@ import (
 	"ouvrier/internal/events"
 	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
+	internalsandbox "ouvrier/internal/sandbox"
 	"ouvrier/internal/state"
 	"ouvrier/internal/tools"
 )
@@ -300,6 +301,71 @@ func TestNewHTTPHandlerDeniesFileSinkByDefault(t *testing.T) {
 	assertOutputPermissionDecision(t, stream, "sink_file", false)
 }
 
+func TestNewHTTPHandlerRejectsAllowedFileSinkOutsideSandbox(t *testing.T) {
+	outputRoot := t.TempDir()
+	outputPath := filepath.Join(t.TempDir(), "outside.json")
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File(outputPath)),
+	}, httpRuntime{
+		provider:     scripted,
+		eventStream:  stream,
+		toolExecutor: outputAllowedExecutor("file"),
+		sandbox:      fileSinkSandbox(t, outputRoot),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	assertOutputPermissionDecision(t, stream, "sink_file", true)
+}
+
+func TestRunnerSandboxConfiguresFileSinkBoundary(t *testing.T) {
+	outputRoot := t.TempDir()
+	outputPath := filepath.Join(outputRoot, "tickets.json")
+	runner := NewRunner(
+		WithPermissionPolicy(AllowSideEffects("file")),
+		WithSandbox(Sandbox(outputRoot)),
+	)
+	rt := httpRuntime{provider: &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}}
+	if err := runner.configureHTTPRuntime(&rt); err != nil {
+		t.Fatalf("configureHTTPRuntime returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File(outputPath)),
+	}, rt)
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+}
+
 func TestNewHTTPHandlerAuditsLogSinkPermission(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -455,6 +521,15 @@ func outputAllowedExecutor(labels ...string) *tools.Executor {
 	return tools.NewExecutor(tools.WithPermissionPolicy(
 		policy.NewDefaultPolicy(policy.AllowSideEffects(labels...)),
 	))
+}
+
+func fileSinkSandbox(t *testing.T, root string) *internalsandbox.Sandbox {
+	t.Helper()
+	sandbox, err := internalsandbox.New(root)
+	if err != nil {
+		t.Fatalf("sandbox.New(%q) returned error: %v", root, err)
+	}
+	return sandbox
 }
 
 func assertOutputPermissionDecision(t *testing.T, stream *events.EventStream, action string, allowed bool) {
