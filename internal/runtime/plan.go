@@ -98,6 +98,7 @@ type Terminal struct {
 	SinkLog        bool
 	SinkFilePath   string
 	PushWebhookURL string
+	PushQueueURI   string
 }
 
 type Plan struct {

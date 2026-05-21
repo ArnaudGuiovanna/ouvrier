@@ -78,8 +78,9 @@ Current working foundations include:
 - Early CLI/scaffold and Bubble Tea TUI foundations.
 - Governed `SubAgent` foundations in active development.
 
-The v0.1 backlog remains broader: Cron, signed webhooks, streams, SSE, queues,
-full CLI workflows, deployment, trace viewer, docs, examples, and release gates.
+The v0.1 backlog remains broader: Cron, streams, broader queue/backpressure
+semantics, full CLI workflows, deployment, trace viewer, docs, examples, and
+release gates.
 
 ## Mental Model
 
@@ -243,15 +244,17 @@ validates final JSON strictly. Violations are recorded in `EventStream` and
 
 ```go
 ovr.Reply(ovr.JSON[Summary]())
+ovr.Reply(ovr.SSE())
 ovr.Reply(ovr.Accepted())
 ovr.Push(ovr.Webhook("https://example.com/result"))
+ovr.Push(ovr.Queue("nats://127.0.0.1:4222/results"))
 ovr.Sink(ovr.Log())
 ovr.Sink(ovr.File("./out/result.json"))
 ```
 
-`Reply(JSON[T]())`, `Reply(Accepted())`, webhook push, log sink, and file sink
-have current runtime coverage. SSE, queue push, and full output-side policy
-governance are tracked for v0.1.
+`Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push, NATS/HTTP
+queue push, log sink, and file sink have current runtime coverage. Broader queue
+protocols, backpressure, retry, and DLQ semantics are tracked for v0.1.
 
 ### SubAgents
 

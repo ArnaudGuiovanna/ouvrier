@@ -55,6 +55,17 @@ func TestValidateAcceptsWebhookPushTerminal(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsQueuePushTerminal(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("normalize ticket", ovr.Model("anthropic/claude-sonnet-4-6")),
+		ovr.Push(ovr.Queue("nats://127.0.0.1:4222/tickets.normalized")),
+	)
+	if err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
 func TestValidateAcceptsMultiplePipelines(t *testing.T) {
 	err := ovr.Validate(
 		ovr.From("GET /health"),
@@ -143,6 +154,17 @@ func TestValidateRejectsInvalidFileSinkPath(t *testing.T) {
 		ovr.From("POST /tickets"),
 		ovr.Pipe("classify ticket", ovr.Model("anthropic/claude-sonnet-4-6")),
 		ovr.Sink(ovr.File("bad\x00path")),
+	)
+	if !errors.Is(err, ovr.ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
+
+func TestValidateRejectsInvalidQueuePushURI(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("classify ticket", ovr.Model("anthropic/claude-sonnet-4-6")),
+		ovr.Push(ovr.Queue("tickets")),
 	)
 	if !errors.Is(err, ovr.ErrInvalidNode) {
 		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)

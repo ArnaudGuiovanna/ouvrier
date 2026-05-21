@@ -157,10 +157,17 @@ type webhookPushTarget interface {
 	pushWebhookURL() string
 }
 
+type queuePushTarget interface {
+	pushQueueURI() string
+}
+
 func compilePushTerminal(node pushNode) runtimeplan.Terminal {
 	terminal := runtimeplan.Terminal{Kind: runtimeplan.TerminalPush}
 	if target, ok := node.target.(webhookPushTarget); ok {
 		terminal.PushWebhookURL = target.pushWebhookURL()
+	}
+	if target, ok := node.target.(queuePushTarget); ok {
+		terminal.PushQueueURI = target.pushQueueURI()
 	}
 	return terminal
 }

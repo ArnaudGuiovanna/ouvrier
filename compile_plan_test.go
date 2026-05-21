@@ -344,6 +344,28 @@ func TestCompilePlansCompilesWebhookPush(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesQueuePush(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Queue("nats://127.0.0.1:4222/tickets.classified")),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(plans))
+	}
+
+	terminal := plans[0].Terminal
+	if terminal.Kind != runtimeplan.TerminalPush {
+		t.Fatalf("terminal kind = %q, want %q", terminal.Kind, runtimeplan.TerminalPush)
+	}
+	if terminal.PushQueueURI != "nats://127.0.0.1:4222/tickets.classified" {
+		t.Fatalf("terminal queue URI = %q, want nats://127.0.0.1:4222/tickets.classified", terminal.PushQueueURI)
+	}
+}
+
 func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /jobs", WorkerPool(2)),

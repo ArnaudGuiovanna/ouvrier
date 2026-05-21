@@ -135,6 +135,23 @@ func TestDefaultPolicyAllowsExplicitSideEffects(t *testing.T) {
 	}
 }
 
+func TestDefaultPolicyAllowsExplicitQueuePushSideEffect(t *testing.T) {
+	policy := NewDefaultPolicy(AllowSideEffects("queue"))
+
+	decision, err := policy.Authorize(context.Background(), Action{
+		Kind:        ActionPushQueue,
+		Target:      "nats://127.0.0.1:4222/tickets",
+		Effect:      EffectSideEffecting,
+		SideEffects: []string{"queue"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	}
+}
+
 func TestDefaultPolicyRequiresEverySideEffectToBeAllowed(t *testing.T) {
 	policy := NewDefaultPolicy(AllowSideEffects("email"))
 
