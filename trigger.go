@@ -35,6 +35,9 @@ func (t CronTrigger) validateTrigger() error {
 	if t.expr == "" {
 		return fmt.Errorf("%w: cron expression is required", ErrInvalidNode)
 	}
+	if _, err := parseCronSchedule(t.expr); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidNode, err)
+	}
 	return nil
 }
 
