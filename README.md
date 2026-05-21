@@ -68,7 +68,7 @@ generated projects that depend on a placeholder module path.
 
 Current working foundations include:
 
-- HTTP triggers and compiled runtime plans.
+- HTTP triggers, Cron triggers, and compiled runtime plans.
 - Sequential `Pipe` execution through the harness path.
 - Go tools through `ToolExecutor` and `PermissionPolicy`.
 - Skill loading and deterministic prompt injection from `skills/<name>/SKILL.md`.
@@ -80,9 +80,9 @@ Current working foundations include:
 - Early CLI/scaffold and Bubble Tea TUI foundations.
 - Governed `SubAgent` foundations in active development.
 
-The v0.1 backlog remains broader: Cron, streams, broader queue/backpressure
-semantics, full CLI workflows, deployment, trace viewer, docs, examples, and
-release gates.
+The v0.1 backlog remains broader: webhook/stream runtime transports, mixed
+HTTP+Cron serving, broader queue/backpressure semantics, full CLI workflows,
+deployment, trace viewer, docs, examples, and release gates.
 
 ## Mental Model
 
@@ -171,9 +171,10 @@ ovr.From(ovr.Webhook("github"))
 ovr.From(ovr.Stream("kafka://tickets"))
 ```
 
-HTTP triggers are the current executable runtime slice. Cron, signed webhooks,
-and streams are v0.1 backlog items and must use the same harness, state, event,
-and policy guarantees.
+HTTP triggers are the primary server runtime. Cron plans with `Push` or `Sink`
+terminals now execute through the same harness path when run as a cron-only
+runtime. Signed webhook and stream consumers remain v0.1 backlog items and must
+use the same harness, state, event, and policy guarantees.
 
 ### Pipes
 

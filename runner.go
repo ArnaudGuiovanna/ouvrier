@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	runtimeplan "ouvrier/internal/runtime"
 	internalsandbox "ouvrier/internal/sandbox"
 	"ouvrier/internal/tools"
 )
@@ -133,7 +134,8 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 	if r.err != nil {
 		return r.err
 	}
-	if err := validatePipeline(nodes); err != nil {
+	plans, err := compilePlans(nodes)
+	if err != nil {
 		return err
 	}
 
@@ -142,14 +144,35 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 		return fmt.Errorf("state store: %w", err)
 	}
 
-	handler, err := newHTTPHandlerWithRuntime(nodes, runtime)
-	if err != nil {
-		_ = closeRuntime()
-		return err
+	var serveErr error
+	switch plansTriggerKind(plans) {
+	case runtimeplan.TriggerHTTP:
+		handler, err := newHTTPHandlerWithRuntime(nodes, runtime)
+		if err != nil {
+			_ = closeRuntime()
+			return err
+		}
+		serveErr = serveHTTP(addr, handler)
+	case runtimeplan.TriggerCron:
+		serveErr = serveCronPlans(runtime, plans)
+	default:
+		serveErr = fmt.Errorf("%w: mixed or unsupported trigger runtime", ErrRunNotImplemented)
 	}
-	serveErr := serveHTTP(addr, handler)
 	closeErr := closeRuntime()
 	return errors.Join(serveErr, closeErr)
+}
+
+func plansTriggerKind(plans []runtimeplan.Plan) runtimeplan.TriggerKind {
+	if len(plans) == 0 {
+		return ""
+	}
+	kind := plans[0].Trigger.Kind
+	for _, plan := range plans[1:] {
+		if plan.Trigger.Kind != kind {
+			return ""
+		}
+	}
+	return kind
 }
 
 func (r *Runner) defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
