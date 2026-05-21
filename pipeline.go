@@ -19,6 +19,8 @@ type pipeConfig struct {
 	mcpServers []mcpSpec
 	subAgents  []subAgentSpec
 	retry      *retrySpec
+	budget     Budget
+	sequential bool
 	err        error
 }
 
@@ -102,6 +104,76 @@ func (c *pipeConfig) setErr(err error) {
 	if c.err == nil {
 		c.err = err
 	}
+}
+
+type timeoutOption struct {
+	duration time.Duration
+	err      error
+}
+
+// Timeout configures a Pipe wall-clock budget using a Go duration string.
+func Timeout(value string) PipeOption {
+	duration, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return timeoutOption{err: fmt.Errorf("%w: Pipe timeout must be a valid duration", ErrInvalidNode)}
+	}
+	if duration <= 0 {
+		return timeoutOption{err: fmt.Errorf("%w: Pipe timeout must be greater than zero", ErrInvalidNode)}
+	}
+	return timeoutOption{duration: duration}
+}
+
+func (o timeoutOption) applyPipe(config *pipeConfig) {
+	if o.err != nil {
+		config.setErr(o.err)
+		return
+	}
+	config.budget.MaxWallClock = o.duration
+}
+
+type maxTokensOption struct {
+	max int
+}
+
+// MaxTokens configures a Pipe token budget.
+func MaxTokens(max int) PipeOption {
+	return maxTokensOption{max: max}
+}
+
+func (o maxTokensOption) applyPipe(config *pipeConfig) {
+	if o.max <= 0 {
+		config.setErr(fmt.Errorf("%w: Pipe MaxTokens must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.budget.MaxTokens = o.max
+}
+
+type maxCostUSDOption struct {
+	max float64
+}
+
+// MaxCostUSD configures a Pipe cost budget in US dollars.
+func MaxCostUSD(max float64) PipeOption {
+	return maxCostUSDOption{max: max}
+}
+
+func (o maxCostUSDOption) applyPipe(config *pipeConfig) {
+	if o.max <= 0 {
+		config.setErr(fmt.Errorf("%w: Pipe MaxCostUSD must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.budget.MaxCostUSD = o.max
+}
+
+type sequentialToolsOption struct{}
+
+// SequentialTools forces tool calls from one provider turn to execute one at a time.
+func SequentialTools() PipeOption {
+	return sequentialToolsOption{}
+}
+
+func (sequentialToolsOption) applyPipe(config *pipeConfig) {
+	config.sequential = true
 }
 
 // BackoffPolicy configures the delay between retry attempts.

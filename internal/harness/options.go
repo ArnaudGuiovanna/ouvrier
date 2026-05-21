@@ -38,6 +38,7 @@ type config struct {
 	schemaRepairs   int
 	providerRetries int
 	retryBackoff    time.Duration
+	sequentialTools bool
 }
 
 func defaultConfig() config {
@@ -217,6 +218,13 @@ func WithSchemaRepairAttempts(max int) Option {
 			return errors.New("schema repair attempts must be greater than or equal to zero")
 		}
 		cfg.schemaRepairs = max
+		return nil
+	}
+}
+
+func WithSequentialTools() Option {
+	return func(cfg *config) error {
+		cfg.sequentialTools = true
 		return nil
 	}
 }

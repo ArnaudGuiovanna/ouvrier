@@ -89,8 +89,10 @@ type FromOption interface {
 }
 
 type fromConfig struct {
-	workerPool int
-	err        error
+	workerPool      int
+	signatureEnv    string
+	signatureHeader string
+	err             error
 }
 
 type workerPoolOption struct {
@@ -108,6 +110,32 @@ func (o workerPoolOption) applyFrom(config *fromConfig) {
 		return
 	}
 	config.workerPool = o.limit
+}
+
+type verifySignatureOption struct {
+	envVar string
+	header string
+}
+
+// VerifySignature verifies an HMAC-SHA256 request signature before executing a trigger.
+func VerifySignature(envVar, header string) FromOption {
+	return verifySignatureOption{
+		envVar: strings.TrimSpace(envVar),
+		header: strings.TrimSpace(header),
+	}
+}
+
+func (o verifySignatureOption) applyFrom(config *fromConfig) {
+	if o.envVar == "" {
+		config.setErr(fmt.Errorf("%w: VerifySignature env var is required", ErrInvalidNode))
+		return
+	}
+	if o.header == "" {
+		config.setErr(fmt.Errorf("%w: VerifySignature header is required", ErrInvalidNode))
+		return
+	}
+	config.signatureEnv = o.envVar
+	config.signatureHeader = o.header
 }
 
 func (c *fromConfig) setErr(err error) {

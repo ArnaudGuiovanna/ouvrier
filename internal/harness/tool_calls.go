@@ -24,7 +24,7 @@ type toolCallOutcome struct {
 func (h *Harness) executeToolCalls(ctx context.Context, session runtimecore.Session, calls []provider.ToolCall) ([]provider.Message, map[string]any, error) {
 	messages := make([]provider.Message, 0, len(calls))
 	for i := 0; i < len(calls); {
-		if h.toolExecutor.CanRunParallelSubAgent(calls[i].Name) {
+		if !h.sequentialTools && h.toolExecutor.CanRunParallelSubAgent(calls[i].Name) {
 			start := i
 			for i < len(calls) && h.toolExecutor.CanRunParallelSubAgent(calls[i].Name) {
 				i++

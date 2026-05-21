@@ -49,6 +49,8 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 		return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", start, err)
 	}
 	trigger.WorkerPool = from.config.workerPool
+	trigger.SignatureEnv = from.config.signatureEnv
+	trigger.SignatureHeader = from.config.signatureHeader
 
 	plan := runtimeplan.Plan{Trigger: trigger}
 	for i := start + 1; i < len(nodes); i++ {

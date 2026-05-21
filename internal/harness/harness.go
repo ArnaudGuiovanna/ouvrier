@@ -31,6 +31,7 @@ type Harness struct {
 	schemaRepairs   int
 	providerRetries int
 	retryBackoff    time.Duration
+	sequentialTools bool
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -74,6 +75,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		schemaRepairs:   cfg.schemaRepairs,
 		providerRetries: cfg.providerRetries,
 		retryBackoff:    cfg.retryBackoff,
+		sequentialTools: cfg.sequentialTools,
 	}, nil
 }
 

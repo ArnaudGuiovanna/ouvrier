@@ -18,13 +18,15 @@ const (
 )
 
 type Trigger struct {
-	Kind       TriggerKind
-	Method     string
-	Path       string
-	Expr       string
-	Value      string
-	URI        string
-	WorkerPool int
+	Kind            TriggerKind
+	Method          string
+	Path            string
+	Expr            string
+	Value           string
+	URI             string
+	WorkerPool      int
+	SignatureEnv    string
+	SignatureHeader string
 }
 
 type StepKind string
@@ -34,14 +36,16 @@ const (
 )
 
 type Step struct {
-	Kind         StepKind
-	Goal         string
-	Model        string
-	Tools        []Tool
-	MCPServers   []MCPServer
-	SubAgents    []SubAgent
-	ResultSchema *ResultSchema
-	Retry        *Retry
+	Kind            StepKind
+	Goal            string
+	Model           string
+	Tools           []Tool
+	MCPServers      []MCPServer
+	SubAgents       []SubAgent
+	ResultSchema    *ResultSchema
+	Retry           *Retry
+	Budget          Budget
+	SequentialTools bool
 }
 
 type Retry struct {
@@ -70,6 +74,7 @@ type Tool struct {
 	IdempotencyKey   string
 	SideEffects      []string
 	RequiresApproval bool
+	Timeout          time.Duration
 }
 
 type MCPServer struct {
