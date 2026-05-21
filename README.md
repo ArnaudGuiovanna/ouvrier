@@ -384,4 +384,6 @@ resolve explicitly. Do not silently shrink v0.1 scope.
 
 ## License
 
-License information has not been finalized in this repository yet.
+Ouvrier is licensed under the Apache License, Version 2.0. See `LICENSE`.
+
+Created by Arnaud Guiovanna: https://aguiovanna.fr
