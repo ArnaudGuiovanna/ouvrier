@@ -25,6 +25,7 @@ const (
 
 	EventPermissionDecision  EventKind = "permission_decision"
 	EventIdempotencyDecision EventKind = "idempotency_decision"
+	EventSignatureDecision   EventKind = "signature_decision"
 
 	EventSchemaValidationPassed EventKind = "schema_validation_passed"
 	EventSchemaValidationFailed EventKind = "schema_validation_failed"

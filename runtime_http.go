@@ -242,19 +242,45 @@ func (r httpRoute) verifyRequestSignature(w http.ResponseWriter, req *http.Reque
 	}
 	headerValue := strings.TrimSpace(req.Header.Get(headerName))
 	if headerValue == "" {
+		if err := r.emitSignatureDecision(req.Context(), "missing"); err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
+			return false
+		}
 		writeJSONStatus(w, http.StatusUnauthorized, "signature_missing")
 		return false
 	}
 	secret := os.Getenv(env)
 	if secret == "" {
+		if err := r.emitSignatureDecision(req.Context(), "secret_missing"); err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
+			return false
+		}
 		writeJSONStatus(w, http.StatusInternalServerError, "signature_secret_missing")
 		return false
 	}
 	if !validHMACSHA256Signature(secret, payload, headerValue) {
+		if err := r.emitSignatureDecision(req.Context(), "invalid"); err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
+			return false
+		}
 		writeJSONStatus(w, http.StatusForbidden, "signature_invalid")
 		return false
 	}
+	if err := r.emitSignatureDecision(req.Context(), "valid"); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
+		return false
+	}
 	return true
+}
+
+func (r httpRoute) emitSignatureDecision(ctx context.Context, decision string) error {
+	return r.runtime.emitRuntimeEvent(ctx, planRunResult{}, events.EventSignatureDecision, map[string]any{
+		"scope":    "trigger",
+		"method":   r.plan.Trigger.Method,
+		"path":     r.plan.Trigger.Path,
+		"header":   http.CanonicalHeaderKey(r.plan.Trigger.SignatureHeader),
+		"decision": decision,
+	})
 }
 
 func validHMACSHA256Signature(secret string, payload []byte, rawSignature string) bool {
