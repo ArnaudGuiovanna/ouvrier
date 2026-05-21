@@ -217,6 +217,11 @@ func (e *Executor) CanRunParallelSubAgent(name string) bool {
 	return ok && tool.metadata.Kind == ToolKindSubAgent
 }
 
+func (e *Executor) SubAgentPartialOK(name string) bool {
+	tool, ok := e.lookup(name)
+	return ok && tool.metadata.Kind == ToolKindSubAgent && tool.metadata.PartialOK
+}
+
 func (e *Executor) AllowsProviderRetryAfterToolCall(name string) bool {
 	tool, ok := e.lookup(name)
 	if !ok {

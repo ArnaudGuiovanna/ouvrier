@@ -19,6 +19,7 @@ type Metadata struct {
 	SideEffects      []string
 	RequiresApproval bool
 	Kind             ToolKind
+	PartialOK        bool
 	ArgumentName     string
 	InputSchema      json.RawMessage
 }

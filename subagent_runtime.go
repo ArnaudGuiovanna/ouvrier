@@ -17,6 +17,8 @@ import (
 
 var subAgentInputSchema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"additionalProperties":true}`)
 
+type subAgentDepthContextKey struct{}
+
 type subAgentHandler struct {
 	runtime  httpRuntime
 	spec     runtimeplan.SubAgent
@@ -28,8 +30,9 @@ func registerRuntimeSubAgents(rt httpRuntime, executor *tools.Executor, subAgent
 	for _, subAgent := range subAgents {
 		handler := newSubAgentHandler(rt, subAgent)
 		if err := executor.RegisterHandler(subAgent.Name, handler, tools.WithMetadata(tools.Metadata{
-			Effect: policy.EffectSideEffecting,
-			Kind:   tools.ToolKindSubAgent,
+			Effect:    policy.EffectSideEffecting,
+			Kind:      tools.ToolKindSubAgent,
+			PartialOK: subAgent.PartialOK,
 		})); err != nil {
 			return nil, err
 		}
@@ -63,6 +66,15 @@ func (h *subAgentHandler) Execute(ctx context.Context, call provider.ToolCall) (
 	if err != nil {
 		return provider.ToolResult{}, err
 	}
+	depth := subAgentDepth(ctx) + 1
+	if depth > defaultSubAgentMaxDepth {
+		err := fmt.Errorf("SubAgent depth cannot exceed %d", defaultSubAgentMaxDepth)
+		emitErr := h.emitTask(ctx, parent, events.EventTaskFailed, call, map[string]any{
+			"error": err.Error(),
+			"depth": depth,
+		})
+		return provider.ToolResult{}, errors.Join(err, emitErr)
+	}
 	if err := h.acquire(ctx); err != nil {
 		return provider.ToolResult{}, err
 	}
@@ -75,7 +87,8 @@ func (h *subAgentHandler) Execute(ctx context.Context, call provider.ToolCall) (
 	if ledger, ok := harness.BudgetLedgerFromContext(ctx); ok {
 		scope.budgetLedger = ledger
 	}
-	result, err := h.runtime.runStepsResult(ctx, h.spec.Pipeline.Steps, input, scope)
+	childCtx := contextWithSubAgentDepth(ctx, depth)
+	result, err := h.runtime.runStepsResult(childCtx, h.spec.Pipeline.Steps, input, scope)
 	if err != nil {
 		payload := subAgentTaskSessionPayload(result)
 		payload["error"] = err.Error()
@@ -128,7 +141,11 @@ func (h *subAgentHandler) emitTask(ctx context.Context, parent runtimeplan.Sessi
 	for key, value := range extra {
 		payload[key] = value
 	}
-	return h.runtime.emitSessionEvent(ctx, parent, kind, payload)
+	emitCtx := ctx
+	if kind == events.EventTaskFailed {
+		emitCtx = context.WithoutCancel(ctx)
+	}
+	return h.runtime.emitSessionEvent(emitCtx, parent, kind, payload)
 }
 
 func subAgentTaskSessionPayload(result planRunResult) map[string]any {
@@ -165,4 +182,22 @@ func subAgentInput(raw json.RawMessage) (string, error) {
 		return args.Input, nil
 	}
 	return string(raw), nil
+}
+
+func subAgentDepth(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	depth, ok := ctx.Value(subAgentDepthContextKey{}).(int)
+	if !ok || depth < 0 {
+		return 0
+	}
+	return depth
+}
+
+func contextWithSubAgentDepth(ctx context.Context, depth int) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, subAgentDepthContextKey{}, depth)
 }
