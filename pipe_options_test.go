@@ -21,6 +21,7 @@ func TestCompilePlansCompilesPipeBudgetAndExecutionOptions(t *testing.T) {
 			Timeout("2s"),
 			MaxTokens(123),
 			MaxCostUSD(0.75),
+			NoCache(),
 			SequentialTools(),
 			Tool("lookup", func(context.Context) error { return nil },
 				ReadOnly(),
@@ -42,6 +43,9 @@ func TestCompilePlansCompilesPipeBudgetAndExecutionOptions(t *testing.T) {
 	}
 	if step.Budget.MaxCostUSD != 0.75 {
 		t.Fatalf("MaxCostUSD = %f, want 0.75", step.Budget.MaxCostUSD)
+	}
+	if !step.NoCache {
+		t.Fatal("NoCache = false, want true")
 	}
 	if !step.SequentialTools {
 		t.Fatal("SequentialTools = false, want true")
@@ -91,6 +95,65 @@ func TestValidateRejectsInvalidPipeBudgetAndToolTimeoutOptions(t *testing.T) {
 				t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
 			}
 		})
+	}
+}
+
+func TestNewHTTPHandlerSetsProviderCacheKeyByDefault(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[toolReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	if scripted.requests[0].CacheKey == "" {
+		t.Fatal("provider CacheKey is empty, want default prompt cache key")
+	}
+}
+
+func TestNewHTTPHandlerNoCacheClearsProviderCacheKey(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			NoCache(),
+		),
+		Reply(JSON[toolReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	if scripted.requests[0].CacheKey != "" {
+		t.Fatalf("provider CacheKey = %q, want empty with NoCache", scripted.requests[0].CacheKey)
 	}
 }
 

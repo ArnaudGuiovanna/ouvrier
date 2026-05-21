@@ -46,6 +46,7 @@ type Step struct {
 	ResultSchema    *ResultSchema
 	Retry           *Retry
 	Budget          Budget
+	NoCache         bool
 	SequentialTools bool
 }
 

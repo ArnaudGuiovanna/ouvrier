@@ -278,6 +278,9 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 				harness.WithRetryBackoff(step.Retry.Backoff),
 			)
 		}
+		if step.NoCache {
+			harnessOptions = append(harnessOptions, harness.WithPromptCache(false))
+		}
 		if scope.parentSession != nil {
 			harnessOptions = append(harnessOptions, harness.WithParentSession(*scope.parentSession))
 		}

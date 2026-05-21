@@ -33,6 +33,20 @@ func TestValidateAcceptsHTTPPipelineWithSSEReply(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsPipeNoCacheOption(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("POST /tickets"),
+		ovr.Pipe("classify ticket",
+			ovr.Model("anthropic/claude-sonnet-4-6"),
+			ovr.NoCache(),
+		),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
 func TestValidateAcceptsAsyncPipelineWithSink(t *testing.T) {
 	err := ovr.Validate(
 		ovr.From(ovr.Cron("0 6 * * *")),

@@ -20,6 +20,7 @@ type pipeConfig struct {
 	subAgents  []subAgentSpec
 	retry      *retrySpec
 	budget     Budget
+	noCache    bool
 	sequential bool
 	err        error
 }
@@ -163,6 +164,17 @@ func (o maxCostUSDOption) applyPipe(config *pipeConfig) {
 		return
 	}
 	config.budget.MaxCostUSD = o.max
+}
+
+type noCacheOption struct{}
+
+// NoCache disables provider prompt-cache hints for one Pipe.
+func NoCache() PipeOption {
+	return noCacheOption{}
+}
+
+func (noCacheOption) applyPipe(config *pipeConfig) {
+	config.noCache = true
 }
 
 type sequentialToolsOption struct{}

@@ -38,6 +38,7 @@ type config struct {
 	schemaRepairs   int
 	providerRetries int
 	retryBackoff    time.Duration
+	promptCache     bool
 	sequentialTools bool
 }
 
@@ -51,6 +52,7 @@ func defaultConfig() config {
 		},
 		toolExecutor:    tools.NewExecutor(),
 		providerRetries: DefaultProviderRetries,
+		promptCache:     true,
 	}
 }
 
@@ -151,6 +153,13 @@ func WithRetryBackoff(backoff time.Duration) Option {
 			return errors.New("retry backoff must be greater than or equal to zero")
 		}
 		cfg.retryBackoff = backoff
+		return nil
+	}
+}
+
+func WithPromptCache(enabled bool) Option {
+	return func(cfg *config) error {
+		cfg.promptCache = enabled
 		return nil
 	}
 }
