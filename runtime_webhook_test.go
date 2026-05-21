@@ -127,6 +127,36 @@ func TestNewWebhookHandlerAppliesSignatureAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestNewHTTPCompatibleHandlerServesHTTPAndWebhookPipelines(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPCompatibleHandlerWithRuntime([]Node{
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+		From(Webhook("github")),
+		Sink(Log()),
+	}, httpRuntime{eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPCompatibleHandlerWithRuntime returned error: %v", err)
+	}
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", health.Code, http.StatusOK)
+	}
+
+	webhook := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", strings.NewReader(`{"event":"push"}`))
+	handler.ServeHTTP(webhook, req)
+	if webhook.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, want %d, body=%s", webhook.Code, http.StatusAccepted, webhook.Body.String())
+	}
+	assertSinkLoggedEvent(t, stream, "input", `{"body":{"event":"push"},"provider":"github","trigger":"webhook"}`)
+}
+
 func assertWebhookLogInput(t *testing.T, event events.Event, provider, eventName string) {
 	t.Helper()
 

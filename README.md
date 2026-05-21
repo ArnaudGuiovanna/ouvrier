@@ -176,7 +176,8 @@ terminals now execute through the same harness path when run as a cron-only
 runtime. Webhook trigger plans now expose `POST /webhooks/<provider>` routes,
 wrap the request as `{trigger, provider, body}`, and reuse the same signature,
 idempotency, harness, state, event, and policy guarantees as HTTP triggers.
-Stream consumers remain a v0.1 backlog item.
+HTTP and Webhook pipelines can run in the same server. Stream consumers remain
+a v0.1 backlog item.
 
 ### Pipes
 

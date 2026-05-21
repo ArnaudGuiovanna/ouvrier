@@ -55,6 +55,14 @@ func newWebhookHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handl
 	return newHTTPHandlerFromRoutes(routes, runtime)
 }
 
+func newHTTPCompatibleHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler, error) {
+	routes, err := httpCompatibleRoutesFromNodes(nodes)
+	if err != nil {
+		return nil, err
+	}
+	return newHTTPHandlerFromRoutes(routes, runtime)
+}
+
 func newHTTPHandlerFromRoutes(routes []httpRoute, runtime httpRuntime) (http.Handler, error) {
 	if err := validateHTTPTriggerSecurityConfig(routes, runtime); err != nil {
 		return nil, err
