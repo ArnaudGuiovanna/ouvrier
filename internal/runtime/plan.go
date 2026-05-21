@@ -93,6 +93,7 @@ const (
 type Terminal struct {
 	Kind           TerminalKind
 	Async          bool
+	SSE            bool
 	ResultSchema   *ResultSchema
 	SinkLog        bool
 	SinkFilePath   string

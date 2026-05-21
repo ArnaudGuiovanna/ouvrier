@@ -140,6 +140,9 @@ func compileReplyTerminal(node replyNode) (runtimeplan.Terminal, error) {
 	if format, ok := node.format.(asyncReplyFormat); ok && format.asyncReply() {
 		terminal.Async = true
 	}
+	if format, ok := node.format.(sseReplyFormat); ok && format.sseReply() {
+		terminal.SSE = true
+	}
 	if format, ok := node.format.(resultSchemaCarrier); ok {
 		resultSchema, err := resultSchemaFromType(format.resultSchemaType())
 		if err != nil {
