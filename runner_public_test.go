@@ -84,6 +84,22 @@ func TestRunnerRejectsNilStateStore(t *testing.T) {
 	}
 }
 
+func TestNewRunnerAcceptsSandboxAllowEnv(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithSandbox(ovr.Sandbox(t.TempDir(), ovr.AllowEnv("PATH"))))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid address after accepting sandbox config")
+	}
+	if strings.Contains(err.Error(), "sandbox") {
+		t.Fatalf("Run error = %v, want sandbox config accepted", err)
+	}
+}
+
 func TestRunnerRejectsNilHooks(t *testing.T) {
 	runner := ovr.NewRunner(ovr.WithHooks(nil))
 
