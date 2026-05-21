@@ -21,6 +21,7 @@ type ActionKind string
 const (
 	ActionToolCall    ActionKind = "tool_call"
 	ActionPushWebhook ActionKind = "push_webhook"
+	ActionPushQueue   ActionKind = "push_queue"
 	ActionSinkFile    ActionKind = "sink_file"
 	ActionSinkLog     ActionKind = "sink_log"
 )
@@ -107,6 +108,8 @@ func (p DefaultPolicy) Authorize(ctx context.Context, action Action) (Decision, 
 		}
 	case ActionPushWebhook:
 		return p.authorizeSideEffectingAction(action, "webhook push"), nil
+	case ActionPushQueue:
+		return p.authorizeSideEffectingAction(action, "queue push"), nil
 	case ActionSinkFile:
 		return p.authorizeSideEffectingAction(action, "file sink"), nil
 	case ActionSinkLog:

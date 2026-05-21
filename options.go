@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"fmt"
+	"net/url"
 	"reflect"
 	"strings"
 )
@@ -113,6 +114,34 @@ func (n pushNode) validateNode() error {
 		return fmt.Errorf("%w: Push target is required", ErrInvalidNode)
 	}
 	return n.target.validatePushTarget()
+}
+
+// QueueTarget is a Push target that publishes the final outcome to a queue.
+type QueueTarget struct {
+	uri string
+}
+
+// Queue declares a queue push target.
+func Queue(uri string) QueueTarget {
+	return QueueTarget{uri: strings.TrimSpace(uri)}
+}
+
+func (t QueueTarget) validatePushTarget() error {
+	if t.uri == "" {
+		return fmt.Errorf("%w: queue URI is required", ErrInvalidNode)
+	}
+	if strings.ContainsRune(t.uri, 0) {
+		return fmt.Errorf("%w: queue URI is invalid", ErrInvalidNode)
+	}
+	parsed, err := url.Parse(t.uri)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("%w: queue URI must include scheme and host", ErrInvalidNode)
+	}
+	return nil
+}
+
+func (t QueueTarget) pushQueueURI() string {
+	return t.uri
 }
 
 // SinkTarget configures where Sink records or discards the final outcome.

@@ -273,6 +273,68 @@ func TestNewHTTPHandlerAllowsExplicitWebhookPushPolicy(t *testing.T) {
 	assertOutputPermissionDecision(t, stream, "push_webhook", true)
 }
 
+func TestNewHTTPHandlerDeniesQueuePushByDefault(t *testing.T) {
+	queueURI, publishes := newNATSPublishRecorder(t, "tickets.classified")
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Queue(queueURI)),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	select {
+	case publish := <-publishes:
+		t.Fatalf("queue was published despite default output policy denial: %+v", publish)
+	default:
+	}
+	assertOutputPermissionDecision(t, stream, "push_queue", false)
+}
+
+func TestNewHTTPHandlerAllowsExplicitQueuePushPolicy(t *testing.T) {
+	queueURI, publishes := newNATSPublishRecorder(t, "tickets.classified")
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Queue(queueURI)),
+	}, httpRuntime{provider: scripted, eventStream: stream, toolExecutor: outputAllowedExecutor("queue")})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertNATSPublish(t, publishes)
+	assertOutputPermissionDecision(t, stream, "push_queue", true)
+}
+
 func TestNewHTTPHandlerDeniesFileSinkByDefault(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
 	stream, err := events.NewEventStream()

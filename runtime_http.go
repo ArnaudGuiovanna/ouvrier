@@ -97,7 +97,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		}
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush:
-		if r.plan.Terminal.PushWebhookURL != "" {
+		if r.plan.Terminal.PushWebhookURL != "" || r.plan.Terminal.PushQueueURI != "" {
 			if err := r.runtime.applyPushTerminal(req.Context(), r.plan.Terminal, planRunResultFromInput(input, session), input); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
@@ -600,18 +600,29 @@ func (rt httpRuntime) emitPipelineEvent(ctx context.Context, result planRunResul
 }
 
 func (rt httpRuntime) applyPushTerminal(ctx context.Context, terminal runtimeplan.Terminal, result planRunResult, output string) error {
-	if terminal.PushWebhookURL == "" {
-		return nil
+	if terminal.PushWebhookURL != "" {
+		if err := rt.authorizeOutputAction(ctx, result, policy.Action{
+			Kind:        policy.ActionPushWebhook,
+			Target:      terminal.PushWebhookURL,
+			Effect:      policy.EffectSideEffecting,
+			SideEffects: []string{"webhook"},
+		}); err != nil {
+			return err
+		}
+		return postWebhook(ctx, terminal.PushWebhookURL, output)
 	}
-	if err := rt.authorizeOutputAction(ctx, result, policy.Action{
-		Kind:        policy.ActionPushWebhook,
-		Target:      terminal.PushWebhookURL,
-		Effect:      policy.EffectSideEffecting,
-		SideEffects: []string{"webhook"},
-	}); err != nil {
-		return err
+	if terminal.PushQueueURI != "" {
+		if err := rt.authorizeOutputAction(ctx, result, policy.Action{
+			Kind:        policy.ActionPushQueue,
+			Target:      terminal.PushQueueURI,
+			Effect:      policy.EffectSideEffecting,
+			SideEffects: []string{"queue"},
+		}); err != nil {
+			return err
+		}
+		return publishQueue(ctx, terminal.PushQueueURI, output)
 	}
-	return postWebhook(ctx, terminal.PushWebhookURL, output)
+	return nil
 }
 
 func postWebhook(ctx context.Context, url, output string) error {
@@ -713,6 +724,8 @@ func outputTargetKind(kind policy.ActionKind) string {
 	switch kind {
 	case policy.ActionPushWebhook:
 		return "webhook"
+	case policy.ActionPushQueue:
+		return "queue"
 	case policy.ActionSinkFile:
 		return "file"
 	default:

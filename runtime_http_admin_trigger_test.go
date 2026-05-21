@@ -125,6 +125,36 @@ func TestHTTPAdminTriggerPushesPipelineOutputToWebhook(t *testing.T) {
 	assertWebhookPost(t, posts, `{"status":"classified"}`)
 }
 
+func TestHTTPAdminTriggerPushesPipelineOutputToQueue(t *testing.T) {
+	queueURI, publishes := newNATSPublishRecorder(t, "tickets.classified")
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Queue(queueURI)),
+	}, httpRuntime{
+		adminToken:   "secret-admin-token",
+		provider:     scripted,
+		toolExecutor: outputAllowedExecutor("queue"),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/tickets", `{"title":"broken"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	publish := assertNATSPublish(t, publishes)
+	if publish.Subject != "tickets.classified" || publish.Payload != `{"status":"classified"}` {
+		t.Fatalf("publish = %+v, want classified ticket payload", publish)
+	}
+}
+
 func TestHTTPAdminTriggerPushesDirectInputToWebhook(t *testing.T) {
 	webhook, posts := newWebhookPostRecorder(t)
 	handler, err := newHTTPHandlerWithRuntime([]Node{
@@ -142,6 +172,28 @@ func TestHTTPAdminTriggerPushesDirectInputToWebhook(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	assertWebhookPost(t, posts, `{"event":"created"}`)
+}
+
+func TestHTTPAdminTriggerPushesDirectInputToQueue(t *testing.T) {
+	queueURI, publishes := newNATSPublishRecorder(t, "events.created")
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Push(Queue(queueURI)),
+	}, httpRuntime{adminToken: "secret-admin-token", toolExecutor: outputAllowedExecutor("queue")})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerRequest(t, "secret-admin-token", "POST", "/events", `{"event":"created"}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	publish := assertNATSPublish(t, publishes)
+	if publish.Subject != "events.created" || publish.Payload != `{"event":"created"}` {
+		t.Fatalf("publish = %+v, want direct event payload", publish)
+	}
 }
 
 func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
