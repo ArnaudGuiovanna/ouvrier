@@ -73,8 +73,9 @@ func TestHTTPAdminTriggerWritesPipelineOutputToFileSink(t *testing.T) {
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Sink(File(outputPath)),
 	}, httpRuntime{
-		adminToken: "secret-admin-token",
-		provider:   scripted,
+		adminToken:   "secret-admin-token",
+		provider:     scripted,
+		toolExecutor: outputAllowedExecutor("file"),
 	})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
@@ -105,8 +106,9 @@ func TestHTTPAdminTriggerPushesPipelineOutputToWebhook(t *testing.T) {
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Push(Webhook(webhook.URL)),
 	}, httpRuntime{
-		adminToken: "secret-admin-token",
-		provider:   scripted,
+		adminToken:   "secret-admin-token",
+		provider:     scripted,
+		toolExecutor: outputAllowedExecutor("webhook"),
 	})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
@@ -126,7 +128,7 @@ func TestHTTPAdminTriggerPushesDirectInputToWebhook(t *testing.T) {
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /events"),
 		Push(Webhook(webhook.URL)),
-	}, httpRuntime{adminToken: "secret-admin-token"})
+	}, httpRuntime{adminToken: "secret-admin-token", toolExecutor: outputAllowedExecutor("webhook")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -145,7 +147,7 @@ func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /events"),
 		Sink(File(outputPath)),
-	}, httpRuntime{adminToken: "secret-admin-token"})
+	}, httpRuntime{adminToken: "secret-admin-token", toolExecutor: outputAllowedExecutor("file")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}

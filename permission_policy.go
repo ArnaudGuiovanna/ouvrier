@@ -10,7 +10,10 @@ import (
 type PermissionActionKind string
 
 const (
-	PermissionActionToolCall PermissionActionKind = "tool_call"
+	PermissionActionToolCall    PermissionActionKind = "tool_call"
+	PermissionActionPushWebhook PermissionActionKind = "push_webhook"
+	PermissionActionSinkFile    PermissionActionKind = "sink_file"
+	PermissionActionSinkLog     PermissionActionKind = "sink_log"
 )
 
 // Effect describes the execution safety class declared on a Tool.
@@ -28,6 +31,7 @@ type PermissionAction struct {
 	ToolName         string
 	ToolCallID       string
 	ToolKind         string
+	Target           string
 	Effect           Effect
 	IdempotencyKey   string
 	SideEffects      []string
@@ -82,6 +86,7 @@ func publicPermissionAction(action internalpolicy.Action) PermissionAction {
 		ToolName:         action.ToolName,
 		ToolCallID:       action.ToolCallID,
 		ToolKind:         action.ToolKind,
+		Target:           action.Target,
 		Effect:           Effect(action.Effect),
 		IdempotencyKey:   action.IdempotencyKey,
 		SideEffects:      append([]string(nil), action.SideEffects...),
@@ -95,6 +100,7 @@ func internalPermissionAction(action PermissionAction) internalpolicy.Action {
 		ToolName:         action.ToolName,
 		ToolCallID:       action.ToolCallID,
 		ToolKind:         action.ToolKind,
+		Target:           action.Target,
 		Effect:           internalpolicy.Effect(action.Effect),
 		IdempotencyKey:   action.IdempotencyKey,
 		SideEffects:      append([]string(nil), action.SideEffects...),

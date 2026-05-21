@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -207,6 +208,122 @@ func TestRunnerPermissionPolicyConfiguresHTTPRuntime(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerDeniesWebhookPushByDefault(t *testing.T) {
+	called := false
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		called = true
+	}))
+	t.Cleanup(webhook.Close)
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if called {
+		t.Fatal("webhook was called despite default output policy denial")
+	}
+	assertOutputPermissionDecision(t, stream, "push_webhook", false)
+}
+
+func TestNewHTTPHandlerAllowsExplicitWebhookPushPolicy(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{provider: scripted, eventStream: stream, toolExecutor: outputAllowedExecutor("webhook")})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"status":"classified"}`)
+	assertOutputPermissionDecision(t, stream, "push_webhook", true)
+}
+
+func TestNewHTTPHandlerDeniesFileSinkByDefault(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "tickets.jsonl")
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(File(outputPath)),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	assertOutputPermissionDecision(t, stream, "sink_file", false)
+}
+
+func TestNewHTTPHandlerAuditsLogSinkPermission(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events"),
+		Sink(Log()),
+	}, httpRuntime{eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"token":"secret"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertOutputPermissionDecision(t, stream, "sink_log", true)
+	assertSinkLoggedEvent(t, stream, "input", `{"token":"[REDACTED]"}`)
+}
+
 func TestSubAgentCompositionCannotBypassPermissionPolicy(t *testing.T) {
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
@@ -332,4 +449,26 @@ func (p *denySubAgentPolicy) deniedSubAgent() bool {
 		}
 	}
 	return false
+}
+
+func outputAllowedExecutor(labels ...string) *tools.Executor {
+	return tools.NewExecutor(tools.WithPermissionPolicy(
+		policy.NewDefaultPolicy(policy.AllowSideEffects(labels...)),
+	))
+}
+
+func assertOutputPermissionDecision(t *testing.T, stream *events.EventStream, action string, allowed bool) {
+	t.Helper()
+	for _, event := range stream.List() {
+		if event.Kind != events.EventPermissionDecision {
+			continue
+		}
+		if event.Payload["action"] == action && event.Payload["allowed"] == allowed {
+			if _, leaked := event.Payload["target"]; leaked {
+				t.Fatalf("permission event leaked output target: %+v", event.Payload)
+			}
+			return
+		}
+	}
+	t.Fatalf("events = %+v, want permission decision action=%s allowed=%v", stream.List(), action, allowed)
 }

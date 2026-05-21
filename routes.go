@@ -347,7 +347,7 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 			}
 			writeJSONStatus(w, http.StatusOK, "ok")
 		case runtimeplan.TerminalPush:
-			if err := applyPushTerminal(req.Context(), route.plan.Terminal, input); err != nil {
+			if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, planRunResult{Output: input}, input); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
@@ -401,7 +401,7 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
 	case runtimeplan.TerminalPush:
-		if err := applyPushTerminal(req.Context(), route.plan.Terminal, output); err != nil {
+		if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, result, output); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}

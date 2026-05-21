@@ -223,7 +223,7 @@ func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Sink(File(outputPath)),
-	}, httpRuntime{provider: scripted})
+	}, httpRuntime{provider: scripted, toolExecutor: outputAllowedExecutor("file")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestNewHTTPHandlerFileSinkDoesNotLogToEventStream(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Sink(File(outputPath)),
-	}, httpRuntime{provider: scripted, eventStream: stream})
+	}, httpRuntime{provider: scripted, eventStream: stream, toolExecutor: outputAllowedExecutor("file")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestNewHTTPHandlerPushesPipelineOutputToWebhook(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Push(Webhook(webhook.URL)),
-	}, httpRuntime{provider: scripted})
+	}, httpRuntime{provider: scripted, toolExecutor: outputAllowedExecutor("webhook")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestNewHTTPHandlerPushesDirectInputToWebhook(t *testing.T) {
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /events"),
 		Push(Webhook(webhook.URL)),
-	}, httpRuntime{})
+	}, httpRuntime{toolExecutor: outputAllowedExecutor("webhook")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestNewHTTPHandlerReturnsFailureWhenWebhookPushFails(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Push(Webhook(webhook.URL)),
-	}, httpRuntime{provider: scripted})
+	}, httpRuntime{provider: scripted, toolExecutor: outputAllowedExecutor("webhook")})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
