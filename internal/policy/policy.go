@@ -19,7 +19,10 @@ const (
 type ActionKind string
 
 const (
-	ActionToolCall ActionKind = "tool_call"
+	ActionToolCall    ActionKind = "tool_call"
+	ActionPushWebhook ActionKind = "push_webhook"
+	ActionSinkFile    ActionKind = "sink_file"
+	ActionSinkLog     ActionKind = "sink_log"
 )
 
 type Action struct {
@@ -27,6 +30,7 @@ type Action struct {
 	ToolName         string
 	ToolCallID       string
 	ToolKind         string
+	Target           string
 	Effect           Effect
 	IdempotencyKey   string
 	SideEffects      []string
@@ -101,22 +105,32 @@ func (p DefaultPolicy) Authorize(ctx context.Context, action Action) (Decision, 
 		default:
 			return Deny("tool effect is not allowed"), nil
 		}
+	case ActionPushWebhook:
+		return p.authorizeSideEffectingAction(action, "webhook push"), nil
+	case ActionSinkFile:
+		return p.authorizeSideEffectingAction(action, "file sink"), nil
+	case ActionSinkLog:
+		return Allow("redacted log sink allowed"), nil
 	default:
 		return Deny("action kind is not allowed"), nil
 	}
 }
 
 func (p DefaultPolicy) authorizeSideEffectingTool(action Action) Decision {
+	return p.authorizeSideEffectingAction(action, "side-effecting tool")
+}
+
+func (p DefaultPolicy) authorizeSideEffectingAction(action Action, label string) Decision {
 	sideEffects := cleanLabels(action.SideEffects)
 	if len(sideEffects) == 0 {
-		return Deny("side-effecting tool requires explicit side effect labels")
+		return Deny(label + " requires explicit side effect labels")
 	}
 	for _, label := range sideEffects {
 		if _, ok := p.allowedSideEffects[label]; !ok {
 			return Deny("side effect " + label + " is not allowed")
 		}
 	}
-	return Allow("side-effecting tool call explicitly allowed")
+	return Allow(label + " explicitly allowed")
 }
 
 func normalizeEffect(effect Effect) Effect {

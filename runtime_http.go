@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"ouvrier/internal/events"
+	"ouvrier/internal/policy"
 	runtimeplan "ouvrier/internal/runtime"
 	"ouvrier/internal/schema"
 	"ouvrier/internal/state"
+	"ouvrier/internal/tools"
 )
 
 const shutdownTimeout = 5 * time.Second
@@ -92,7 +94,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush:
 		if r.plan.Terminal.PushWebhookURL != "" {
-			if err := applyPushTerminal(req.Context(), r.plan.Terminal, input); err != nil {
+			if err := r.runtime.applyPushTerminal(req.Context(), r.plan.Terminal, planRunResultFromInput(input, session), input); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
@@ -159,7 +161,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
 	case runtimeplan.TerminalPush:
-		if err := applyPushTerminal(req.Context(), r.plan.Terminal, output); err != nil {
+		if err := r.runtime.applyPushTerminal(req.Context(), r.plan.Terminal, result, output); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
@@ -584,9 +586,17 @@ func (rt httpRuntime) emitPipelineEvent(ctx context.Context, result planRunResul
 	return rt.emitRuntimeEvent(ctx, result, kind, payload)
 }
 
-func applyPushTerminal(ctx context.Context, terminal runtimeplan.Terminal, output string) error {
+func (rt httpRuntime) applyPushTerminal(ctx context.Context, terminal runtimeplan.Terminal, result planRunResult, output string) error {
 	if terminal.PushWebhookURL == "" {
 		return nil
+	}
+	if err := rt.authorizeOutputAction(ctx, result, policy.Action{
+		Kind:        policy.ActionPushWebhook,
+		Target:      terminal.PushWebhookURL,
+		Effect:      policy.EffectSideEffecting,
+		SideEffects: []string{"webhook"},
+	}); err != nil {
+		return err
 	}
 	return postWebhook(ctx, terminal.PushWebhookURL, output)
 }
@@ -616,11 +626,74 @@ func (rt httpRuntime) applySinkTerminal(ctx context.Context, terminal runtimepla
 	output := result.Output
 	if terminal.SinkFilePath == "" {
 		if terminal.SinkLog {
+			if err := rt.authorizeOutputAction(ctx, result, policy.Action{
+				Kind:   policy.ActionSinkLog,
+				Effect: policy.EffectReadOnly,
+			}); err != nil {
+				return err
+			}
 			return rt.appendLogSinkEvent(ctx, result, payloadKey, output)
 		}
 		return nil
 	}
+	if err := rt.authorizeOutputAction(ctx, result, policy.Action{
+		Kind:        policy.ActionSinkFile,
+		Target:      terminal.SinkFilePath,
+		Effect:      policy.EffectSideEffecting,
+		SideEffects: []string{"file"},
+	}); err != nil {
+		return err
+	}
 	return writeFileSink(terminal.SinkFilePath, output)
+}
+
+func (rt httpRuntime) authorizeOutputAction(ctx context.Context, result planRunResult, action policy.Action) error {
+	executor := rt.toolExecutor
+	if executor == nil {
+		executor = tools.NewExecutor()
+	}
+	decision, err := executor.Authorize(ctx, action)
+	if emitErr := rt.emitOutputPermissionDecision(ctx, result, action, decision, err); emitErr != nil {
+		return errors.Join(err, emitErr)
+	}
+	if err != nil {
+		return err
+	}
+	if !decision.Allowed {
+		return fmt.Errorf("%w: %s", policy.ErrDenied, decision.Reason)
+	}
+	return nil
+}
+
+func (rt httpRuntime) emitOutputPermissionDecision(ctx context.Context, result planRunResult, action policy.Action, decision policy.Decision, actionErr error) error {
+	payload := map[string]any{
+		"action":  string(action.Kind),
+		"allowed": decision.Allowed && actionErr == nil,
+		"effect":  string(action.Effect),
+	}
+	if len(action.SideEffects) > 0 {
+		payload["side_effects"] = append([]string(nil), action.SideEffects...)
+	}
+	if action.Target != "" {
+		payload["target_kind"] = outputTargetKind(action.Kind)
+	}
+	if actionErr != nil {
+		payload["error"] = actionErr.Error()
+	} else if !decision.Allowed && decision.Reason != "" {
+		payload["reason"] = decision.Reason
+	}
+	return rt.emitRuntimeEvent(ctx, result, events.EventPermissionDecision, payload)
+}
+
+func outputTargetKind(kind policy.ActionKind) string {
+	switch kind {
+	case policy.ActionPushWebhook:
+		return "webhook"
+	case policy.ActionSinkFile:
+		return "file"
+	default:
+		return "output"
+	}
 }
 
 func (rt httpRuntime) appendLogSinkEvent(ctx context.Context, result planRunResult, payloadKey, output string) error {

@@ -62,6 +62,19 @@ func (e *Executor) NewScope() *Executor {
 	return NewExecutor(WithPermissionPolicy(e.policy))
 }
 
+func (e *Executor) Authorize(ctx context.Context, action policy.Action) (policy.Decision, error) {
+	permissionPolicy := policy.PermissionPolicy(policy.NewDefaultPolicy())
+	if e != nil {
+		e.mu.RLock()
+		permissionPolicy = e.policy
+		e.mu.RUnlock()
+	}
+	if permissionPolicy == nil {
+		permissionPolicy = policy.NewDefaultPolicy()
+	}
+	return permissionPolicy.Authorize(ctx, action)
+}
+
 func (e *Executor) Register(name string, fn any, options ...RegisterOption) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
