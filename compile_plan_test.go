@@ -364,3 +364,24 @@ func TestCompilePlansCompilesAcceptedReply(t *testing.T) {
 		t.Fatalf("worker pool = %d, want 2", plans[0].Trigger.WorkerPool)
 	}
 }
+
+func TestCompilePlansCompilesSSEReply(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("GET /events"),
+		Pipe("stream status", Model("anthropic/claude-sonnet-4-6")),
+		Reply(SSE()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	terminal := plans[0].Terminal
+	if terminal.Kind != runtimeplan.TerminalReply {
+		t.Fatalf("terminal kind = %q, want reply", terminal.Kind)
+	}
+	if !terminal.SSE {
+		t.Fatal("terminal SSE = false, want true")
+	}
+	if terminal.Async {
+		t.Fatal("terminal Async = true, want false")
+	}
+}

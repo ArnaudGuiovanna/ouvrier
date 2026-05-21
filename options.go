@@ -32,6 +32,21 @@ func (f JSONReply[T]) resultSchemaType() reflect.Type {
 	return f.schema
 }
 
+type SSEReply struct{}
+
+// SSE declares a Server-Sent Events reply format.
+func SSE() SSEReply {
+	return SSEReply{}
+}
+
+func (SSEReply) validateReplyFormat() error {
+	return nil
+}
+
+func (SSEReply) sseReply() bool {
+	return true
+}
+
 type AcceptedReply struct{}
 
 // Accepted declares an HTTP 202 reply while the pipeline continues asynchronously.
@@ -49,6 +64,10 @@ func (AcceptedReply) asyncReply() bool {
 
 type asyncReplyFormat interface {
 	asyncReply() bool
+}
+
+type sseReplyFormat interface {
+	sseReply() bool
 }
 
 type replyNode struct {

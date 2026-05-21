@@ -91,6 +91,10 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
+		if r.plan.Terminal.SSE {
+			writeSSEOutput(w, http.StatusOK, "output", directReplyOKOutput)
+			return
+		}
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush:
 		if r.plan.Terminal.PushWebhookURL != "" {
@@ -114,6 +118,11 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
+	eventStartID := uint64(0)
+	if r.plan.Terminal.Kind == runtimeplan.TerminalReply && r.plan.Terminal.SSE {
+		r.runtime = r.runtime.withEventStream()
+		eventStartID = r.runtime.lastEventID()
+	}
 	input, session, ok := r.prepareRequestInput(w, req)
 	if !ok {
 		return
@@ -130,6 +139,10 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 			_, _ = r.runtime.runPlanWithSession(ctx, r.plan, input, session)
 		}()
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
+		return
+	}
+	if r.plan.Terminal.Kind == runtimeplan.TerminalReply && r.plan.Terminal.SSE {
+		r.servePipelineSSE(w, req, input, session, eventStartID)
 		return
 	}
 

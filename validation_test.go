@@ -22,6 +22,17 @@ func TestValidateAcceptsHTTPPipelineWithReply(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsHTTPPipelineWithSSEReply(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From("GET /events"),
+		ovr.Pipe("stream status", ovr.Model("anthropic/claude-sonnet-4-6")),
+		ovr.Reply(ovr.SSE()),
+	)
+	if err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
 func TestValidateAcceptsAsyncPipelineWithSink(t *testing.T) {
 	err := ovr.Validate(
 		ovr.From(ovr.Cron("0 6 * * *")),
