@@ -69,6 +69,16 @@ func TestValidateAcceptsWebhookPushTerminal(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidWebhookProviderName(t *testing.T) {
+	err := ovr.Validate(
+		ovr.From(ovr.Webhook("github/hooks")),
+		ovr.Sink(ovr.Log()),
+	)
+	if !errors.Is(err, ovr.ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
+
 func TestValidateAcceptsQueuePushTerminal(t *testing.T) {
 	err := ovr.Validate(
 		ovr.From("POST /tickets"),

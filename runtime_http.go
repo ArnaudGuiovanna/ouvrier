@@ -44,6 +44,18 @@ func newHTTPHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler,
 	if err != nil {
 		return nil, err
 	}
+	return newHTTPHandlerFromRoutes(routes, runtime)
+}
+
+func newWebhookHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler, error) {
+	routes, err := webhookRoutesFromNodes(nodes)
+	if err != nil {
+		return nil, err
+	}
+	return newHTTPHandlerFromRoutes(routes, runtime)
+}
+
+func newHTTPHandlerFromRoutes(routes []httpRoute, runtime httpRuntime) (http.Handler, error) {
 	if err := validateHTTPTriggerSecurityConfig(routes, runtime); err != nil {
 		return nil, err
 	}
@@ -241,7 +253,7 @@ func (r httpRoute) prepareRequestInput(w http.ResponseWriter, req *http.Request)
 	if duplicate {
 		return "", session, false
 	}
-	input, err := buildHTTPPipelineInput(body, httpPathParams(req, r.plan.Trigger.Path))
+	input, err := r.buildPipelineInput(body, httpPathParams(req, r.plan.Trigger.Path))
 	if err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_request")
 		return "", nil, false
@@ -416,6 +428,35 @@ func buildHTTPPipelineInput(body string, pathParams map[string]string) (string, 
 		}
 	}
 
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func (r httpRoute) buildPipelineInput(body string, pathParams map[string]string) (string, error) {
+	switch r.plan.Trigger.Kind {
+	case runtimeplan.TriggerWebhook:
+		return buildWebhookPipelineInput(body, r.plan.Trigger.Value)
+	default:
+		return buildHTTPPipelineInput(body, pathParams)
+	}
+}
+
+func buildWebhookPipelineInput(body, provider string) (string, error) {
+	input := map[string]any{
+		"trigger":  "webhook",
+		"provider": strings.TrimSpace(provider),
+	}
+	if strings.TrimSpace(body) != "" {
+		var decoded any
+		if err := json.Unmarshal([]byte(body), &decoded); err == nil {
+			input["body"] = decoded
+		} else {
+			input["body"] = body
+		}
+	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return "", err

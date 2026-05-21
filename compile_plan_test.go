@@ -345,6 +345,33 @@ func TestCompilePlansCompilesLogSink(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesWebhookTrigger(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From(Webhook("github"), IdempotencyKey("X-GitHub-Delivery"), VerifySignature("GITHUB_WEBHOOK_SECRET", "X-Hub-Signature-256")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("plans = %d, want 1", len(plans))
+	}
+
+	trigger := plans[0].Trigger
+	if trigger.Kind != runtimeplan.TriggerWebhook {
+		t.Fatalf("trigger kind = %q, want %q", trigger.Kind, runtimeplan.TriggerWebhook)
+	}
+	if trigger.Value != "github" {
+		t.Fatalf("trigger value = %q, want github", trigger.Value)
+	}
+	if trigger.IdempotencyHeader != "X-GitHub-Delivery" {
+		t.Fatalf("idempotency header = %q, want X-GitHub-Delivery", trigger.IdempotencyHeader)
+	}
+	if trigger.SignatureEnv != "GITHUB_WEBHOOK_SECRET" || trigger.SignatureHeader != "X-Hub-Signature-256" {
+		t.Fatalf("signature config = %q/%q, want env/header", trigger.SignatureEnv, trigger.SignatureHeader)
+	}
+}
+
 func TestCompilePlansCompilesWebhookPush(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /tickets"),

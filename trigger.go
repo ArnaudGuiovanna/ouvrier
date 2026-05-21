@@ -55,6 +55,9 @@ func (t WebhookEndpoint) validateTrigger() error {
 	if t.value == "" {
 		return fmt.Errorf("%w: webhook provider is required", ErrInvalidNode)
 	}
+	if !validWebhookProviderName(t.value) {
+		return fmt.Errorf("%w: webhook provider must contain only letters, digits, dot, dash, or underscore", ErrInvalidNode)
+	}
 	return nil
 }
 
@@ -67,6 +70,24 @@ func (t WebhookEndpoint) validatePushTarget() error {
 
 func (t WebhookEndpoint) pushWebhookURL() string {
 	return t.value
+}
+
+func validWebhookProviderName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // StreamTrigger is a stream trigger source.
