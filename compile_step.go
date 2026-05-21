@@ -6,6 +6,19 @@ import (
 	runtimeplan "ouvrier/internal/runtime"
 )
 
+func compileRuntimeStep(node Node) (runtimeplan.Step, error) {
+	switch node.nodeKind() {
+	case nodeKindPipe:
+		return compileStep(node)
+	case nodeKindParallel:
+		return compileParallelStep(node)
+	case nodeKindMap:
+		return compileMapStep(node)
+	default:
+		return runtimeplan.Step{}, ErrInvalidNode
+	}
+}
+
 func compileStep(node Node) (runtimeplan.Step, error) {
 	pipe, ok := pipeNodeFromNode(node)
 	if !ok {
@@ -45,6 +58,47 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		}
 	}
 	return step, nil
+}
+
+func compileParallelStep(node Node) (runtimeplan.Step, error) {
+	parallel, ok := parallelNodeFromNode(node)
+	if !ok {
+		return runtimeplan.Step{}, ErrInvalidNode
+	}
+	branches := make([]runtimeplan.Pipeline, 0, len(parallel.nodes))
+	for i, child := range parallel.nodes {
+		step, err := compileStep(child)
+		if err != nil {
+			return runtimeplan.Step{}, fmt.Errorf("Parallel item %d: %w", i, err)
+		}
+		branches = append(branches, runtimeplan.Pipeline{Steps: []runtimeplan.Step{step}})
+	}
+	return runtimeplan.Step{
+		Kind:      runtimeplan.StepParallel,
+		Branches:  branches,
+		PartialOK: parallel.config.partialOK,
+	}, nil
+}
+
+func compileMapStep(node Node) (runtimeplan.Step, error) {
+	mapNode, ok := mapNodeFromNode(node)
+	if !ok {
+		return runtimeplan.Step{}, ErrInvalidNode
+	}
+	steps := make([]runtimeplan.Step, 0, len(mapNode.nodes))
+	for i, child := range mapNode.nodes {
+		step, err := compileStep(child)
+		if err != nil {
+			return runtimeplan.Step{}, fmt.Errorf("Map item %d: %w", i, err)
+		}
+		steps = append(steps, step)
+	}
+	return runtimeplan.Step{
+		Kind:        runtimeplan.StepMap,
+		MapPipeline: runtimeplan.Pipeline{Steps: steps},
+		Concurrency: mapNode.config.concurrency,
+		PartialOK:   mapNode.config.partialOK,
+	}, nil
 }
 
 func runtimeSkillsFromPipe(skills []skillSpec) []runtimeplan.Skill {
@@ -219,5 +273,33 @@ func pipeNodeFromNode(node Node) (pipeNode, bool) {
 		return *node, true
 	default:
 		return pipeNode{}, false
+	}
+}
+
+func parallelNodeFromNode(node Node) (parallelNode, bool) {
+	switch node := node.(type) {
+	case parallelNode:
+		return node, true
+	case *parallelNode:
+		if node == nil {
+			return parallelNode{}, false
+		}
+		return *node, true
+	default:
+		return parallelNode{}, false
+	}
+}
+
+func mapNodeFromNode(node Node) (mapNode, bool) {
+	switch node := node.(type) {
+	case mapNode:
+		return node, true
+	case *mapNode:
+		if node == nil {
+			return mapNode{}, false
+		}
+		return *node, true
+	default:
+		return mapNode{}, false
 	}
 }

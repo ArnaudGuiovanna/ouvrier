@@ -5,6 +5,8 @@ type nodeKind uint8
 const (
 	nodeKindFrom nodeKind = iota
 	nodeKindPipe
+	nodeKindParallel
+	nodeKindMap
 	nodeKindReply
 	nodeKindPush
 	nodeKindSink

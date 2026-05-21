@@ -33,7 +33,9 @@ type Trigger struct {
 type StepKind string
 
 const (
-	StepPipe StepKind = "pipe"
+	StepPipe     StepKind = "pipe"
+	StepParallel StepKind = "parallel"
+	StepMap      StepKind = "map"
 )
 
 type Step struct {
@@ -44,6 +46,10 @@ type Step struct {
 	Skills          []Skill
 	MCPServers      []MCPServer
 	SubAgents       []SubAgent
+	Branches        []Pipeline
+	MapPipeline     Pipeline
+	Concurrency     int
+	PartialOK       bool
 	ResultSchema    *ResultSchema
 	Retry           *Retry
 	Budget          Budget

@@ -483,6 +483,9 @@ func terminalReplySchemaAlreadyValidated(plan runtimeplan.Plan) bool {
 		return false
 	}
 	lastStep := plan.Steps[len(plan.Steps)-1]
+	if lastStep.Kind != runtimeplan.StepPipe {
+		return false
+	}
 	if lastStep.ResultSchema == nil {
 		return false
 	}
