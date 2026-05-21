@@ -245,9 +245,14 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			_ = closeMCP()
 			return result, err
 		}
+		systemPrompt, err := rt.systemPromptForStep(ctx, step, scope)
+		if err != nil {
+			_ = closeMCP()
+			return result, err
+		}
 		harnessOptions := []harness.Option{
 			harness.WithModel(step.Model),
-			harness.WithSystemPrompt(step.Goal),
+			harness.WithSystemPrompt(systemPrompt),
 			harness.WithToolExecutor(executor),
 			harness.WithTools(specs...),
 		}

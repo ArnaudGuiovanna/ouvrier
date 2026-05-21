@@ -101,6 +101,29 @@ func TestCompilePlansCompilesPipeRetryPolicy(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesPipeSkills(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("triage ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Skill("ticket-triage"),
+			Skill("reply-style"),
+		),
+		Reply(JSON[planReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	skills := plans[0].Steps[0].Skills
+	if got, want := len(skills), 2; got != want {
+		t.Fatalf("skills = %d, want %d", got, want)
+	}
+	if skills[0].Name != "ticket-triage" || skills[1].Name != "reply-style" {
+		t.Fatalf("skills = %+v, want declared order", skills)
+	}
+}
+
 func TestCompilePlansInjectsTerminalReplySchemaIntoFinalPipe(t *testing.T) {
 	plans, err := compilePlans([]Node{
 		From("POST /tickets"),
