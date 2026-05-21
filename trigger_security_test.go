@@ -11,7 +11,31 @@ import (
 	"testing"
 
 	"ouvrier/internal/events"
+	"ouvrier/internal/state"
 )
+
+func TestCompilePlansCompilesIdempotencyKeyOption(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /hooks", IdempotencyKey("X-Delivery-ID")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if got := plans[0].Trigger.IdempotencyHeader; got != "X-Delivery-ID" {
+		t.Fatalf("idempotency header = %q, want X-Delivery-ID", got)
+	}
+}
+
+func TestValidateRejectsInvalidIdempotencyKeyOption(t *testing.T) {
+	err := Validate(
+		From("POST /hooks", IdempotencyKey(" ")),
+		Sink(Log()),
+	)
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode", err)
+	}
+}
 
 func TestCompilePlansCompilesVerifySignatureOption(t *testing.T) {
 	plans, err := compilePlans([]Node{
@@ -60,6 +84,101 @@ func TestNewHTTPHandlerRejectsSignedTriggerWhenSecretIsMissing(t *testing.T) {
 	}, httpRuntime{})
 	if !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("newHTTPHandlerWithRuntime error = %v, want ErrInvalidNode", err)
+	}
+}
+
+func TestNewHTTPHandlerRejectsIdempotentTriggerWithoutStateStore(t *testing.T) {
+	_, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /hooks", IdempotencyKey("X-Delivery-ID")),
+		Sink(Log()),
+	}, httpRuntime{})
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("newHTTPHandlerWithRuntime error = %v, want ErrInvalidNode", err)
+	}
+}
+
+func TestNewHTTPHandlerRejectsIdempotentTriggerWithoutHeader(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /hooks", IdempotencyKey("X-Delivery-ID")),
+		Sink(Log()),
+	}, httpRuntime{stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/hooks", strings.NewReader(`{"event":"push"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	assertNoSinkLoggedEvent(t, stream)
+}
+
+func TestNewHTTPHandlerDoesNotDuplicateIdempotentTriggerSideEffects(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /hooks", IdempotencyKey("X-Delivery-ID")),
+		Sink(Log()),
+	}, httpRuntime{stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	first := httptest.NewRecorder()
+	firstReq := httptest.NewRequest(http.MethodPost, "/hooks", strings.NewReader(`{"event":"first"}`))
+	firstReq.Header.Set("X-Delivery-ID", "delivery-1")
+	handler.ServeHTTP(first, firstReq)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want %d, body=%s", first.Code, http.StatusAccepted, first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	secondReq := httptest.NewRequest(http.MethodPost, "/hooks", strings.NewReader(`{"event":"duplicate"}`))
+	secondReq.Header.Set("X-Delivery-ID", "delivery-1")
+	handler.ServeHTTP(second, secondReq)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second status = %d, want %d, body=%s", second.Code, http.StatusAccepted, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), "duplicate_idempotency_key") {
+		t.Fatalf("second body = %s, want duplicate_idempotency_key", second.Body.String())
+	}
+
+	sinkEvents := 0
+	idempotencyEvents := 0
+	duplicateDecisions := 0
+	for _, event := range stream.List() {
+		switch event.Kind {
+		case events.EventSinkLogged:
+			sinkEvents++
+			if event.Payload["input"] != `{"event":"first"}` {
+				t.Fatalf("sink event payload = %+v, want first input only", event.Payload)
+			}
+		case events.EventIdempotencyDecision:
+			idempotencyEvents++
+			if event.Payload["decision"] == "duplicate" {
+				duplicateDecisions++
+			}
+			if _, leaked := event.Payload["key"]; leaked {
+				t.Fatalf("idempotency event leaked key payload: %+v", event.Payload)
+			}
+		}
+	}
+	if sinkEvents != 1 {
+		t.Fatalf("sink events = %d, want one side effect", sinkEvents)
+	}
+	if idempotencyEvents != 2 || duplicateDecisions != 1 {
+		t.Fatalf("idempotency events=%d duplicate=%d, want reserved and duplicate decisions", idempotencyEvents, duplicateDecisions)
 	}
 }
 

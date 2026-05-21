@@ -18,15 +18,16 @@ const (
 )
 
 type Trigger struct {
-	Kind            TriggerKind
-	Method          string
-	Path            string
-	Expr            string
-	Value           string
-	URI             string
-	WorkerPool      int
-	SignatureEnv    string
-	SignatureHeader string
+	Kind              TriggerKind
+	Method            string
+	Path              string
+	Expr              string
+	Value             string
+	URI               string
+	WorkerPool        int
+	IdempotencyHeader string
+	SignatureEnv      string
+	SignatureHeader   string
 }
 
 type StepKind string

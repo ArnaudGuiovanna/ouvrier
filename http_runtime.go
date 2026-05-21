@@ -97,8 +97,17 @@ func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input 
 	return result.Output, err
 }
 
+func (rt httpRuntime) runPlanWithSession(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session) (string, error) {
+	result, err := rt.runPlanResultWithSession(ctx, plan, input, session)
+	return result.Output, err
+}
+
 func (rt httpRuntime) runPlanResult(ctx context.Context, plan runtimeplan.Plan, input string) (planRunResult, error) {
-	pipelineSession, err := newHTTPPipelineSession(plan)
+	return rt.runPlanResultWithSession(ctx, plan, input, nil)
+}
+
+func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session) (planRunResult, error) {
+	pipelineSession, err := pipelineSessionForPlan(plan, session)
 	if err != nil {
 		return planRunResult{Output: input}, err
 	}
@@ -121,6 +130,13 @@ func (rt httpRuntime) runPlanResult(ctx context.Context, plan runtimeplan.Plan, 
 		return result, err
 	}
 	return result, nil
+}
+
+func pipelineSessionForPlan(plan runtimeplan.Plan, session *runtimeplan.Session) (runtimeplan.Session, error) {
+	if session != nil {
+		return *session, nil
+	}
+	return newHTTPPipelineSession(plan)
 }
 
 func newHTTPPipelineSession(plan runtimeplan.Plan) (runtimeplan.Session, error) {
@@ -190,6 +206,15 @@ type planRunResult struct {
 	Output     string
 	Session    runtimeplan.Session
 	HasSession bool
+}
+
+func planRunResultFromInput(input string, session *runtimeplan.Session) planRunResult {
+	result := planRunResult{Output: input}
+	if session != nil {
+		result.Session = *session
+		result.HasSession = true
+	}
+	return result
 }
 
 func (rt httpRuntime) runSteps(ctx context.Context, steps []runtimeplan.Step, input string, scope planRunScope) (string, error) {

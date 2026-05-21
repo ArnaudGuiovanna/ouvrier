@@ -89,10 +89,11 @@ type FromOption interface {
 }
 
 type fromConfig struct {
-	workerPool      int
-	signatureEnv    string
-	signatureHeader string
-	err             error
+	workerPool        int
+	idempotencyHeader string
+	signatureEnv      string
+	signatureHeader   string
+	err               error
 }
 
 type workerPoolOption struct {
@@ -110,6 +111,23 @@ func (o workerPoolOption) applyFrom(config *fromConfig) {
 		return
 	}
 	config.workerPool = o.limit
+}
+
+type idempotencyKeyOption struct {
+	header string
+}
+
+// IdempotencyKey prevents duplicate trigger deliveries based on a request header.
+func IdempotencyKey(header string) FromOption {
+	return idempotencyKeyOption{header: strings.TrimSpace(header)}
+}
+
+func (o idempotencyKeyOption) applyFrom(config *fromConfig) {
+	if o.header == "" {
+		config.setErr(fmt.Errorf("%w: IdempotencyKey header is required", ErrInvalidNode))
+		return
+	}
+	config.idempotencyHeader = o.header
 }
 
 type verifySignatureOption struct {

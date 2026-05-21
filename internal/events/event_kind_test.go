@@ -20,6 +20,7 @@ func TestEventKindSpecMinimumConstants(t *testing.T) {
 		"tool_call_completed":      EventToolCallCompleted,
 		"tool_call_failed":         EventToolCallFailed,
 		"permission_decision":      EventPermissionDecision,
+		"idempotency_decision":     EventIdempotencyDecision,
 		"schema_validation_passed": EventSchemaValidationPassed,
 		"schema_validation_failed": EventSchemaValidationFailed,
 		"schema_repair_started":    EventSchemaRepairStarted,

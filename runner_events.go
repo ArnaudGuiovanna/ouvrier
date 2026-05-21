@@ -33,7 +33,8 @@ const (
 	EventToolCallCompleted EventKind = "tool_call_completed"
 	EventToolCallFailed    EventKind = "tool_call_failed"
 
-	EventPermissionDecision EventKind = "permission_decision"
+	EventPermissionDecision  EventKind = "permission_decision"
+	EventIdempotencyDecision EventKind = "idempotency_decision"
 
 	EventSchemaValidationPassed EventKind = "schema_validation_passed"
 	EventSchemaValidationFailed EventKind = "schema_validation_failed"

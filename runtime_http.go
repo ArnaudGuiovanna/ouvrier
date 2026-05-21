@@ -42,7 +42,7 @@ func newHTTPHandlerWithRuntime(nodes []Node, runtime httpRuntime) (http.Handler,
 	if err != nil {
 		return nil, err
 	}
-	if err := validateHTTPSignatureConfig(routes); err != nil {
+	if err := validateHTTPTriggerSecurityConfig(routes, runtime); err != nil {
 		return nil, err
 	}
 	runtime.adminRoutes = routes
@@ -74,7 +74,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		r.servePipeline(w, req)
 		return
 	}
-	input, ok := r.prepareRequestInput(w, req)
+	input, session, ok := r.prepareRequestInput(w, req)
 	if !ok {
 		return
 	}
@@ -100,7 +100,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	case runtimeplan.TerminalSink:
 		if r.plan.Terminal.SinkFilePath != "" || r.plan.Terminal.SinkLog {
-			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, planRunResult{Output: input}, "input"); err != nil {
+			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, planRunResultFromInput(input, session), "input"); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
@@ -112,7 +112,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
-	input, ok := r.prepareRequestInput(w, req)
+	input, session, ok := r.prepareRequestInput(w, req)
 	if !ok {
 		return
 	}
@@ -125,7 +125,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		ctx := context.WithoutCancel(req.Context())
 		go func() {
 			defer r.releaseWorker()
-			_, _ = r.runtime.runPlan(ctx, r.plan, input)
+			_, _ = r.runtime.runPlanWithSession(ctx, r.plan, input, session)
 		}()
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 		return
@@ -137,7 +137,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	}
 	defer r.releaseWorker()
 
-	result, err := r.runtime.runPlanResult(req.Context(), r.plan, input)
+	result, err := r.runtime.runPlanResultWithSession(req.Context(), r.plan, input, session)
 	if err != nil {
 		switch {
 		case errors.Is(err, errHTTPProviderNotConfigured):
@@ -194,8 +194,11 @@ func (r httpRoute) releaseWorker() {
 	<-r.workerPool
 }
 
-func validateHTTPSignatureConfig(routes []httpRoute) error {
+func validateHTTPTriggerSecurityConfig(routes []httpRoute, rt httpRuntime) error {
 	for _, route := range routes {
+		if strings.TrimSpace(route.plan.Trigger.IdempotencyHeader) != "" && rt.stateStore == nil {
+			return fmt.Errorf("%w: IdempotencyKey requires a StateStore", ErrInvalidNode)
+		}
 		env := strings.TrimSpace(route.plan.Trigger.SignatureEnv)
 		if env == "" {
 			continue
@@ -207,21 +210,28 @@ func validateHTTPSignatureConfig(routes []httpRoute) error {
 	return nil
 }
 
-func (r httpRoute) prepareRequestInput(w http.ResponseWriter, req *http.Request) (string, bool) {
+func (r httpRoute) prepareRequestInput(w http.ResponseWriter, req *http.Request) (string, *runtimeplan.Session, bool) {
 	body, err := readHTTPRequestInput(req)
 	if err != nil {
 		writeJSONStatus(w, http.StatusRequestEntityTooLarge, "request_body_too_large")
-		return "", false
+		return "", nil, false
 	}
 	if !r.verifyRequestSignature(w, req, []byte(body)) {
-		return "", false
+		return "", nil, false
+	}
+	session, duplicate, ok := r.runtime.reserveTriggerIdempotency(w, req, r.plan)
+	if !ok {
+		return "", nil, false
+	}
+	if duplicate {
+		return "", session, false
 	}
 	input, err := buildHTTPPipelineInput(body, httpPathParams(req, r.plan.Trigger.Path))
 	if err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_request")
-		return "", false
+		return "", nil, false
 	}
-	return input, true
+	return input, session, true
 }
 
 func (r httpRoute) verifyRequestSignature(w http.ResponseWriter, req *http.Request, payload []byte) bool {
@@ -267,6 +277,71 @@ func decodeHMACSHA256Signature(raw string) ([]byte, bool) {
 		return nil, false
 	}
 	return decoded, true
+}
+
+func (rt httpRuntime) reserveTriggerIdempotency(w http.ResponseWriter, req *http.Request, plan runtimeplan.Plan) (*runtimeplan.Session, bool, bool) {
+	headerName := strings.TrimSpace(plan.Trigger.IdempotencyHeader)
+	if headerName == "" {
+		return nil, false, true
+	}
+	value := strings.TrimSpace(req.Header.Get(headerName))
+	if value == "" {
+		writeJSONStatus(w, http.StatusBadRequest, "idempotency_key_missing")
+		return nil, false, false
+	}
+	if rt.stateStore == nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_missing")
+		return nil, false, false
+	}
+	session, err := newHTTPPipelineSession(plan)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "idempotency_error")
+		return nil, false, false
+	}
+	if err := rt.stateStore.SaveSession(req.Context(), session); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return nil, false, false
+	}
+
+	key := triggerIdempotencyReservationKey(plan, headerName, value)
+	existingExecID, reserved, err := rt.stateStore.ReserveIdempotency(req.Context(), key, session.ExecID)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return nil, false, false
+	}
+	payload := map[string]any{
+		"scope":  "trigger",
+		"method": plan.Trigger.Method,
+		"path":   plan.Trigger.Path,
+		"header": http.CanonicalHeaderKey(headerName),
+	}
+	if reserved {
+		payload["decision"] = "reserved"
+		if err := rt.emitSessionEvent(req.Context(), session, events.EventIdempotencyDecision, payload); err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
+			return nil, false, false
+		}
+		return &session, false, true
+	}
+	payload["decision"] = "duplicate"
+	payload["existing_exec_id"] = existingExecID
+	if err := rt.emitSessionEvent(req.Context(), session, events.EventIdempotencyDecision, payload); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
+		return nil, false, false
+	}
+	writeJSONStatus(w, http.StatusAccepted, "duplicate_idempotency_key")
+	return &session, true, true
+}
+
+func triggerIdempotencyReservationKey(plan runtimeplan.Plan, headerName, value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return strings.Join([]string{
+		"trigger",
+		plan.Trigger.Method,
+		plan.Trigger.Path,
+		http.CanonicalHeaderKey(headerName),
+		hex.EncodeToString(sum[:]),
+	}, ":")
 }
 
 func readHTTPRequestInput(req *http.Request) (string, error) {
