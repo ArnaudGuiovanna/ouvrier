@@ -12,6 +12,7 @@ type PermissionActionKind string
 const (
 	PermissionActionToolCall    PermissionActionKind = "tool_call"
 	PermissionActionPushWebhook PermissionActionKind = "push_webhook"
+	PermissionActionPushQueue   PermissionActionKind = "push_queue"
 	PermissionActionSinkFile    PermissionActionKind = "sink_file"
 	PermissionActionSinkLog     PermissionActionKind = "sink_log"
 )

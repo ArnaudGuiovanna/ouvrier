@@ -26,6 +26,23 @@ func TestAllowSideEffectsPublicPolicyAllowsExplicitLabel(t *testing.T) {
 	}
 }
 
+func TestAllowSideEffectsPublicPolicyAllowsQueuePush(t *testing.T) {
+	permissionPolicy := ovr.AllowSideEffects("queue")
+
+	decision, err := permissionPolicy.Authorize(context.Background(), ovr.PermissionAction{
+		Kind:        ovr.PermissionActionPushQueue,
+		Target:      "nats://127.0.0.1:4222/tickets",
+		Effect:      ovr.EffectSideEffecting,
+		SideEffects: []string{"queue"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	}
+}
+
 func TestNewRunnerWithPermissionPolicyKeepsRunValidation(t *testing.T) {
 	runner := ovr.NewRunner(ovr.WithPermissionPolicy(ovr.AllowSideEffects("email")))
 
