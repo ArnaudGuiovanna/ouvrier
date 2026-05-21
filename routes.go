@@ -49,6 +49,41 @@ func httpRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
 	return routes, nil
 }
 
+func webhookRoutesFromNodes(nodes []Node) ([]httpRoute, error) {
+	plans, err := compilePlans(nodes)
+	if err != nil {
+		return nil, err
+	}
+
+	routes := make([]httpRoute, 0, len(plans))
+	for _, plan := range plans {
+		if plan.Trigger.Kind != runtimeplan.TriggerWebhook {
+			return nil, fmt.Errorf("%w: only webhook triggers are supported by this runtime slice", ErrRunNotImplemented)
+		}
+		path, err := webhookRoutePath(plan.Trigger.Value)
+		if err != nil {
+			return nil, err
+		}
+		plan.Trigger.Method = http.MethodPost
+		plan.Trigger.Path = path
+		routes = append(routes, httpRoute{
+			method:     http.MethodPost,
+			path:       path,
+			plan:       plan,
+			workerPool: newWorkerPool(plan.Trigger.WorkerPool),
+		})
+	}
+	return routes, nil
+}
+
+func webhookRoutePath(provider string) (string, error) {
+	provider = strings.TrimSpace(provider)
+	if !validWebhookProviderName(provider) {
+		return "", fmt.Errorf("%w: webhook provider must contain only letters, digits, dot, dash, or underscore", ErrInvalidNode)
+	}
+	return "/webhooks/" + provider, nil
+}
+
 func newWorkerPool(limit int) chan struct{} {
 	if limit <= 0 {
 		return nil
@@ -259,7 +294,7 @@ func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
 		return
 	}
-	input, err := buildHTTPPipelineInput(body, pathParams)
+	input, err := route.buildPipelineInput(body, pathParams)
 	if err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
 		return

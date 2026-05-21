@@ -153,6 +153,13 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 			return err
 		}
 		serveErr = serveHTTP(addr, handler)
+	case runtimeplan.TriggerWebhook:
+		handler, err := newWebhookHandlerWithRuntime(nodes, runtime)
+		if err != nil {
+			_ = closeRuntime()
+			return err
+		}
+		serveErr = serveHTTP(addr, handler)
 	case runtimeplan.TriggerCron:
 		serveErr = serveCronPlans(runtime, plans)
 	default:
