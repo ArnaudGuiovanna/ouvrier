@@ -3,6 +3,7 @@ package ovr
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	internalsandbox "ouvrier/internal/sandbox"
@@ -28,12 +29,34 @@ type runnerConfig struct {
 
 // SandboxConfig describes an explicit filesystem workspace boundary.
 type SandboxConfig struct {
-	root string
+	root       string
+	allowedEnv []string
 }
 
 // Sandbox configures a workspace root used for filesystem-bound capabilities.
-func Sandbox(root string) SandboxConfig {
-	return SandboxConfig{root: strings.TrimSpace(root)}
+func Sandbox(root string, options ...SandboxOption) SandboxConfig {
+	config := SandboxConfig{root: strings.TrimSpace(root)}
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
+	return config
+}
+
+// SandboxOption configures a sandbox boundary.
+type SandboxOption func(*SandboxConfig)
+
+// AllowEnv allows selected environment variables inside sandboxed capabilities.
+func AllowEnv(keys ...string) SandboxOption {
+	return func(config *SandboxConfig) {
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				config.allowedEnv = append(config.allowedEnv, key)
+			}
+		}
+	}
 }
 
 // RunnerOption configures a Runner.
@@ -178,13 +201,27 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 		rt.hookBus = hookBus
 	}
 	if r.sandbox.root != "" {
-		sandbox, err := internalsandbox.New(r.sandbox.root)
+		sandbox, err := internalsandbox.New(r.sandbox.root,
+			internalsandbox.WithEnvironment(currentEnvironment()),
+			internalsandbox.WithAllowedEnv(r.sandbox.allowedEnv...),
+		)
 		if err != nil {
 			return err
 		}
 		rt.sandbox = sandbox
 	}
 	return nil
+}
+
+func currentEnvironment() map[string]string {
+	env := make(map[string]string)
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	return env
 }
 
 func (cfg *runnerConfig) setErr(err error) {

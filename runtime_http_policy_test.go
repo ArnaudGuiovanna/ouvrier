@@ -428,6 +428,24 @@ func TestRunnerSandboxConfiguresFileSinkBoundary(t *testing.T) {
 	}
 }
 
+func TestRunnerSandboxAllowsSelectedEnvironmentOnly(t *testing.T) {
+	t.Setenv("OVR_ALLOWED", "ok")
+	t.Setenv("OVR_SECRET", "nope")
+	runner := NewRunner(WithSandbox(Sandbox(t.TempDir(), AllowEnv("OVR_ALLOWED"))))
+	rt := httpRuntime{}
+	if err := runner.configureHTTPRuntime(&rt); err != nil {
+		t.Fatalf("configureHTTPRuntime returned error: %v", err)
+	}
+
+	env := rt.sandbox.Environment()
+	if env["OVR_ALLOWED"] != "ok" {
+		t.Fatalf("OVR_ALLOWED = %q, want ok", env["OVR_ALLOWED"])
+	}
+	if _, leaked := env["OVR_SECRET"]; leaked {
+		t.Fatalf("sandbox environment leaked OVR_SECRET: %+v", env)
+	}
+}
+
 func TestNewHTTPHandlerAuditsLogSinkPermission(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
