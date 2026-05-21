@@ -3,7 +3,9 @@ package ovr
 import (
 	"errors"
 	"fmt"
+	"strings"
 
+	internalsandbox "ouvrier/internal/sandbox"
 	"ouvrier/internal/tools"
 )
 
@@ -12,6 +14,7 @@ type Runner struct {
 	permissionPolicy PermissionPolicy
 	stateStore       StateStore
 	hooks            *Hooks
+	sandbox          SandboxConfig
 	err              error
 }
 
@@ -19,7 +22,18 @@ type runnerConfig struct {
 	permissionPolicy PermissionPolicy
 	stateStore       StateStore
 	hooks            *Hooks
+	sandbox          SandboxConfig
 	err              error
+}
+
+// SandboxConfig describes an explicit filesystem workspace boundary.
+type SandboxConfig struct {
+	root string
+}
+
+// Sandbox configures a workspace root used for filesystem-bound capabilities.
+func Sandbox(root string) SandboxConfig {
+	return SandboxConfig{root: strings.TrimSpace(root)}
 }
 
 // RunnerOption configures a Runner.
@@ -39,6 +53,7 @@ func NewRunner(options ...RunnerOption) *Runner {
 		permissionPolicy: cfg.permissionPolicy,
 		stateStore:       cfg.stateStore,
 		hooks:            cfg.hooks,
+		sandbox:          cfg.sandbox,
 		err:              cfg.err,
 	}
 }
@@ -73,6 +88,17 @@ func WithHooks(hooks *Hooks) RunnerOption {
 			return
 		}
 		cfg.hooks = hooks
+	}
+}
+
+// WithSandbox installs a filesystem workspace boundary for the runner.
+func WithSandbox(sandbox SandboxConfig) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if sandbox.root == "" {
+			cfg.setErr(errors.New("sandbox root is required"))
+			return
+		}
+		cfg.sandbox = sandbox
 	}
 }
 
@@ -150,6 +176,13 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 			return err
 		}
 		rt.hookBus = hookBus
+	}
+	if r.sandbox.root != "" {
+		sandbox, err := internalsandbox.New(r.sandbox.root)
+		if err != nil {
+			return err
+		}
+		rt.sandbox = sandbox
 	}
 	return nil
 }

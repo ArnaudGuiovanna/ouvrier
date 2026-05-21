@@ -644,7 +644,18 @@ func (rt httpRuntime) applySinkTerminal(ctx context.Context, terminal runtimepla
 	}); err != nil {
 		return err
 	}
-	return writeFileSink(terminal.SinkFilePath, output)
+	resolvedPath, err := rt.resolveFileSinkPath(terminal.SinkFilePath)
+	if err != nil {
+		return err
+	}
+	return writeFileSink(resolvedPath, output)
+}
+
+func (rt httpRuntime) resolveFileSinkPath(path string) (string, error) {
+	if rt.sandbox == nil {
+		return "", errors.New("file sink requires sandbox")
+	}
+	return rt.sandbox.Resolve(path)
 }
 
 func (rt httpRuntime) authorizeOutputAction(ctx context.Context, result planRunResult, action policy.Action) error {

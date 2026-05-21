@@ -11,6 +11,7 @@ import (
 	"ouvrier/internal/mcpclient"
 	"ouvrier/internal/provider"
 	runtimeplan "ouvrier/internal/runtime"
+	"ouvrier/internal/sandbox"
 	"ouvrier/internal/state"
 	"ouvrier/internal/tools"
 )
@@ -28,6 +29,7 @@ type httpRuntime struct {
 	stateStore           state.Store
 	eventStream          *events.EventStream
 	hookBus              *events.HookBus
+	sandbox              *sandbox.Sandbox
 	schemaRepairAttempts int
 	adminToken           string
 	adminRoutes          []httpRoute
