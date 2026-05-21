@@ -39,6 +39,8 @@ const (
 	EventTaskCompleted EventKind = "task_completed"
 	EventTaskFailed    EventKind = "task_failed"
 
+	EventSkillLoaded EventKind = "skill_loaded"
+
 	EventSinkLogged EventKind = "sink_logged"
 )
 

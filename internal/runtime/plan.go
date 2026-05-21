@@ -41,6 +41,7 @@ type Step struct {
 	Goal            string
 	Model           string
 	Tools           []Tool
+	Skills          []Skill
 	MCPServers      []MCPServer
 	SubAgents       []SubAgent
 	ResultSchema    *ResultSchema
@@ -77,6 +78,10 @@ type Tool struct {
 	SideEffects      []string
 	RequiresApproval bool
 	Timeout          time.Duration
+}
+
+type Skill struct {
+	Name string
 }
 
 type MCPServer struct {

@@ -20,6 +20,7 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		Goal:       pipe.goal,
 		Model:      pipe.config.model,
 		Tools:      runtimeToolsFromPipe(pipe.config.tools),
+		Skills:     runtimeSkillsFromPipe(pipe.config.skills),
 		MCPServers: runtimeMCPServersFromPipe(pipe.config.mcpServers),
 		SubAgents:  subAgents,
 		Budget: runtimeplan.Budget{
@@ -44,6 +45,14 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		}
 	}
 	return step, nil
+}
+
+func runtimeSkillsFromPipe(skills []skillSpec) []runtimeplan.Skill {
+	out := make([]runtimeplan.Skill, 0, len(skills))
+	for _, skill := range skills {
+		out = append(out, runtimeplan.Skill{Name: skill.dirName})
+	}
+	return out
 }
 
 func runtimeMCPServersFromPipe(servers []mcpSpec) []runtimeplan.MCPServer {

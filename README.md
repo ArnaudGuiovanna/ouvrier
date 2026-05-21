@@ -71,6 +71,7 @@ Current working foundations include:
 - HTTP triggers and compiled runtime plans.
 - Sequential `Pipe` execution through the harness path.
 - Go tools through `ToolExecutor` and `PermissionPolicy`.
+- Skill loading and deterministic prompt injection from `skills/<name>/SKILL.md`.
 - Typed `Output[T]()` and `Reply(JSON[T]())` schema validation.
 - Memory and SQLite state stores.
 - Event stream, hooks, traces, and basic admin endpoints.
@@ -219,6 +220,24 @@ Classify tools deliberately:
 
 Ouvrier validates tool arguments against generated JSON Schema before calling
 the function. Tool panics become structured tool errors.
+
+### Skills
+
+Reusable Markdown skills live under `skills/<name>/SKILL.md` and can be attached
+to a `Pipe`:
+
+```go
+ovr.Pipe("Triage the ticket.",
+	ovr.Model("anthropic/claude-sonnet-4-6"),
+	ovr.Skill("ticket-triage"),
+	ovr.Output[Triage](),
+)
+```
+
+`SKILL.md` must include `name` and `description` frontmatter. Ouvrier loads the
+file through the workspace sandbox, injects the Markdown body into the system
+prompt in declaration order, and emits `skill_loaded` events without logging the
+skill body.
 
 ### Typed Results
 
