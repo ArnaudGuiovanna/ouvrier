@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -48,6 +49,9 @@ func TestCompilePlansCompilesPipeSubAgent(t *testing.T) {
 	if subAgent.MaxParallel != 3 {
 		t.Fatalf("subagent MaxParallel = %d, want 3", subAgent.MaxParallel)
 	}
+	if subAgent.PartialOK {
+		t.Fatal("subagent PartialOK = true, want false by default")
+	}
 	if len(subAgent.Pipeline.Steps) != 1 {
 		t.Fatalf("subagent pipeline steps = %d, want 1", len(subAgent.Pipeline.Steps))
 	}
@@ -67,6 +71,30 @@ func TestCompilePlansCompilesPipeSubAgent(t *testing.T) {
 	}
 	if childStep.ResultSchema.Type != reflect.TypeFor[subAgentTranslation]() {
 		t.Fatalf("child step ResultSchema type = %v, want subAgentTranslation", childStep.ResultSchema.Type)
+	}
+}
+
+func TestCompilePlansCompilesPipeSubAgentPartialOK(t *testing.T) {
+	translator := Pipeline(
+		Pipe("translate text",
+			Model("anthropic/claude-haiku-4-5"),
+			Output[subAgentTranslation](),
+		),
+	)
+
+	plans, err := compilePlans([]Node{
+		From("POST /emails"),
+		Pipe("draft multilingual email",
+			Model("anthropic/claude-sonnet-4-6"),
+			SubAgent("translate", translator, PartialOK()),
+		),
+		Reply(JSON[subAgentReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	if !plans[0].Steps[0].SubAgents[0].PartialOK {
+		t.Fatal("subagent PartialOK = false, want true")
 	}
 }
 
@@ -160,4 +188,65 @@ func TestValidateRejectsInvalidSubAgentMaxParallel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateRejectsSubAgentPipelineBeyondDepthLimit(t *testing.T) {
+	pipeline := nestedSubAgentPipeline(16)
+
+	err := Validate(
+		From("POST /emails"),
+		Pipe("draft multilingual email",
+			Model("anthropic/claude-sonnet-4-6"),
+			SubAgent("translate", pipeline, MaxParallel(1)),
+		),
+		Reply(JSON[subAgentReply]()),
+	)
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode for excessive SubAgent depth", err)
+	}
+}
+
+func TestValidateRejectsSubAgentCycleByName(t *testing.T) {
+	leaf := Pipeline(
+		Pipe("translate nested",
+			Model("anthropic/claude-haiku-4-5"),
+			SubAgent("translate", Pipeline(
+				Pipe("translate leaf",
+					Model("anthropic/claude-haiku-4-5"),
+					Output[subAgentTranslation](),
+				),
+			), MaxParallel(1)),
+			Output[subAgentTranslation](),
+		),
+	)
+
+	err := Validate(
+		From("POST /emails"),
+		Pipe("draft multilingual email",
+			Model("anthropic/claude-sonnet-4-6"),
+			SubAgent("translate", leaf, MaxParallel(1)),
+		),
+		Reply(JSON[subAgentReply]()),
+	)
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("Validate error = %v, want ErrInvalidNode for SubAgent cycle", err)
+	}
+}
+
+func nestedSubAgentPipeline(depth int) PipelineSpec {
+	if depth == 0 {
+		return Pipeline(
+			Pipe("translate leaf",
+				Model("anthropic/claude-haiku-4-5"),
+				Output[subAgentTranslation](),
+			),
+		)
+	}
+	return Pipeline(
+		Pipe(fmt.Sprintf("translate level %d", depth),
+			Model("anthropic/claude-haiku-4-5"),
+			SubAgent(fmt.Sprintf("translate_child_%d", depth), nestedSubAgentPipeline(depth-1), MaxParallel(1)),
+			Output[subAgentTranslation](),
+		),
+	)
 }

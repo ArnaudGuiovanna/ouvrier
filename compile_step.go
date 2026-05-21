@@ -61,6 +61,7 @@ func runtimeSubAgentsFromPipe(subAgents []subAgentSpec) ([]runtimeplan.SubAgent,
 			Name:        subAgent.name,
 			Pipeline:    pipeline,
 			MaxParallel: subAgent.maxParallel,
+			PartialOK:   subAgent.partialOK,
 		})
 	}
 	return out, nil

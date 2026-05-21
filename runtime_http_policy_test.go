@@ -258,11 +258,11 @@ func TestSubAgentCompositionCannotBypassPermissionPolicy(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/emails", strings.NewReader(`{"body":"hello"}`))
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
 	}
-	if len(scripted.requests) != 2 {
-		t.Fatalf("provider calls = %d, want parent request and denial handling only", len(scripted.requests))
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want parent request only after fatal subagent denial", len(scripted.requests))
 	}
 	for _, req := range scripted.requests {
 		if req.Model == "anthropic/claude-haiku-4-5" {

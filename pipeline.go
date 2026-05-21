@@ -46,6 +46,10 @@ func (n pipeNode) nodeKind() nodeKind {
 }
 
 func (n pipeNode) validateNode() error {
+	return n.validatePipeNodeWithSubAgentContext(0, nil)
+}
+
+func (n pipeNode) validatePipeNodeWithSubAgentContext(depth int, stack []string) error {
 	if n.err != nil {
 		return n.err
 	}
@@ -74,7 +78,7 @@ func (n pipeNode) validateNode() error {
 		}
 	}
 	for _, subAgent := range n.config.subAgents {
-		if err := subAgent.validateSubAgent(); err != nil {
+		if err := subAgent.validateSubAgentWithContext(depth+1, stack); err != nil {
 			return err
 		}
 	}
@@ -180,11 +184,13 @@ type SubAgentOption interface {
 }
 
 const defaultSubAgentMaxParallel = 5
+const defaultSubAgentMaxDepth = 8
 
 type subAgentSpec struct {
 	name        string
 	pipeline    PipelineSpec
 	maxParallel int
+	partialOK   bool
 	err         error
 }
 
@@ -234,12 +240,34 @@ func (o maxParallelOption) applySubAgent(spec *subAgentSpec) {
 	spec.maxParallel = o.limit
 }
 
+type partialOKOption struct{}
+
+// PartialOK lets a SubAgent return ordered error results for failed child tasks
+// instead of failing the whole parent Pipe immediately.
+func PartialOK() partialOKOption {
+	return partialOKOption{}
+}
+
+func (o partialOKOption) applySubAgent(spec *subAgentSpec) {
+	spec.partialOK = true
+}
+
 func (s subAgentSpec) validateSubAgent() error {
+	return s.validateSubAgentWithContext(1, nil)
+}
+
+func (s subAgentSpec) validateSubAgentWithContext(depth int, stack []string) error {
 	if s.err != nil {
 		return s.err
 	}
 	if s.name == "" {
 		return fmt.Errorf("%w: SubAgent name is required", ErrInvalidNode)
+	}
+	if depth > defaultSubAgentMaxDepth {
+		return fmt.Errorf("%w: SubAgent depth cannot exceed %d", ErrInvalidNode, defaultSubAgentMaxDepth)
+	}
+	if containsSubAgentName(stack, s.name) {
+		return fmt.Errorf("%w: SubAgent cycle detected for %q", ErrInvalidNode, s.name)
 	}
 	if s.maxParallel <= 0 {
 		return fmt.Errorf("%w: SubAgent MaxParallel must be greater than zero", ErrInvalidNode)
@@ -247,7 +275,7 @@ func (s subAgentSpec) validateSubAgent() error {
 	if s.maxParallel > defaultSubAgentMaxParallel {
 		return fmt.Errorf("%w: SubAgent MaxParallel cannot exceed %d", ErrInvalidNode, defaultSubAgentMaxParallel)
 	}
-	return s.pipeline.validateSubAgentPipeline()
+	return s.pipeline.validateSubAgentPipelineWithContext(depth, append(stack, s.name))
 }
 
 func (s *subAgentSpec) setErr(err error) {
@@ -257,6 +285,10 @@ func (s *subAgentSpec) setErr(err error) {
 }
 
 func (p PipelineSpec) validateSubAgentPipeline() error {
+	return p.validateSubAgentPipelineWithContext(0, nil)
+}
+
+func (p PipelineSpec) validateSubAgentPipelineWithContext(depth int, stack []string) error {
 	if len(p.nodes) == 0 {
 		return fmt.Errorf("%w: SubAgent pipeline must include at least one Pipe", ErrInvalidNode)
 	}
@@ -267,9 +299,22 @@ func (p PipelineSpec) validateSubAgentPipeline() error {
 		if node.nodeKind() != nodeKindPipe {
 			return fmt.Errorf("%w: SubAgent pipeline node %d must be Pipe", ErrInvalidNode, i)
 		}
-		if err := node.validateNode(); err != nil {
+		pipe, ok := pipeNodeFromNode(node)
+		if !ok {
+			return fmt.Errorf("%w: SubAgent pipeline node %d must be Pipe", ErrInvalidNode, i)
+		}
+		if err := pipe.validatePipeNodeWithSubAgentContext(depth, stack); err != nil {
 			return fmt.Errorf("SubAgent pipeline node %d: %w", i, err)
 		}
 	}
 	return nil
+}
+
+func containsSubAgentName(stack []string, name string) bool {
+	for _, current := range stack {
+		if current == name {
+			return true
+		}
+	}
+	return false
 }

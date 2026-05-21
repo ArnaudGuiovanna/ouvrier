@@ -1,8 +1,11 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	"ouvrier/internal/events"
@@ -60,6 +63,9 @@ func (h *Harness) executeParallelToolCalls(ctx context.Context, session runtimec
 		}
 	}
 
+	groupCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	outcomes := make([]toolCallOutcome, len(calls))
 	var wg sync.WaitGroup
 	wg.Add(len(calls))
@@ -67,7 +73,11 @@ func (h *Harness) executeParallelToolCalls(ctx context.Context, session runtimec
 		i, call := i, call
 		go func() {
 			defer wg.Done()
-			outcomes[i] = h.callTool(ctx, session, call)
+			outcome := h.callTool(groupCtx, session, call)
+			outcomes[i] = outcome
+			if h.shouldCancelParallelToolCalls(call, outcome) {
+				cancel()
+			}
 		}()
 	}
 	wg.Wait()
@@ -81,6 +91,13 @@ func (h *Harness) executeParallelToolCalls(ctx context.Context, session runtimec
 		messages = append(messages, message)
 	}
 	return messages, nil, nil
+}
+
+func (h *Harness) shouldCancelParallelToolCalls(call provider.ToolCall, outcome toolCallOutcome) bool {
+	if outcome.budgetPayload != nil || outcome.toolErr != nil {
+		return true
+	}
+	return outcome.result.IsError && h.subAgentFailureIsFatal(call.Name)
 }
 
 func (h *Harness) executeSingleToolCall(ctx context.Context, session runtimecore.Session, call provider.ToolCall) (provider.Message, map[string]any, error) {
@@ -133,6 +150,12 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 		}); emitErr != nil {
 			return provider.Message{}, nil, errors.Join(outcome.toolErr, emitErr)
 		}
+		if h.subAgentFailureIsFatal(call.Name) {
+			if payload, ok := h.exceededBudgetPayload(); ok {
+				return provider.Message{}, payload, nil
+			}
+			return provider.Message{}, nil, fmt.Errorf("subagent %q failed: %s", call.Name, outcome.toolErr.Error())
+		}
 		return provider.ToolResultText(call, outcome.toolErr.Error(), true), nil, nil
 	}
 	eventKind := events.EventAfterTool
@@ -147,7 +170,37 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 	if err := h.emit(ctx, session, eventKind, payload); err != nil {
 		return provider.Message{}, nil, err
 	}
+	if outcome.result.IsError && h.subAgentFailureIsFatal(call.Name) {
+		if payload, ok := h.exceededBudgetPayload(); ok {
+			return provider.Message{}, payload, nil
+		}
+		return provider.Message{}, nil, fmt.Errorf("subagent %q failed: %s", call.Name, toolResultErrorText(outcome.result.Content))
+	}
 	return provider.ToolResultMessage(outcome.result), nil, nil
+}
+
+func (h *Harness) subAgentFailureIsFatal(name string) bool {
+	return h.toolExecutor.CanRunParallelSubAgent(name) && !h.toolExecutor.SubAgentPartialOK(name)
+}
+
+func (h *Harness) exceededBudgetPayload() (map[string]any, bool) {
+	if h.budgetLedger == nil {
+		return nil, false
+	}
+	_, payload, exceeded := h.budgetLedger.Exceeded()
+	return payload, exceeded
+}
+
+func toolResultErrorText(content json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil && text != "" {
+		return text
+	}
+	content = bytes.TrimSpace(content)
+	if len(content) == 0 {
+		return "tool returned error result"
+	}
+	return string(content)
 }
 
 func (h *Harness) emitBeforeToolCall(ctx context.Context, session runtimecore.Session, call provider.ToolCall) error {

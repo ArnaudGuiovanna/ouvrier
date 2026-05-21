@@ -53,6 +53,7 @@ type SubAgent struct {
 	Name        string
 	Pipeline    Pipeline
 	MaxParallel int
+	PartialOK   bool
 }
 
 type Pipeline struct {

@@ -478,6 +478,11 @@ func TestExecutorOnlyMarksSubAgentHandlersAsParallel(t *testing.T) {
 	}), WithMetadata(Metadata{Kind: ToolKindSubAgent})); err != nil {
 		t.Fatalf("RegisterHandler returned error: %v", err)
 	}
+	if err := executor.RegisterHandler("summarize", handlerFunc(func(ctx context.Context, call provider.ToolCall) (provider.ToolResult, error) {
+		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name}, nil
+	}), WithMetadata(Metadata{Kind: ToolKindSubAgent, PartialOK: true})); err != nil {
+		t.Fatalf("RegisterHandler returned error: %v", err)
+	}
 
 	if executor.CanRunParallelSubAgent("lookup") {
 		t.Fatal("lookup CanRunParallelSubAgent = true, want false")
@@ -487,6 +492,15 @@ func TestExecutorOnlyMarksSubAgentHandlersAsParallel(t *testing.T) {
 	}
 	if executor.CanRunParallelSubAgent("missing") {
 		t.Fatal("missing CanRunParallelSubAgent = true, want false")
+	}
+	if executor.SubAgentPartialOK("lookup") {
+		t.Fatal("lookup SubAgentPartialOK = true, want false")
+	}
+	if executor.SubAgentPartialOK("translate") {
+		t.Fatal("translate SubAgentPartialOK = true, want false")
+	}
+	if !executor.SubAgentPartialOK("summarize") {
+		t.Fatal("summarize SubAgentPartialOK = false, want true")
 	}
 }
 
