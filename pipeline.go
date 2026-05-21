@@ -327,13 +327,22 @@ func (o maxParallelOption) applySubAgent(spec *subAgentSpec) {
 type partialOKOption struct{}
 
 // PartialOK lets a SubAgent return ordered error results for failed child tasks
-// instead of failing the whole parent Pipe immediately.
+// or lets Parallel/Map return ordered error outcomes instead of failing
+// the whole parent pipeline immediately.
 func PartialOK() partialOKOption {
 	return partialOKOption{}
 }
 
 func (o partialOKOption) applySubAgent(spec *subAgentSpec) {
 	spec.partialOK = true
+}
+
+func (o partialOKOption) applyParallel(config *parallelConfig) {
+	config.partialOK = true
+}
+
+func (o partialOKOption) applyMap(config *mapConfig) {
+	config.partialOK = true
 }
 
 func (s subAgentSpec) validateSubAgent() error {

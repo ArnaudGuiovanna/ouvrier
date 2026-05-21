@@ -76,6 +76,7 @@ Current working foundations include:
 - Memory and SQLite state stores.
 - Event stream, hooks, traces, and basic admin endpoints.
 - Provider adapters for the v0.1 model prefixes.
+- `Parallel`, `Map`, bounded `Concurrency`, and `PartialOK` composition.
 - Early CLI/scaffold and Bubble Tea TUI foundations.
 - Governed `SubAgent` foundations in active development.
 
@@ -298,6 +299,32 @@ ovr.Pipe("Draft a multilingual reply.",
 
 SubAgents run through `ToolExecutor`, inherit budgets, create child sessions,
 propagate cancellation, and attach child events to the parent trace.
+
+### Composition
+
+`Parallel` fans out the same input to several Pipe branches and returns ordered
+outcomes. By default, one failed branch cancels sibling work and fails the
+composition:
+
+```go
+ovr.Parallel(
+	ovr.Pipe("Check quality", ovr.Model("anthropic/claude-haiku-4-5")),
+	ovr.Pipe("Check compliance", ovr.Model("anthropic/claude-haiku-4-5")),
+)
+```
+
+`Map` expects the previous step to return a JSON array and runs a Pipe
+sub-pipeline for each item with bounded concurrency:
+
+```go
+ovr.Map(
+	ovr.Concurrency(10),
+	ovr.Pipe("Score one item", ovr.Model("anthropic/claude-haiku-4-5")),
+)
+```
+
+`PartialOK()` changes `Parallel`, `Map`, and `SubAgent` failure behavior to
+return ordered partial outcomes instead of failing immediately.
 
 ## Configuration
 

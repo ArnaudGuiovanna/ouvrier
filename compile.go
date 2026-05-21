@@ -66,8 +66,8 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 		switch node.nodeKind() {
 		case nodeKindFrom:
 			return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", i, ErrTerminalMissing)
-		case nodeKindPipe:
-			step, err := compileStep(node)
+		case nodeKindPipe, nodeKindParallel, nodeKindMap:
+			step, err := compileRuntimeStep(node)
 			if err != nil {
 				return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", i, err)
 			}
@@ -104,6 +104,9 @@ func reconcileTerminalResultSchema(plan *runtimeplan.Plan) error {
 		return nil
 	}
 	last := &plan.Steps[len(plan.Steps)-1]
+	if last.Kind != runtimeplan.StepPipe {
+		return nil
+	}
 	if last.ResultSchema == nil {
 		last.ResultSchema = plan.Terminal.ResultSchema
 		return nil

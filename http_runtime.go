@@ -236,6 +236,25 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 
 	current := input
 	for _, step := range steps {
+		if step.Kind == runtimeplan.StepParallel {
+			stepResult, err := rt.runParallelStepResult(ctx, step, current, scope)
+			if err != nil {
+				return stepResult, err
+			}
+			current = stepResult.Output
+			result = stepResult
+			continue
+		}
+		if step.Kind == runtimeplan.StepMap {
+			stepResult, err := rt.runMapStepResult(ctx, step, current, scope)
+			if err != nil {
+				return stepResult, err
+			}
+			current = stepResult.Output
+			result = stepResult
+			continue
+		}
+
 		specs, closeMCP, err := rt.registerStepTools(ctx, executor, step)
 		if err != nil {
 			return result, err
