@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.ouvrier/
+
+/bin/
+/dist/
+/tmp/
+
+*.test
+*.out
+coverage.txt

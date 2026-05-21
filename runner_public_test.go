@@ -1,0 +1,96 @@
+package ovr_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"ouvrier"
+)
+
+func TestAllowSideEffectsPublicPolicyAllowsExplicitLabel(t *testing.T) {
+	permissionPolicy := ovr.AllowSideEffects("email")
+
+	decision, err := permissionPolicy.Authorize(context.Background(), ovr.PermissionAction{
+		Kind:        ovr.PermissionActionToolCall,
+		ToolName:    "send_email",
+		Effect:      ovr.EffectSideEffecting,
+		SideEffects: []string{"email"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	}
+}
+
+func TestNewRunnerWithPermissionPolicyKeepsRunValidation(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithPermissionPolicy(ovr.AllowSideEffects("email")))
+
+	err := runner.Run(":8080", ovr.Pipe("missing trigger", ovr.Model("anthropic/claude-sonnet-4-6")))
+	if !errors.Is(err, ovr.ErrFirstNodeNotFrom) {
+		t.Fatalf("Run error = %v, want ErrFirstNodeNotFrom", err)
+	}
+}
+
+func TestRunnerRejectsNilPermissionPolicy(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithPermissionPolicy(nil))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "permission policy is required") {
+		t.Fatalf("Run error = %v, want permission policy context", err)
+	}
+}
+
+func TestRunnerRejectsNilStateStore(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithStateStore(nil))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "state store is required") {
+		t.Fatalf("Run error = %v, want state store context", err)
+	}
+}
+
+func TestRunnerRejectsNilHooks(t *testing.T) {
+	runner := ovr.NewRunner(ovr.WithHooks(nil))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		ovr.From("GET /health"),
+		ovr.Reply(ovr.JSON[testReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "hooks are required") {
+		t.Fatalf("Run error = %v, want hooks context", err)
+	}
+}
+
+func TestPublicHooksRejectInvalidRegistration(t *testing.T) {
+	hooks := ovr.NewHooks()
+	if err := hooks.Register("", func(ctx context.Context, event ovr.Event) (ovr.Event, error) {
+		return event, nil
+	}); err == nil {
+		t.Fatal("Register returned nil for empty event kind")
+	}
+	if err := hooks.Register(ovr.EventPipelineStarted, nil); err == nil {
+		t.Fatal("Register returned nil for nil hook")
+	}
+}
