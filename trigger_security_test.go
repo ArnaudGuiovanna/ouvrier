@@ -204,6 +204,7 @@ func TestNewHTTPHandlerRejectsSignedTriggerWithoutSignature(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
 	}
 	assertNoSinkLoggedEvent(t, stream)
+	assertSignatureDecisionEvent(t, stream, "missing")
 }
 
 func TestNewHTTPHandlerRejectsSignedTriggerWithInvalidSignature(t *testing.T) {
@@ -229,6 +230,7 @@ func TestNewHTTPHandlerRejectsSignedTriggerWithInvalidSignature(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
 	assertNoSinkLoggedEvent(t, stream)
+	assertSignatureDecisionEvent(t, stream, "invalid")
 }
 
 func TestNewHTTPHandlerAcceptsSignedTriggerWithValidSignature(t *testing.T) {
@@ -255,6 +257,7 @@ func TestNewHTTPHandlerAcceptsSignedTriggerWithValidSignature(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
+	assertSignatureDecisionEvent(t, stream, "valid")
 	assertSinkLoggedEvent(t, stream, "input", body)
 }
 
@@ -262,4 +265,24 @@ func hmacSHA256Header(secret, body string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(body))
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func assertSignatureDecisionEvent(t *testing.T, stream *events.EventStream, decision string) {
+	t.Helper()
+	for _, event := range stream.List() {
+		if event.Kind != events.EventSignatureDecision {
+			continue
+		}
+		if event.Payload["decision"] != decision {
+			continue
+		}
+		if _, leaked := event.Payload["signature"]; leaked {
+			t.Fatalf("signature event leaked signature payload: %+v", event.Payload)
+		}
+		if _, leaked := event.Payload["secret"]; leaked {
+			t.Fatalf("signature event leaked secret payload: %+v", event.Payload)
+		}
+		return
+	}
+	t.Fatalf("events = %+v, want signature decision %q", stream.List(), decision)
 }
