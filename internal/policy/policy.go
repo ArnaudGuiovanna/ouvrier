@@ -50,11 +50,15 @@ type PermissionPolicy interface {
 type PolicyOption func(*DefaultPolicy)
 
 type DefaultPolicy struct {
-	allowedSideEffects map[string]struct{}
+	allowedSideEffects       map[string]struct{}
+	allowedSideEffectTargets map[string]map[string]struct{}
 }
 
 func NewDefaultPolicy(options ...PolicyOption) DefaultPolicy {
-	policy := DefaultPolicy{allowedSideEffects: make(map[string]struct{})}
+	policy := DefaultPolicy{
+		allowedSideEffects:       make(map[string]struct{}),
+		allowedSideEffectTargets: make(map[string]map[string]struct{}),
+	}
 	for _, option := range options {
 		if option != nil {
 			option(&policy)
@@ -70,6 +74,26 @@ func AllowSideEffects(labels ...string) PolicyOption {
 		}
 		for _, label := range cleanLabels(labels) {
 			policy.allowedSideEffects[label] = struct{}{}
+		}
+	}
+}
+
+func AllowSideEffectTargets(label string, targets ...string) PolicyOption {
+	return func(policy *DefaultPolicy) {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			return
+		}
+		if policy.allowedSideEffectTargets == nil {
+			policy.allowedSideEffectTargets = make(map[string]map[string]struct{})
+		}
+		allowed := policy.allowedSideEffectTargets[label]
+		if allowed == nil {
+			allowed = make(map[string]struct{})
+			policy.allowedSideEffectTargets[label] = allowed
+		}
+		for _, target := range cleanTargets(targets) {
+			allowed[target] = struct{}{}
 		}
 	}
 }
@@ -129,11 +153,44 @@ func (p DefaultPolicy) authorizeSideEffectingAction(action Action, label string)
 		return Deny(label + " requires explicit side effect labels")
 	}
 	for _, label := range sideEffects {
+		if actionRequiresTargetScope(action) {
+			target := strings.TrimSpace(action.Target)
+			if target == "" {
+				return Deny("side effect " + label + " requires a target")
+			}
+			if !p.targetAllowed(label, target) {
+				return Deny("side effect " + label + " target is not allowed")
+			}
+			continue
+		}
 		if _, ok := p.allowedSideEffects[label]; !ok {
 			return Deny("side effect " + label + " is not allowed")
 		}
 	}
 	return Allow(label + " explicitly allowed")
+}
+
+func (p DefaultPolicy) targetAllowed(label, target string) bool {
+	allowed := p.allowedSideEffectTargets[label]
+	if len(allowed) == 0 {
+		return false
+	}
+	if _, ok := allowed[target]; ok {
+		return true
+	}
+	_, ok := allowed["*"]
+	return ok
+}
+
+func actionRequiresTargetScope(action Action) bool {
+	switch action.Kind {
+	case ActionPushWebhook, ActionPushQueue, ActionSinkFile:
+		return true
+	case ActionToolCall:
+		return strings.TrimSpace(action.Target) != ""
+	default:
+		return false
+	}
 }
 
 func normalizeEffect(effect Effect) Effect {
@@ -149,6 +206,17 @@ func cleanLabels(labels []string) []string {
 		label = strings.TrimSpace(label)
 		if label != "" {
 			cleaned = append(cleaned, label)
+		}
+	}
+	return cleaned
+}
+
+func cleanTargets(targets []string) []string {
+	cleaned := make([]string, 0, len(targets))
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if target != "" {
+			cleaned = append(cleaned, target)
 		}
 	}
 	return cleaned

@@ -371,6 +371,7 @@ func TestHTTPAdminTriggerRejectsInvalidPayload(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
 	scripted := &asyncAdminTriggerProvider{started: make(chan struct{})}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /jobs"),
@@ -394,8 +395,171 @@ func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminTriggerRunsCronPlanThroughHarness(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"cron"}`, StopReason: provider.StopEndTurn},
+	}
+	plans, err := compilePlans([]Node{
+		From(Cron("0 6 * * *")),
+		Pipe("summarize cron work", Model("anthropic/claude-haiku-4-5")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	handler, err := newAdminHandlerWithRuntime(plans, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newAdminHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "", `{
+		"trigger": "cron",
+		"expr": "0 6 * * *",
+		"scheduled_at": "2026-05-21T06:00:00Z"
+	}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	input := decodeProviderInput(t, scripted.requests[0].Messages[0].Text())
+	assertRawJSONField(t, input, "trigger", `"cron"`)
+	assertRawJSONField(t, input, "expr", `"0 6 * * *"`)
+	assertRawJSONField(t, input, "scheduled_at", `"2026-05-21T06:00:00Z"`)
+}
+
+func TestHTTPAdminTriggerRedactsCronPushOutput(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	webhook, posts := newWebhookPostRecorder(t)
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"cron","api_key":"sk-cron"}`, StopReason: provider.StopEndTurn},
+	}
+	plans, err := compilePlans([]Node{
+		From(Cron("0 6 * * *")),
+		Pipe("summarize cron work", Model("anthropic/claude-haiku-4-5")),
+		Push(Webhook(webhook.URL)),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	handler, err := newAdminHandlerWithRuntime(plans, httpRuntime{
+		provider:     scripted,
+		toolExecutor: outputAllowedExecutor("webhook"),
+	})
+	if err != nil {
+		t.Fatalf("newAdminHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "", `{
+		"trigger": "cron",
+		"expr": "0 6 * * *"
+	}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "sk-cron") {
+		t.Fatalf("admin trigger response leaked secret: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "[REDACTED]") {
+		t.Fatalf("admin trigger response = %s, want redacted marker", rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"status":"cron","api_key":"sk-cron"}`)
+}
+
+func TestHTTPAdminTriggerRunsStreamPlanThroughHarness(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"stream"}`, StopReason: provider.StopEndTurn},
+	}
+	plans, err := compilePlans([]Node{
+		From(Stream("kafka://tickets")),
+		Pipe("summarize stream work", Model("anthropic/claude-haiku-4-5")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	handler, err := newAdminHandlerWithRuntime(plans, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newAdminHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "", `{
+		"trigger": "stream",
+		"uri": "kafka://tickets",
+		"id": "msg-1",
+		"body": {"event": "created"},
+		"metadata": {"partition": "7"}
+	}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+	input := decodeProviderInput(t, scripted.requests[0].Messages[0].Text())
+	assertRawJSONField(t, input, "trigger", `"stream"`)
+	assertRawJSONField(t, input, "uri", `"kafka://tickets"`)
+	assertRawJSONField(t, input, "id", `"msg-1"`)
+	assertRawJSONField(t, input, "body", `{"event":"created"}`)
+	assertRawJSONField(t, input, "metadata", `{"partition":"7"}`)
+}
+
+func TestHTTPAdminTriggerRedactsStreamPushOutput(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	webhook, posts := newWebhookPostRecorder(t)
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"stream","accessToken":"stream-token"}`, StopReason: provider.StopEndTurn},
+	}
+	plans, err := compilePlans([]Node{
+		From(Stream("kafka://tickets")),
+		Pipe("summarize stream work", Model("anthropic/claude-haiku-4-5")),
+		Push(Webhook(webhook.URL)),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	handler, err := newAdminHandlerWithRuntime(plans, httpRuntime{
+		provider:     scripted,
+		toolExecutor: outputAllowedExecutor("webhook"),
+	})
+	if err != nil {
+		t.Fatalf("newAdminHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, newAdminTriggerJSONRequest(t, "", `{
+		"trigger": "stream",
+		"uri": "kafka://tickets",
+		"id": "msg-1",
+		"body": {"event": "created"}
+	}`))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "stream-token") {
+		t.Fatalf("admin trigger response leaked secret: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "[REDACTED]") {
+		t.Fatalf("admin trigger response = %s, want redacted marker", rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"status":"stream","accessToken":"stream-token"}`)
+}
+
 func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
+	if strings.TrimSpace(rt.adminToken) == "" {
+		t.Setenv("PIP_ENV", "dev")
+	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
@@ -409,6 +573,9 @@ func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 
 func newTestParameterizedAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
+	if strings.TrimSpace(rt.adminToken) == "" {
+		t.Setenv("PIP_ENV", "dev")
+	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets/{id}"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),

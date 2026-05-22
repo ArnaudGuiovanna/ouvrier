@@ -201,22 +201,50 @@ func parseCronFieldValue(raw string, min, max int) (int, error) {
 	return value, nil
 }
 
-func serveCronPlans(rt httpRuntime, plans []runtimeplan.Plan) error {
+func serveCronPlans(addr string, rt httpRuntime, plans []runtimeplan.Plan) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return serveCronPlansWithContext(ctx, addr, rt, plans)
+}
+
+func serveCronPlansWithContext(ctx context.Context, addr string, rt httpRuntime, plans []runtimeplan.Plan) error {
+	schedules, err := cronSchedulesForPlans(plans)
+	if err != nil {
+		return err
+	}
+	handler, err := newAdminHandlerWithRuntime(plans, rt)
+	if err != nil {
+		return err
+	}
+	return runSupervisedRuntimes(ctx,
+		func(ctx context.Context) error {
+			return serveHTTPWithContext(ctx, addr, handler)
+		},
+		func(ctx context.Context) error {
+			return runCronPlansWithSchedules(ctx, rt, plans, schedules)
+		},
+	)
+}
+
+func cronSchedulesForPlans(plans []runtimeplan.Plan) ([]cronSchedule, error) {
 	schedules := make([]cronSchedule, len(plans))
 	for i, plan := range plans {
 		if plan.Trigger.Kind != runtimeplan.TriggerCron {
-			return fmt.Errorf("%w: only cron triggers are supported by cron runtime", ErrRunNotImplemented)
+			return nil, fmt.Errorf("%w: only cron triggers are supported by cron runtime", ErrRunNotImplemented)
 		}
 		schedule, err := parseCronSchedule(plan.Trigger.Expr)
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidNode, err)
+			return nil, fmt.Errorf("%w: %v", ErrInvalidNode, err)
 		}
 		schedules[i] = schedule
 	}
+	return schedules, nil
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+func runCronPlansWithSchedules(ctx context.Context, rt httpRuntime, plans []runtimeplan.Plan, schedules []cronSchedule) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var wg sync.WaitGroup
 	for i, plan := range plans {
 		wg.Add(1)
@@ -232,6 +260,8 @@ func serveCronPlans(rt httpRuntime, plans []runtimeplan.Plan) error {
 
 func runCronLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan, schedule cronSchedule) {
 	workerPool := newCronWorkerPool(plan.Trigger.WorkerPool)
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
 		next := schedule.Next(time.Now())
 		if next.IsZero() {
@@ -246,7 +276,9 @@ func runCronLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan, sch
 			if !acquireCronWorker(ctx, workerPool) {
 				return
 			}
+			wg.Add(1)
 			go func(scheduledAt time.Time) {
+				defer wg.Done()
 				defer releaseCronWorker(workerPool)
 				_, _ = runCronPlanOnce(ctx, rt, plan, scheduledAt)
 			}(next)

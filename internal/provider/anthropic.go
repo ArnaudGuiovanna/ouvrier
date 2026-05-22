@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const DefaultAnthropicBaseURL = "https://api.anthropic.com"
@@ -63,6 +64,7 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 	if ref.Provider != a.Name() {
 		return Response{}, fmt.Errorf("anthropic provider cannot run model %q", req.Model)
 	}
+	started := time.Now()
 
 	body, err := buildAnthropicRequest(ref.Name, req)
 	if err != nil {
@@ -95,5 +97,9 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
 		return Response{}, fmt.Errorf("decode anthropic response: %w", err)
 	}
-	return decoded.toProviderResponse()
+	resp, err := decoded.toProviderResponse()
+	if err != nil {
+		return Response{}, err
+	}
+	return attachResponseMetadata(resp, a.Name(), req.Model, started), nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,6 +123,48 @@ func TestEventStreamAppendRedactsSensitivePayloadKeysRecursively(t *testing.T) {
 	}
 }
 
+func TestEventStreamAppendRedactsSensitivePayloadStrings(t *testing.T) {
+	t.Setenv("SERVICE_API_KEY", "sk-live-secret")
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+
+	appended, err := stream.Append(context.Background(), Event{
+		Kind: EventToolCallFailed,
+		Payload: map[string]any{
+			"error":  "request failed with api_key=sk-live-secret and Authorization: Bearer bearer-secret",
+			"json":   `{"password":"json-secret","apiKey":"json-api-key","API_KEY":"json-api-upper","accessToken":"json-access-token","refreshToken":"json-refresh-token","clientSecret":"json-client-secret","secret_key":"json-secret-key","private_key":"json-private-key","safe":"visible"}`,
+			"output": []byte("token=sk-live-secret access_token=access-secret secret_key=secret-key-value clientSecret=client-secret"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	for key, value := range appended.Payload {
+		text := redactionTestString(value)
+		if strings.Contains(text, "sk-live-secret") ||
+			strings.Contains(text, "bearer-secret") ||
+			strings.Contains(text, "json-secret") ||
+			strings.Contains(text, "json-api-key") ||
+			strings.Contains(text, "json-api-upper") ||
+			strings.Contains(text, "json-access-token") ||
+			strings.Contains(text, "json-refresh-token") ||
+			strings.Contains(text, "json-client-secret") ||
+			strings.Contains(text, "json-secret-key") ||
+			strings.Contains(text, "json-private-key") ||
+			strings.Contains(text, "access-secret") ||
+			strings.Contains(text, "secret-key-value") ||
+			strings.Contains(text, "client-secret") {
+			t.Fatalf("%s payload leaked secret: %+v", key, appended.Payload)
+		}
+		if !strings.Contains(text, "[REDACTED]") {
+			t.Fatalf("%s payload = %q, want redacted value", key, text)
+		}
+	}
+}
+
 func TestEventStreamListReturnsDeepCopiesOfNestedPayloadValues(t *testing.T) {
 	stream, err := NewEventStream()
 	if err != nil {
@@ -230,5 +273,16 @@ func assertSensitivePayloadRedacted(t *testing.T, payload map[string]any) {
 	item := payload["items"].([]any)[0].(map[string]any)
 	if item["token"] != "[REDACTED]" {
 		t.Fatalf("slice payload token = %v, want [REDACTED] in %+v", item["token"], item)
+	}
+}
+
+func redactionTestString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	default:
+		return ""
 	}
 }

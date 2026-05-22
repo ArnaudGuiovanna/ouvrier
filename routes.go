@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,11 @@ type httpRoute struct {
 	path       string
 	plan       runtimeplan.Plan
 	runtime    httpRuntime
+	workerPool chan struct{}
+}
+
+type adminPlanRoute struct {
+	plan       runtimeplan.Plan
 	workerPool chan struct{}
 }
 
@@ -127,6 +133,17 @@ func newWorkerPool(limit int) chan struct{} {
 	return make(chan struct{}, limit)
 }
 
+func adminPlanRoutesFromPlans(plans []runtimeplan.Plan) []adminPlanRoute {
+	routes := make([]adminPlanRoute, 0, len(plans))
+	for _, plan := range plans {
+		routes = append(routes, adminPlanRoute{
+			plan:       plan,
+			workerPool: newWorkerPool(plan.Trigger.WorkerPool),
+		})
+	}
+	return routes
+}
+
 func registerHTTPAdminRoutes(mux *http.ServeMux, rt httpRuntime) {
 	mux.HandleFunc("GET /admin/health", rt.serveAdminHealth)
 	mux.HandleFunc("GET /admin/status", rt.serveAdminStatus)
@@ -166,6 +183,12 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	response.SchemaRepairsStarted = countAdminEventsByKind(recorded, events.EventSchemaRepairStarted)
 	response.SchemaRepairsCompleted = countAdminEventsByKind(recorded, events.EventSchemaRepairCompleted)
 	response.SchemaViolations = response.SchemaValidationFailed
+	llm := summarizeAdminLLMUsage(recorded)
+	response.LLMCalls = llm.Calls
+	response.InputTokens = llm.InputTokens
+	response.OutputTokens = llm.OutputTokens
+	response.CostUSD = llm.CostUSD
+	response.AverageLatencyMS = llm.AverageLatencyMS()
 	if rt.stateStore == nil {
 		writeJSON(w, http.StatusOK, response)
 		return
@@ -304,6 +327,48 @@ func countAdminEventsByKind(recorded []events.Event, kind events.EventKind) int 
 	return count
 }
 
+func summarizeAdminLLMUsage(recorded []events.Event) adminLLMUsageSummary {
+	var summary adminLLMUsageSummary
+	for _, event := range recorded {
+		summary.AddEvent(event)
+	}
+	return summary
+}
+
+func adminNumericPayload(payload map[string]any, key string) float64 {
+	if payload == nil {
+		return 0
+	}
+	switch value := payload[key].(type) {
+	case int:
+		return float64(value)
+	case int8:
+		return float64(value)
+	case int16:
+		return float64(value)
+	case int32:
+		return float64(value)
+	case int64:
+		return float64(value)
+	case uint:
+		return float64(value)
+	case uint8:
+		return float64(value)
+	case uint16:
+		return float64(value)
+	case uint32:
+		return float64(value)
+	case uint64:
+		return float64(value)
+	case float32:
+		return float64(value)
+	case float64:
+		return value
+	default:
+		return 0
+	}
+}
+
 func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request) {
 	if !rt.authorizeAdmin(w, req) {
 		return
@@ -315,11 +380,24 @@ func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request
 	}
 	trigger.Method = strings.ToUpper(strings.TrimSpace(trigger.Method))
 	trigger.Path = strings.TrimSpace(trigger.Path)
+
+	switch trigger.kind() {
+	case runtimeplan.TriggerHTTP, runtimeplan.TriggerWebhook:
+		rt.serveAdminHTTPTrigger(w, req, trigger)
+	case runtimeplan.TriggerCron:
+		rt.serveAdminCronTrigger(w, req, trigger)
+	case runtimeplan.TriggerStream:
+		rt.serveAdminStreamTrigger(w, req, trigger)
+	default:
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+	}
+}
+
+func (rt httpRuntime) serveAdminHTTPTrigger(w http.ResponseWriter, req *http.Request, trigger adminTriggerRequest) {
 	if trigger.Method == "" || trigger.Path == "" {
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
 		return
 	}
-
 	route, pathParams, ok := rt.adminTriggerRoute(trigger.Method, trigger.Path)
 	if !ok {
 		writeJSONStatus(w, http.StatusNotFound, "not_found")
@@ -338,6 +416,38 @@ func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request
 	rt.executeAdminTriggerRoute(w, req, route, input)
 }
 
+func (rt httpRuntime) serveAdminCronTrigger(w http.ResponseWriter, req *http.Request, trigger adminTriggerRequest) {
+	route, ok := rt.adminCronPlanRoute(trigger.Expr)
+	if !ok {
+		writeJSONStatus(w, http.StatusNotFound, "not_found")
+		return
+	}
+	scheduledAt, err := trigger.scheduledTime()
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+		return
+	}
+	rt.executeAdminTriggerCron(w, req, route, scheduledAt)
+}
+
+func (rt httpRuntime) serveAdminStreamTrigger(w http.ResponseWriter, req *http.Request, trigger adminTriggerRequest) {
+	route, ok := rt.adminStreamPlanRoute(trigger.URI)
+	if !ok {
+		writeJSONStatus(w, http.StatusNotFound, "not_found")
+		return
+	}
+	body, err := trigger.bodyString()
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
+		return
+	}
+	rt.executeAdminTriggerStream(w, req, route, streamMessage{
+		ID:       strings.TrimSpace(trigger.ID),
+		Body:     body,
+		Metadata: cleanAdminTriggerMetadata(trigger.Metadata),
+	})
+}
+
 func (rt httpRuntime) adminTriggerRoute(method, path string) (httpRoute, map[string]string, bool) {
 	for _, route := range rt.adminRoutes {
 		if route.method == method && route.path == path {
@@ -354,6 +464,40 @@ func (rt httpRuntime) adminTriggerRoute(method, path string) (httpRoute, map[str
 		}
 	}
 	return httpRoute{}, nil, false
+}
+
+func (rt httpRuntime) adminCronPlanRoute(expr string) (adminPlanRoute, bool) {
+	expr = strings.TrimSpace(expr)
+	var match adminPlanRoute
+	matches := 0
+	for _, route := range rt.adminPlans {
+		if route.plan.Trigger.Kind != runtimeplan.TriggerCron {
+			continue
+		}
+		if expr != "" && route.plan.Trigger.Expr != expr {
+			continue
+		}
+		match = route
+		matches++
+	}
+	return match, matches == 1
+}
+
+func (rt httpRuntime) adminStreamPlanRoute(uri string) (adminPlanRoute, bool) {
+	uri = strings.TrimSpace(uri)
+	var match adminPlanRoute
+	matches := 0
+	for _, route := range rt.adminPlans {
+		if route.plan.Trigger.Kind != runtimeplan.TriggerStream {
+			continue
+		}
+		if uri != "" && route.plan.Trigger.URI != uri {
+			continue
+		}
+		match = route
+		matches++
+	}
+	return match, matches == 1
 }
 
 func matchHTTPRoutePath(routePath, actualPath string) (map[string]string, bool) {
@@ -440,11 +584,14 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 		return
 	}
 	if route.plan.Terminal.Async {
-		ctx := context.WithoutCancel(req.Context())
-		go func() {
+		if !rt.startAsync(func(ctx context.Context) {
 			defer route.releaseWorker()
 			_, _ = rt.runPlan(ctx, route.plan, input)
-		}()
+		}) {
+			route.releaseWorker()
+			writeJSONStatus(w, http.StatusServiceUnavailable, "shutting_down")
+			return
+		}
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 		return
 	}
@@ -470,13 +617,13 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 
 	switch route.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
-		writeJSONOutput(w, http.StatusOK, "ok", output)
+		writeJSONOutput(w, http.StatusOK, "ok", events.RedactJSONText(output))
 	case runtimeplan.TerminalPush:
 		if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, result, output); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
-		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
+		writeJSONOutput(w, http.StatusAccepted, "accepted", events.RedactJSONText(output))
 	case runtimeplan.TerminalSink:
 		if err := rt.applySinkTerminal(req.Context(), route.plan.Terminal, result, "output"); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
@@ -488,10 +635,83 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 	}
 }
 
+func (rt httpRuntime) executeAdminTriggerCron(w http.ResponseWriter, req *http.Request, route adminPlanRoute, scheduledAt time.Time) {
+	if !route.tryAcquireWorker() {
+		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+		return
+	}
+	defer route.releaseWorker()
+
+	result, err := runCronPlanOnce(req.Context(), rt, route.plan, scheduledAt)
+	rt.writeAdminTriggerPlanResult(w, req, route.plan, result, err)
+}
+
+func (rt httpRuntime) executeAdminTriggerStream(w http.ResponseWriter, req *http.Request, route adminPlanRoute, message streamMessage) {
+	if !route.tryAcquireWorker() {
+		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+		return
+	}
+	defer route.releaseWorker()
+
+	result, err := runStreamPlanOnce(req.Context(), rt, route.plan, message)
+	rt.writeAdminTriggerPlanResult(w, req, route.plan, result, err)
+}
+
+func (rt httpRuntime) writeAdminTriggerPlanResult(w http.ResponseWriter, req *http.Request, plan runtimeplan.Plan, result planRunResult, err error) {
+	if err != nil {
+		switch {
+		case errors.Is(err, errHTTPProviderNotConfigured):
+			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")
+		case errors.Is(err, errHTTPPipelineIncomplete):
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete")
+		default:
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		}
+		return
+	}
+	if err := rt.validateObservedTerminalReplyOutput(req.Context(), plan, result); err != nil {
+		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		return
+	}
+	switch plan.Terminal.Kind {
+	case runtimeplan.TerminalReply:
+		writeJSONOutput(w, http.StatusOK, "ok", events.RedactJSONText(result.Output))
+	case runtimeplan.TerminalPush:
+		writeJSONOutput(w, http.StatusAccepted, "accepted", events.RedactJSONText(result.Output))
+	case runtimeplan.TerminalSink:
+		writeJSONStatus(w, http.StatusAccepted, "accepted")
+	default:
+		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
+	}
+}
+
+func (r adminPlanRoute) tryAcquireWorker() bool {
+	if r.workerPool == nil {
+		return true
+	}
+	select {
+	case r.workerPool <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r adminPlanRoute) releaseWorker() {
+	if r.workerPool == nil {
+		return
+	}
+	<-r.workerPool
+}
+
 func (rt httpRuntime) authorizeAdmin(w http.ResponseWriter, req *http.Request) bool {
 	token := strings.TrimSpace(rt.adminToken)
 	if token == "" {
-		return true
+		if adminDevModeEnabled() {
+			return true
+		}
+		writeJSONStatus(w, http.StatusUnauthorized, "admin_token_required")
+		return false
 	}
 	auth := req.Header.Get("Authorization")
 	const prefix = "Bearer "
@@ -501,10 +721,14 @@ func (rt httpRuntime) authorizeAdmin(w http.ResponseWriter, req *http.Request) b
 	}
 	provided := strings.TrimPrefix(auth, prefix)
 	if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
-		writeJSONStatus(w, http.StatusUnauthorized, "unauthorized")
+		writeJSONStatus(w, http.StatusForbidden, "forbidden")
 		return false
 	}
 	return true
+}
+
+func adminDevModeEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("PIP_ENV")), "dev")
 }
 
 type adminHealthResponse struct {
@@ -519,11 +743,47 @@ type adminStatusResponse struct {
 	Executions             int            `json:"executions"`
 	ByStatus               map[string]int `json:"by_status"`
 	Events                 int            `json:"events"`
+	LLMCalls               int            `json:"llm_calls"`
+	InputTokens            int            `json:"input_tokens"`
+	OutputTokens           int            `json:"output_tokens"`
+	CostUSD                float64        `json:"cost_usd"`
+	AverageLatencyMS       float64        `json:"average_latency_ms"`
 	SchemaViolations       int            `json:"schema_violations"`
 	SchemaValidationPassed int            `json:"schema_validation_passed"`
 	SchemaValidationFailed int            `json:"schema_validation_failed"`
 	SchemaRepairsStarted   int            `json:"schema_repairs_started"`
 	SchemaRepairsCompleted int            `json:"schema_repairs_completed"`
+}
+
+type adminLLMUsageSummary struct {
+	Calls          int
+	InputTokens    int
+	OutputTokens   int
+	CostUSD        float64
+	latencySamples int
+	latencyTotalMS float64
+}
+
+func (s *adminLLMUsageSummary) AddEvent(event events.Event) {
+	if s == nil || events.CanonicalKind(event.Kind) != events.EventLLMCallCompleted {
+		return
+	}
+	s.Calls++
+	s.InputTokens += int(adminNumericPayload(event.Payload, "input_tokens"))
+	s.OutputTokens += int(adminNumericPayload(event.Payload, "output_tokens"))
+	s.CostUSD += adminNumericPayload(event.Payload, "cost_usd")
+	latency := adminNumericPayload(event.Payload, "latency_ms")
+	if latency > 0 {
+		s.latencySamples++
+		s.latencyTotalMS += latency
+	}
+}
+
+func (s adminLLMUsageSummary) AverageLatencyMS() float64 {
+	if s.latencySamples == 0 {
+		return 0
+	}
+	return s.latencyTotalMS / float64(s.latencySamples)
 }
 
 type adminTracesResponse struct {
@@ -536,10 +796,16 @@ type adminTraceSummary struct {
 	TraceID      string    `json:"trace_id,omitempty"`
 	SessionID    string    `json:"session_id,omitempty"`
 	Events       int       `json:"events"`
+	LLMCalls     int       `json:"llm_calls"`
+	InputTokens  int       `json:"input_tokens"`
+	OutputTokens int       `json:"output_tokens"`
+	CostUSD      float64   `json:"cost_usd"`
+	LatencyMS    float64   `json:"average_latency_ms"`
 	FirstEventID uint64    `json:"first_event_id"`
 	LastEventID  uint64    `json:"last_event_id"`
 	LastKind     string    `json:"last_kind,omitempty"`
 	LastAt       time.Time `json:"last_at,omitempty"`
+	llmUsage     adminLLMUsageSummary
 }
 
 type adminTraceResponse struct {
@@ -551,9 +817,42 @@ type adminTraceResponse struct {
 }
 
 type adminTriggerRequest struct {
-	Method string          `json:"method"`
-	Path   string          `json:"path"`
-	Body   json.RawMessage `json:"body"`
+	Trigger     string            `json:"trigger"`
+	Method      string            `json:"method"`
+	Path        string            `json:"path"`
+	Expr        string            `json:"expr"`
+	URI         string            `json:"uri"`
+	ID          string            `json:"id"`
+	ScheduledAt string            `json:"scheduled_at"`
+	Metadata    map[string]string `json:"metadata"`
+	Body        json.RawMessage   `json:"body"`
+}
+
+func (r adminTriggerRequest) kind() runtimeplan.TriggerKind {
+	trigger := strings.ToLower(strings.TrimSpace(r.Trigger))
+	switch trigger {
+	case "http":
+		return runtimeplan.TriggerHTTP
+	case "webhook":
+		return runtimeplan.TriggerWebhook
+	case "cron":
+		return runtimeplan.TriggerCron
+	case "stream":
+		return runtimeplan.TriggerStream
+	case "":
+		switch {
+		case strings.TrimSpace(r.Method) != "" || strings.TrimSpace(r.Path) != "":
+			return runtimeplan.TriggerHTTP
+		case strings.TrimSpace(r.Expr) != "":
+			return runtimeplan.TriggerCron
+		case strings.TrimSpace(r.URI) != "":
+			return runtimeplan.TriggerStream
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
 }
 
 func (r adminTriggerRequest) bodyString() (string, error) {
@@ -572,6 +871,35 @@ func (r adminTriggerRequest) bodyString() (string, error) {
 		return "", errors.New("invalid trigger body")
 	}
 	return body, nil
+}
+
+func (r adminTriggerRequest) scheduledTime() (time.Time, error) {
+	raw := strings.TrimSpace(r.ScheduledAt)
+	if raw == "" {
+		return time.Now().UTC(), nil
+	}
+	scheduledAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return scheduledAt.UTC(), nil
+}
+
+func cleanAdminTriggerMetadata(metadata map[string]string) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cleaned := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			cleaned[key] = value
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 type adminExecutionResponse struct {
@@ -626,6 +954,12 @@ func summarizeAdminTraces(recorded []events.Event, limit int) []adminTraceSummar
 		summary.LastEventID = event.ID
 		summary.LastKind = string(event.Kind)
 		summary.LastAt = event.At
+		summary.llmUsage.AddEvent(event)
+		summary.LLMCalls = summary.llmUsage.Calls
+		summary.InputTokens = summary.llmUsage.InputTokens
+		summary.OutputTokens = summary.llmUsage.OutputTokens
+		summary.CostUSD = summary.llmUsage.CostUSD
+		summary.LatencyMS = summary.llmUsage.AverageLatencyMS()
 		if summary.ExecID == "" {
 			summary.ExecID = event.ExecID
 		}

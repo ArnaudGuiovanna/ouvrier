@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -132,7 +133,36 @@ func TestRunCronPlanOncePushesPipelineOutputToWebhook(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectsMixedHTTPAndCronRuntimeForNow(t *testing.T) {
+func TestServeCronPlansMountsAdminEndpointsWhileLoopRuns(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	plans, err := compilePlans([]Node{
+		From(Cron("@every 1h")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addr := localRuntimeAddr(t)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveCronPlansWithContext(ctx, addr, httpRuntime{}, plans)
+	}()
+
+	waitAdminHealth(t, addr)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("serveCronPlansWithContext returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serveCronPlansWithContext did not stop after cancellation")
+	}
+}
+
+func TestRunAttemptsToListenForMixedHTTPAndCronPipelines(t *testing.T) {
 	t.Setenv("OUVRIER_STATE_BACKEND", "memory")
 
 	err := NewRunner().Run(
@@ -142,8 +172,14 @@ func TestRunnerRejectsMixedHTTPAndCronRuntimeForNow(t *testing.T) {
 		From(Cron("@every 1h")),
 		Sink(Log()),
 	)
-	if !errors.Is(err, ErrRunNotImplemented) {
-		t.Fatalf("Run error = %v, want ErrRunNotImplemented", err)
+	if err == nil {
+		t.Fatal("Run returned nil, want listen error")
+	}
+	if errors.Is(err, ErrRunNotImplemented) {
+		t.Fatalf("Run error = %v, no longer want ErrRunNotImplemented for mixed HTTP/Cron pipelines", err)
+	}
+	if !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("Run error = %v, want listen context", err)
 	}
 }
 
@@ -173,4 +209,34 @@ func TestParseCronEverySchedule(t *testing.T) {
 	if !strings.HasSuffix(next.Format(time.RFC3339), "06:00:10Z") {
 		t.Fatalf("Next = %s, want +10s", next)
 	}
+}
+
+func localRuntimeAddr(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close listener returned error: %v", err)
+	}
+	return addr
+}
+
+func waitAdminHealth(t *testing.T, addr string) {
+	t.Helper()
+	client := http.Client{Timeout: 100 * time.Millisecond}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://" + addr + "/admin/health")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("admin health did not become available at %s", addr)
 }

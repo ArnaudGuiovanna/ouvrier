@@ -47,7 +47,7 @@ func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, in
 	for {
 		select {
 		case outcome := <-done:
-			lastEventID = r.runtime.writeSSEEventsSince(w, pipelineSession.ExecID, lastEventID)
+			r.runtime.writeSSEEventsSince(w, pipelineSession.ExecID, lastEventID)
 			if outcome.err != nil {
 				writeSSEStatus(w, "error", pipelineErrorStatus(outcome.err))
 				flushSSE(w)
@@ -131,6 +131,7 @@ func startSSE(w http.ResponseWriter, code int) {
 }
 
 func writeSSEOutputEvent(w io.Writer, eventName, output string) {
+	output = events.RedactJSONText(output)
 	if strings.TrimSpace(eventName) != "" {
 		_, _ = fmt.Fprintf(w, "event: %s\n", eventName)
 	}
@@ -159,6 +160,7 @@ type sseRuntimeEvent struct {
 }
 
 func writeSSERuntimeEvent(w io.Writer, event events.Event) {
+	event = events.SanitizeEvent(event)
 	payload, err := json.Marshal(sseRuntimeEvent{
 		ID:        event.ID,
 		At:        event.At,

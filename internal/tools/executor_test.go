@@ -386,6 +386,43 @@ func TestExecutorSkipsDuplicateIdempotentToolCall(t *testing.T) {
 	}
 }
 
+func TestExecutorRequiresStateStoreForIdempotentToolCall(t *testing.T) {
+	called := false
+	executor := NewExecutor()
+	err := executor.Register("publish", func(ctx context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		called = true
+		return args.Ticket.ID, nil
+	}, WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	result, err := executor.Execute(context.Background(), provider.ToolCall{
+		ID:        "call_1",
+		Name:      "publish",
+		Arguments: []byte(`{"ticket":{"id":"T-1"}}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("IsError = false, want missing StateStore idempotency error")
+	}
+	if called {
+		t.Fatal("tool was called without idempotency StateStore")
+	}
+	if !strings.Contains(string(result.Content), "StateStore") {
+		t.Fatalf("content = %s, want StateStore error", result.Content)
+	}
+}
+
 func TestExecutorRetriesTransientIdempotentToolErrorAfterSingleReservation(t *testing.T) {
 	store := state.NewMemoryStore()
 	ctx := ContextWithToolRetry(context.Background(), 1, 0)

@@ -29,6 +29,8 @@ func TestNewProjectModelViewUsesOuvrierIdentity(t *testing.T) {
 		"Ouvrier",
 		"Workers for your APIs.",
 		"new project",
+		"preview only",
+		"--yes flags",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("view missing %q in:\n%s", want, got)

@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -103,6 +104,35 @@ func Stream(uri string) StreamTrigger {
 func (t StreamTrigger) validateTrigger() error {
 	if t.uri == "" {
 		return fmt.Errorf("%w: stream URI is required", ErrInvalidNode)
+	}
+	if err := validateStreamURI(t.uri); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidNode, err)
+	}
+	return nil
+}
+
+func validateStreamURI(raw string) error {
+	if strings.ContainsRune(raw, 0) {
+		return fmt.Errorf("stream URI is invalid")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" {
+		return fmt.Errorf("stream URI must include a supported scheme")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "kafka", "nats":
+		if strings.Trim(strings.TrimSpace(parsed.Host+parsed.Path), "/") == "" {
+			return fmt.Errorf("%s stream URI must include a topic or subject", parsed.Scheme)
+		}
+	case "redis":
+		if parsed.Host == "" {
+			return fmt.Errorf("redis stream URI must include a host")
+		}
+		if strings.Trim(strings.TrimSpace(parsed.Path), "/") == "" {
+			return fmt.Errorf("redis stream URI must include a stream name")
+		}
+	default:
+		return fmt.Errorf("unsupported stream scheme %q", parsed.Scheme)
 	}
 	return nil
 }

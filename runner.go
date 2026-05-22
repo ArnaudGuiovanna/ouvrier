@@ -153,7 +153,11 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 		}
 		serveErr = serveHTTP(addr, handler)
 	} else if plansTriggerKind(plans) == runtimeplan.TriggerCron {
-		serveErr = serveCronPlans(runtime, plans)
+		serveErr = serveCronPlans(addr, runtime, plans)
+	} else if plansTriggerKind(plans) == runtimeplan.TriggerStream {
+		serveErr = serveStreamPlans(addr, runtime, plans)
+	} else if plansRunnableTogether(plans) {
+		serveErr = serveMixedPlans(addr, runtime, plans)
 	} else {
 		serveErr = fmt.Errorf("%w: mixed or unsupported trigger runtime", ErrRunNotImplemented)
 	}

@@ -79,6 +79,8 @@ func (s *Session) RegisterTools(ctx context.Context, executor *tools.Executor) (
 			remoteName: remoteTool.Name,
 		}
 		if err := executor.RegisterHandler(spec.Name, handler, tools.WithMetadata(tools.Metadata{
+			Kind:        tools.ToolKindMCP,
+			Target:      s.serverName,
 			Effect:      policy.EffectSideEffecting,
 			SideEffects: []string{"mcp:" + s.serverName},
 		})); err != nil {

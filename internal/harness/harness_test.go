@@ -1290,6 +1290,49 @@ func TestRunAppendsCoreEventsAndRunsHooks(t *testing.T) {
 	}
 }
 
+func TestRunEmitsProviderResponseMetadataAfterLLM(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+			Metadata: provider.ResponseMetadata{
+				Provider: "scripted",
+				Model:    "anthropic/claude-sonnet-4-6",
+				Latency:  12 * time.Millisecond,
+			},
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+
+	event, ok := findEvent(stream.List(), events.EventAfterLLM)
+	if !ok {
+		t.Fatal("EventAfterLLM not emitted")
+	}
+	if event.Payload["provider"] != "scripted" ||
+		event.Payload["provider_model"] != "anthropic/claude-sonnet-4-6" ||
+		event.Payload["latency_ms"] != int64(12) {
+		t.Fatalf("after LLM payload = %+v, want provider metadata", event.Payload)
+	}
+}
+
 func TestRunBlocksProviderCallWhenBeforeLLMHookFails(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

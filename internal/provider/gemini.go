@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const DefaultGeminiBaseURL = "https://generativelanguage.googleapis.com"
@@ -57,6 +58,7 @@ func (p *Gemini) Complete(ctx context.Context, req Request) (Response, error) {
 	if ref.Provider != p.Name() {
 		return Response{}, fmt.Errorf("gemini provider cannot run model %q", req.Model)
 	}
+	started := time.Now()
 
 	body, err := buildGeminiRequest(req)
 	if err != nil {
@@ -88,5 +90,9 @@ func (p *Gemini) Complete(ctx context.Context, req Request) (Response, error) {
 	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
 		return Response{}, fmt.Errorf("decode gemini response: %w", err)
 	}
-	return decoded.toProviderResponse()
+	resp, err := decoded.toProviderResponse()
+	if err != nil {
+		return Response{}, err
+	}
+	return attachResponseMetadata(resp, p.Name(), req.Model, started), nil
 }

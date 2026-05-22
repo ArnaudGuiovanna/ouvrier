@@ -15,6 +15,7 @@ type pipeConfig struct {
 	model      string
 	output     *outputSpec
 	tools      []toolSpec
+	bash       []bashSpec
 	skills     []skillSpec
 	mcpServers []mcpSpec
 	subAgents  []subAgentSpec
@@ -67,6 +68,11 @@ func (n pipeNode) validatePipeNodeWithSubAgentContext(depth int, stack []string)
 	}
 	for _, tool := range n.config.tools {
 		if err := tool.validateTool(); err != nil {
+			return err
+		}
+	}
+	for _, bash := range n.config.bash {
+		if err := bash.validateBash(); err != nil {
 			return err
 		}
 	}

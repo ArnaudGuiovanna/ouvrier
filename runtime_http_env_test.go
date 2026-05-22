@@ -72,3 +72,39 @@ func TestNewHTTPHandlerUsesDefaultProviderRegistryFromEnv(t *testing.T) {
 		t.Fatalf("body = %+v, want ok env provider JSON", body)
 	}
 }
+
+func TestProviderRegistryFromEnvRoutesAllV01ProviderPrefixes(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	t.Setenv("MISTRAL_API_KEY", "mistral-key")
+	t.Setenv("GEMINI_API_KEY", "gemini-key")
+
+	registry, err := providerRegistryFromEnv()
+	if err != nil {
+		t.Fatalf("providerRegistryFromEnv returned error: %v", err)
+	}
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{model: "anthropic/claude-sonnet-4-6", want: "anthropic"},
+		{model: "openai/gpt-4.1-mini", want: "openai"},
+		{model: "ollama/llama3.1", want: "ollama"},
+		{model: "mistral/mistral-large-latest", want: "mistral"},
+		{model: "gemini/gemini-2.0-flash", want: "gemini"},
+		{model: "vllm/qwen2.5-coder", want: "vllm"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			provider, err := registry.ForModel(tt.model)
+			if err != nil {
+				t.Fatalf("ForModel(%q) returned error: %v", tt.model, err)
+			}
+			if provider.Name() != tt.want {
+				t.Fatalf("provider = %q, want %q", provider.Name(), tt.want)
+			}
+		})
+	}
+}

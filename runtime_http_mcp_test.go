@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"ouvrier/internal/events"
 	"ouvrier/internal/mcpclient"
 	"ouvrier/internal/policy"
 	"ouvrier/internal/provider"
@@ -40,6 +41,8 @@ func (s *httpFakeMCPSession) RegisterTools(ctx context.Context, executor *tools.
 		content, _ := json.Marshal(map[string]string{"answer": "from mcp"})
 		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: content}, nil
 	}), tools.WithMetadata(tools.Metadata{
+		Kind:        tools.ToolKindMCP,
+		Target:      "moodle-mcp",
 		Effect:      policy.EffectSideEffecting,
 		SideEffects: []string{"mcp:moodle-mcp"},
 	}))
@@ -72,6 +75,10 @@ func TestNewHTTPHandlerRegistersMCPToolsWithHarnessRuntime(t *testing.T) {
 	}
 	session := &httpFakeMCPSession{}
 	connector := &httpFakeMCPConnector{session: session}
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),
 		Pipe("triage ticket",
@@ -82,8 +89,9 @@ func TestNewHTTPHandlerRegistersMCPToolsWithHarnessRuntime(t *testing.T) {
 	}, httpRuntime{
 		provider:     scripted,
 		mcpConnector: connector,
+		eventStream:  stream,
 		toolExecutor: tools.NewExecutor(tools.WithPermissionPolicy(
-			policy.NewDefaultPolicy(policy.AllowSideEffects("mcp:moodle-mcp")),
+			policy.NewDefaultPolicy(policy.AllowSideEffectTargets("mcp:moodle-mcp", "moodle-mcp")),
 		)),
 	})
 	if err != nil {
@@ -116,5 +124,12 @@ func TestNewHTTPHandlerRegistersMCPToolsWithHarnessRuntime(t *testing.T) {
 	result := last.Blocks[0].ToolResult
 	if result.Name != toolName || result.IsError {
 		t.Fatalf("tool result = %+v", result)
+	}
+	event, ok := findRuntimeHTTPEvent(stream.List(), events.EventPermissionDecision)
+	if !ok {
+		t.Fatalf("events = %+v, want MCP permission decision", stream.List())
+	}
+	if event.Payload["tool_kind"] != "mcp" || event.Payload["target"] != "moodle-mcp" {
+		t.Fatalf("permission payload = %+v, want mcp target without endpoint/token", event.Payload)
 	}
 }

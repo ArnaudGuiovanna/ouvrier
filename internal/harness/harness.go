@@ -133,14 +133,16 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		}
 
 		out.Usage.Add(resp.Usage)
-		if err := h.emit(runCtx, session, events.EventAfterLLM, map[string]any{
+		afterLLM := map[string]any{
 			"iteration":     out.Iterations,
 			"stop_reason":   string(resp.StopReason),
 			"tool_calls":    len(resp.ToolCalls),
 			"input_tokens":  resp.Usage.InputTokens,
 			"output_tokens": resp.Usage.OutputTokens,
 			"cost_usd":      resp.Usage.CostUSD,
-		}); err != nil {
+		}
+		addLLMResponseMetadata(afterLLM, resp.Metadata)
+		if err := h.emit(runCtx, session, events.EventAfterLLM, afterLLM); err != nil {
 			out.Status = StatusFailed
 			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
@@ -222,6 +224,21 @@ func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.S
 		"transient": provider.IsTransientError(err),
 		"retrying":  retrying,
 	})
+}
+
+func addLLMResponseMetadata(payload map[string]any, metadata provider.ResponseMetadata) {
+	if payload == nil {
+		return
+	}
+	if metadata.Provider != "" {
+		payload["provider"] = metadata.Provider
+	}
+	if metadata.Model != "" {
+		payload["provider_model"] = metadata.Model
+	}
+	if metadata.Latency > 0 {
+		payload["latency_ms"] = metadata.Latency.Milliseconds()
+	}
 }
 
 func providerAttemptNumber(err error, retryAllowed bool, maxRetries int) int {
@@ -446,7 +463,7 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			return currentText, usage, errors.Join(err, emitErr)
 		}
 		usage.Add(resp.Usage)
-		if err := h.emit(ctx, session, events.EventAfterLLM, map[string]any{
+		afterLLM := map[string]any{
 			"iteration":     iteration,
 			"stop_reason":   string(resp.StopReason),
 			"tool_calls":    len(resp.ToolCalls),
@@ -455,7 +472,9 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			"cost_usd":      resp.Usage.CostUSD,
 			"repair":        true,
 			"attempt":       attempt,
-		}); err != nil {
+		}
+		addLLMResponseMetadata(afterLLM, resp.Metadata)
+		if err := h.emit(ctx, session, events.EventAfterLLM, afterLLM); err != nil {
 			return currentText, usage, err
 		}
 		if len(resp.ToolCalls) > 0 {

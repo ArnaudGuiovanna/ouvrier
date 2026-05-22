@@ -135,7 +135,78 @@ func TestDefaultPolicyAllowsExplicitSideEffects(t *testing.T) {
 	}
 }
 
+func TestDefaultPolicyRequiresTargetScopedAllowanceForTargetedToolCall(t *testing.T) {
+	policy := NewDefaultPolicy(AllowSideEffects("filesystem"))
+
+	decision, err := policy.Authorize(context.Background(), Action{
+		Kind:        ActionToolCall,
+		ToolName:    "bash",
+		Target:      "/tmp/workspace",
+		Effect:      EffectSideEffecting,
+		SideEffects: []string{"filesystem"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("Allowed = true, want target-scoped denial")
+	}
+	if !strings.Contains(decision.Reason, "target") {
+		t.Fatalf("Reason = %q, want target context", decision.Reason)
+	}
+}
+
+func TestDefaultPolicyAllowsTargetScopedToolCall(t *testing.T) {
+	policy := NewDefaultPolicy(AllowSideEffectTargets("filesystem", "/tmp/workspace"))
+
+	decision, err := policy.Authorize(context.Background(), Action{
+		Kind:        ActionToolCall,
+		ToolName:    "bash",
+		Target:      "/tmp/workspace",
+		Effect:      EffectSideEffecting,
+		SideEffects: []string{"filesystem"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	}
+
+	decision, err = policy.Authorize(context.Background(), Action{
+		Kind:        ActionToolCall,
+		ToolName:    "bash",
+		Target:      "/tmp/other",
+		Effect:      EffectSideEffecting,
+		SideEffects: []string{"filesystem"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("Allowed = true for different target, want denial")
+	}
+}
+
 func TestDefaultPolicyAllowsExplicitQueuePushSideEffect(t *testing.T) {
+	target := "nats://127.0.0.1:4222/tickets"
+	policy := NewDefaultPolicy(AllowSideEffectTargets("queue", target))
+
+	decision, err := policy.Authorize(context.Background(), Action{
+		Kind:        ActionPushQueue,
+		Target:      target,
+		Effect:      EffectSideEffecting,
+		SideEffects: []string{"queue"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	}
+}
+
+func TestDefaultPolicyDeniesTargetBlindQueuePushSideEffect(t *testing.T) {
 	policy := NewDefaultPolicy(AllowSideEffects("queue"))
 
 	decision, err := policy.Authorize(context.Background(), Action{
@@ -143,6 +214,26 @@ func TestDefaultPolicyAllowsExplicitQueuePushSideEffect(t *testing.T) {
 		Target:      "nats://127.0.0.1:4222/tickets",
 		Effect:      EffectSideEffecting,
 		SideEffects: []string{"queue"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("Allowed = true, want target-scoped denial")
+	}
+	if !strings.Contains(decision.Reason, "target") {
+		t.Fatalf("Reason = %q, want target context", decision.Reason)
+	}
+}
+
+func TestDefaultPolicyAllowsExplicitSideEffectWildcardTarget(t *testing.T) {
+	policy := NewDefaultPolicy(AllowSideEffectTargets("webhook", "*"))
+
+	decision, err := policy.Authorize(context.Background(), Action{
+		Kind:        ActionPushWebhook,
+		Target:      "https://example.test/hook",
+		Effect:      EffectSideEffecting,
+		SideEffects: []string{"webhook"},
 	})
 	if err != nil {
 		t.Fatalf("Authorize returned error: %v", err)

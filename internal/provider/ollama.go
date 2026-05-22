@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const DefaultOllamaBaseURL = "http://localhost:11434"
@@ -50,6 +51,7 @@ func (p *Ollama) Complete(ctx context.Context, req Request) (Response, error) {
 	if ref.Provider != p.Name() {
 		return Response{}, fmt.Errorf("ollama provider cannot run model %q", req.Model)
 	}
+	started := time.Now()
 
 	body, err := buildOllamaNativeRequest(ref.Name, req)
 	if err != nil {
@@ -79,5 +81,9 @@ func (p *Ollama) Complete(ctx context.Context, req Request) (Response, error) {
 	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
 		return Response{}, fmt.Errorf("decode ollama response: %w", err)
 	}
-	return decoded.toProviderResponse()
+	resp, err := decoded.toProviderResponse()
+	if err != nil {
+		return Response{}, err
+	}
+	return attachResponseMetadata(resp, p.Name(), req.Model, started), nil
 }

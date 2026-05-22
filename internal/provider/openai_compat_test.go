@@ -110,6 +110,9 @@ func runCompatChatCompletionTest(t *testing.T, providerName, modelName, wantAuth
 	if resp.Usage.InputTokens != 11 || resp.Usage.OutputTokens != 7 {
 		t.Fatalf("Usage = %+v, want prompt/completion tokens", resp.Usage)
 	}
+	if resp.Metadata.Provider != providerName || resp.Metadata.Model != providerName+"/"+modelName || resp.Metadata.Latency <= 0 {
+		t.Fatalf("Metadata = %+v, want provider/model/latency", resp.Metadata)
+	}
 
 	if gotMethod != http.MethodPost {
 		t.Fatalf("method = %q, want POST", gotMethod)

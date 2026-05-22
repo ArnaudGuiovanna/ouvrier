@@ -32,6 +32,7 @@ func TestEventKindSpecMinimumConstants(t *testing.T) {
 		"task_completed":           EventTaskCompleted,
 		"task_failed":              EventTaskFailed,
 		"skill_loaded":             EventSkillLoaded,
+		"stream_dead_lettered":     EventStreamDeadLettered,
 	}
 
 	for want, got := range tests {

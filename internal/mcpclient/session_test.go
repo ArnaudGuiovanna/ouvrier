@@ -48,7 +48,7 @@ func TestSessionRegistersSDKToolsWithExecutor(t *testing.T) {
 	defer session.Close()
 
 	executor := tools.NewExecutor(tools.WithPermissionPolicy(
-		policy.NewDefaultPolicy(policy.AllowSideEffects("mcp:moodle-mcp")),
+		policy.NewDefaultPolicy(policy.AllowSideEffectTargets("mcp:moodle-mcp", "moodle-mcp")),
 	))
 	specs, err := session.RegisterTools(ctx, executor)
 	if err != nil {
@@ -67,7 +67,12 @@ func TestSessionRegistersSDKToolsWithExecutor(t *testing.T) {
 		t.Fatal("InputSchema is empty")
 	}
 
-	result, err := executor.Execute(ctx, provider.ToolCall{
+	var audit tools.PermissionDecisionAudit
+	toolCtx := tools.ContextWithPermissionDecisionObserver(ctx, func(ctx context.Context, observed tools.PermissionDecisionAudit) error {
+		audit = observed
+		return nil
+	})
+	result, err := executor.Execute(toolCtx, provider.ToolCall{
 		ID:        "call_1",
 		Name:      "moodle-mcp__lookup",
 		Arguments: []byte(`{"query":"ouvrier"}`),
@@ -84,5 +89,8 @@ func TestSessionRegistersSDKToolsWithExecutor(t *testing.T) {
 	}
 	if output.Answer != "workers" {
 		t.Fatalf("answer = %q, want workers", output.Answer)
+	}
+	if audit.Action.ToolKind != string(tools.ToolKindMCP) || audit.Action.Target != "moodle-mcp" {
+		t.Fatalf("permission action = %+v, want mcp kind and server target", audit.Action)
 	}
 }

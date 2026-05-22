@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -63,6 +64,9 @@ func (c *EnvConnector) transport(serverName string) (mcp.Transport, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("%w: %s_URL is required", ErrInvalidServer, prefix)
 	}
+	if err := validateEndpoint(endpoint); err != nil {
+		return nil, fmt.Errorf("%w: %s_URL is invalid", ErrInvalidServer, prefix)
+	}
 	client := c.authenticatedHTTPClient(strings.TrimSpace(c.getenv(prefix + "_TOKEN")))
 
 	switch strings.ToLower(strings.TrimSpace(c.getenv(prefix + "_TRANSPORT"))) {
@@ -77,6 +81,22 @@ func (c *EnvConnector) transport(serverName string) (mcp.Transport, error) {
 	default:
 		return nil, fmt.Errorf("%w: unsupported %s_TRANSPORT", ErrInvalidServer, prefix)
 	}
+}
+
+func validateEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+	default:
+		return fmt.Errorf("unsupported scheme")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return fmt.Errorf("host is required")
+	}
+	return nil
 }
 
 func EnvPrefix(serverName string) string {

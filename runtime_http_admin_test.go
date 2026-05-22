@@ -15,6 +15,7 @@ import (
 )
 
 func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -39,6 +40,32 @@ func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminRejectsMissingTokenOutsideDevMode(t *testing.T) {
+	t.Setenv("PIP_ENV", "production")
+	t.Setenv("PIP_ADMIN_TOKEN", "")
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/health", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "admin_token_required" {
+		t.Fatalf("status body = %q, want admin_token_required", body.Status)
+	}
+}
+
 func TestHTTPAdminRequiresBearerTokenWhenConfigured(t *testing.T) {
 	handler := newTestAdminHTTPHandler(t, httpRuntime{adminToken: "secret-admin-token"})
 
@@ -49,6 +76,17 @@ func TestHTTPAdminRequiresBearerTokenWhenConfigured(t *testing.T) {
 	}
 	if strings.Contains(unauthorized.Body.String(), "secret-admin-token") {
 		t.Fatalf("unauthorized response echoed admin token: %q", unauthorized.Body.String())
+	}
+
+	forbidden := httptest.NewRecorder()
+	invalid := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	invalid.Header.Set("Authorization", "Bearer wrong-token")
+	handler.ServeHTTP(forbidden, invalid)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("forbidden status = %d, want %d", forbidden.Code, http.StatusForbidden)
+	}
+	if strings.Contains(forbidden.Body.String(), "secret-admin-token") || strings.Contains(forbidden.Body.String(), "wrong-token") {
+		t.Fatalf("forbidden response echoed admin token: %q", forbidden.Body.String())
 	}
 
 	authorized := httptest.NewRecorder()
@@ -225,6 +263,67 @@ func TestHTTPAdminStatusIncludesSchemaConformanceFromStateStore(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminStatusIncludesLLMUsageFromEvents(t *testing.T) {
+	store := state.NewMemoryStore()
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+		Payload: map[string]any{
+			"input_tokens":  11,
+			"output_tokens": 7,
+			"cost_usd":      0.015,
+			"latency_ms":    int64(25),
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_2",
+		Payload: map[string]any{
+			"input_tokens":  5,
+			"output_tokens": 3,
+			"cost_usd":      0.005,
+			"latency_ms":    35,
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:   events.EventLLMCallStarted,
+		ExecID: "exec_3",
+		Payload: map[string]any{
+			"input_tokens": 99,
+			"cost_usd":     9.9,
+		},
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status           string  `json:"status"`
+		LLMCalls         int     `json:"llm_calls"`
+		InputTokens      int     `json:"input_tokens"`
+		OutputTokens     int     `json:"output_tokens"`
+		CostUSD          float64 `json:"cost_usd"`
+		AverageLatencyMS float64 `json:"average_latency_ms"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" {
+		t.Fatalf("status body = %q, want ok", body.Status)
+	}
+	if body.LLMCalls != 2 || body.InputTokens != 16 || body.OutputTokens != 10 {
+		t.Fatalf("usage body = %+v, want two completed LLM calls with 16/10 tokens", body)
+	}
+	if body.CostUSD < 0.0199 || body.CostUSD > 0.0201 {
+		t.Fatalf("cost_usd = %v, want 0.02", body.CostUSD)
+	}
+	if body.AverageLatencyMS != 30 {
+		t.Fatalf("average_latency_ms = %v, want 30", body.AverageLatencyMS)
+	}
+}
+
 func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -232,7 +331,18 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	}
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallStarted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
-	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallCompleted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{
+		Kind:      events.EventLLMCallCompleted,
+		ExecID:    "exec_2",
+		SessionID: "sess_2",
+		TraceID:   "trace_2",
+		Payload: map[string]any{
+			"input_tokens":  13,
+			"output_tokens": 8,
+			"cost_usd":      0.021,
+			"latency_ms":    41,
+		},
+	})
 	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
 
 	rec := httptest.NewRecorder()
@@ -244,11 +354,16 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	var body struct {
 		Status string `json:"status"`
 		Traces []struct {
-			ExecID      string `json:"exec_id"`
-			TraceID     string `json:"trace_id"`
-			Events      int    `json:"events"`
-			LastEventID uint64 `json:"last_event_id"`
-			LastKind    string `json:"last_kind"`
+			ExecID           string  `json:"exec_id"`
+			TraceID          string  `json:"trace_id"`
+			Events           int     `json:"events"`
+			LLMCalls         int     `json:"llm_calls"`
+			InputTokens      int     `json:"input_tokens"`
+			OutputTokens     int     `json:"output_tokens"`
+			CostUSD          float64 `json:"cost_usd"`
+			AverageLatencyMS float64 `json:"average_latency_ms"`
+			LastEventID      uint64  `json:"last_event_id"`
+			LastKind         string  `json:"last_kind"`
 		} `json:"traces"`
 	}
 	decodeAdminJSON(t, rec, &body)
@@ -260,6 +375,10 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	}
 	if body.Traces[0].LastEventID != 3 || body.Traces[0].LastKind != string(events.EventLLMCallCompleted) {
 		t.Fatalf("trace last event = %+v, want event 3 llm completion", body.Traces[0])
+	}
+	if body.Traces[0].LLMCalls != 1 || body.Traces[0].InputTokens != 13 || body.Traces[0].OutputTokens != 8 ||
+		body.Traces[0].CostUSD < 0.0209 || body.Traces[0].CostUSD > 0.0211 || body.Traces[0].AverageLatencyMS != 41 {
+		t.Fatalf("trace LLM usage = %+v, want completed LLM metrics", body.Traces[0])
 	}
 }
 
@@ -527,6 +646,9 @@ func TestHTTPAdminTraceByExecutionIncludesRedactedEventPayload(t *testing.T) {
 
 func newTestAdminHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
+	if strings.TrimSpace(rt.adminToken) == "" {
+		t.Setenv("PIP_ENV", "dev")
+	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("GET /health"),
 		Reply(JSON[httpTestReply]()),

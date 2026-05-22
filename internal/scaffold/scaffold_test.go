@@ -83,6 +83,26 @@ func TestGenerateRejectsUnsafeProjectName(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsNonHTTPTriggerStringClearly(t *testing.T) {
+	parent := t.TempDir()
+
+	_, err := Generate(context.Background(), Config{
+		Name:    "demo",
+		Trigger: "kafka://tickets",
+		Model:   "anthropic/claude-sonnet-4-6",
+		Dir:     parent,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Generate() error = %v, want ErrInvalidConfig", err)
+	}
+	if !strings.Contains(err.Error(), "--trigger accepts only HTTP routes") {
+		t.Fatalf("Generate() error = %v, want clear HTTP-only trigger guidance", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "demo")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("project directory stat error = %v, want os.ErrNotExist", statErr)
+	}
+}
+
 func TestGenerateRefusesNonEmptyProjectDirectory(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "demo")

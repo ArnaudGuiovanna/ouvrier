@@ -12,15 +12,20 @@ type ToolKind string
 
 const (
 	ToolKindSubAgent ToolKind = "subagent"
+	ToolKindBash     ToolKind = "bash"
+	ToolKindMCP      ToolKind = "mcp"
+	ToolKindOutput   ToolKind = "output"
 )
 
 type Metadata struct {
+	ActionKind       policy.ActionKind
 	Effect           policy.Effect
 	IdempotencyKey   string
 	SideEffects      []string
 	RequiresApproval bool
 	Kind             ToolKind
 	PartialOK        bool
+	Target           string
 	ArgumentName     string
 	InputSchema      json.RawMessage
 	Timeout          time.Duration
@@ -41,6 +46,7 @@ func WithMetadata(metadata Metadata) RegisterOption {
 		metadata.Effect = normalizeEffect(metadata.Effect)
 		metadata.IdempotencyKey = strings.TrimSpace(metadata.IdempotencyKey)
 		metadata.SideEffects = cleanLabels(metadata.SideEffects)
+		metadata.Target = strings.TrimSpace(metadata.Target)
 		metadata.ArgumentName = strings.TrimSpace(metadata.ArgumentName)
 		metadata.InputSchema = append(json.RawMessage(nil), metadata.InputSchema...)
 		if metadata.Timeout < 0 {

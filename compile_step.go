@@ -33,6 +33,7 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		Goal:       pipe.goal,
 		Model:      pipe.config.model,
 		Tools:      runtimeToolsFromPipe(pipe.config.tools),
+		Bash:       runtimeBashFromPipe(pipe.config.bash),
 		Skills:     runtimeSkillsFromPipe(pipe.config.skills),
 		MCPServers: runtimeMCPServersFromPipe(pipe.config.mcpServers),
 		SubAgents:  subAgents,
@@ -99,6 +100,21 @@ func compileMapStep(node Node) (runtimeplan.Step, error) {
 		Concurrency: mapNode.config.concurrency,
 		PartialOK:   mapNode.config.partialOK,
 	}, nil
+}
+
+func runtimeBashFromPipe(bashes []bashSpec) []runtimeplan.BashTool {
+	out := make([]runtimeplan.BashTool, 0, len(bashes))
+	for _, bash := range bashes {
+		out = append(out, runtimeplan.BashTool{
+			Name:                bash.name,
+			SandboxRoot:         bash.sandbox.root,
+			AllowedEnv:          append([]string(nil), bash.sandbox.allowedEnv...),
+			Timeout:             bash.timeout,
+			MaxOutputBytes:      bash.maxOutputBytes,
+			UnsafeHostExecution: bash.unsafeHostExecution,
+		})
+	}
+	return out
 }
 
 func runtimeSkillsFromPipe(skills []skillSpec) []runtimeplan.Skill {

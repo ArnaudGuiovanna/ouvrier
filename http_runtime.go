@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"sync"
 	"time"
 
 	"ouvrier/internal/events"
@@ -26,6 +28,7 @@ type httpRuntime struct {
 	providers            *provider.Registry
 	toolExecutor         *tools.Executor
 	mcpConnector         mcpConnector
+	streamReceiver       streamReceiver
 	stateStore           state.Store
 	eventStream          *events.EventStream
 	hookBus              *events.HookBus
@@ -33,17 +36,21 @@ type httpRuntime struct {
 	schemaRepairAttempts int
 	adminToken           string
 	adminRoutes          []httpRoute
+	adminPlans           []adminPlanRoute
+	async                *runtimeAsyncGroup
 }
 
 func defaultHTTPRuntime() httpRuntime {
 	providers, _ := providerRegistryFromEnv()
 	stream, _ := events.NewEventStream()
 	return httpRuntime{
-		providers:    providers,
-		toolExecutor: tools.NewExecutor(),
-		mcpConnector: envMCPConnector{connector: mcpclient.NewEnvConnector()},
-		eventStream:  stream,
-		adminToken:   adminTokenFromEnv(),
+		providers:      providers,
+		toolExecutor:   tools.NewExecutor(),
+		mcpConnector:   envMCPConnector{connector: mcpclient.NewEnvConnector()},
+		streamReceiver: newDefaultStreamReceiver(),
+		eventStream:    stream,
+		adminToken:     adminTokenFromEnv(),
+		async:          newRuntimeAsyncGroup(),
 	}
 }
 
@@ -365,6 +372,11 @@ func (rt httpRuntime) registerStepTools(ctx context.Context, executor *tools.Exe
 	if err != nil {
 		return nil, nil, err
 	}
+	bashSpecs, err := registerRuntimeBash(executor, step.Bash)
+	if err != nil {
+		return nil, nil, err
+	}
+	specs = append(specs, bashSpecs...)
 	subAgentSpecs, err := registerRuntimeSubAgents(rt, executor, step.SubAgents)
 	if err != nil {
 		return nil, nil, err
@@ -439,4 +451,100 @@ func runtimeBudgetConfigured(budget runtimeplan.Budget) bool {
 		budget.MaxTokens > 0 ||
 		budget.MaxCostUSD > 0 ||
 		budget.MaxWallClock > 0
+}
+
+type runtimeAsyncGroup struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	stopped bool
+	wg      sync.WaitGroup
+}
+
+func newRuntimeAsyncGroup() *runtimeAsyncGroup {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &runtimeAsyncGroup{ctx: ctx, cancel: cancel}
+}
+
+func (g *runtimeAsyncGroup) Go(fn func(context.Context)) bool {
+	if g == nil || fn == nil {
+		return false
+	}
+	g.mu.Lock()
+	if g.stopped {
+		g.mu.Unlock()
+		return false
+	}
+	ctx := g.ctx
+	g.wg.Add(1)
+	g.mu.Unlock()
+
+	go func() {
+		defer g.wg.Done()
+		fn(ctx)
+	}()
+	return true
+}
+
+func (g *runtimeAsyncGroup) Shutdown(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	if !g.stopped {
+		g.stopped = true
+		g.cancel()
+	}
+	g.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		g.wg.Wait()
+		close(done)
+	}()
+
+	if ctx == nil {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (rt httpRuntime) withAsyncGroup() httpRuntime {
+	if rt.async == nil {
+		rt.async = newRuntimeAsyncGroup()
+	}
+	return rt
+}
+
+func (rt httpRuntime) startAsync(fn func(context.Context)) bool {
+	if rt.async == nil {
+		rt.async = newRuntimeAsyncGroup()
+	}
+	return rt.async.Go(fn)
+}
+
+type runtimeHTTPHandler struct {
+	handler http.Handler
+	async   *runtimeAsyncGroup
+}
+
+func newRuntimeHTTPHandler(handler http.Handler, async *runtimeAsyncGroup) http.Handler {
+	return &runtimeHTTPHandler{handler: handler, async: async}
+}
+
+func (h *runtimeHTTPHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.handler.ServeHTTP(w, req)
+}
+
+func (h *runtimeHTTPHandler) Shutdown(ctx context.Context) error {
+	if h == nil || h.async == nil {
+		return nil
+	}
+	return h.async.Shutdown(ctx)
 }

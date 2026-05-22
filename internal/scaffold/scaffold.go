@@ -103,6 +103,11 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if trigger == "" {
 		return Config{}, fmt.Errorf("%w: trigger is required", ErrInvalidConfig)
 	}
+	var err error
+	trigger, err = normalizeHTTPScaffoldTrigger(trigger)
+	if err != nil {
+		return Config{}, err
+	}
 	if _, err := provider.ParseModelID(model); err != nil {
 		return Config{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
@@ -142,6 +147,26 @@ func normalizeConfig(cfg Config) (Config, error) {
 		FrameworkModule: module,
 		FrameworkDir:    frameworkDir,
 	}, nil
+}
+
+func normalizeHTTPScaffoldTrigger(trigger string) (string, error) {
+	fields := strings.Fields(trigger)
+	if len(fields) != 2 {
+		return "", fmt.Errorf("%w: --trigger accepts only HTTP routes like \"POST /tickets\"; cron, webhook, and stream scaffolds are not supported by --trigger yet", ErrInvalidConfig)
+	}
+
+	method := strings.ToUpper(fields[0])
+	switch method {
+	case "GET", "POST":
+	default:
+		return "", fmt.Errorf("%w: --trigger accepts only HTTP GET or POST routes; got %q. Cron, webhook, and stream scaffolds are not supported by --trigger yet", ErrInvalidConfig, fields[0])
+	}
+
+	path := fields[1]
+	if !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("%w: --trigger HTTP path must start with /; example \"POST /tickets\"", ErrInvalidConfig)
+	}
+	return method + " " + path, nil
 }
 
 func validProjectName(name string) bool {

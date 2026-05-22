@@ -98,6 +98,9 @@ func TestAnthropicCompleteSendsMessagesRequest(t *testing.T) {
 	if resp.Usage.InputTokens != 7 || resp.Usage.OutputTokens != 11 {
 		t.Fatalf("Usage = %+v", resp.Usage)
 	}
+	if resp.Metadata.Provider != "anthropic" || resp.Metadata.Model != "anthropic/claude-sonnet-4-6" || resp.Metadata.Latency <= 0 {
+		t.Fatalf("Metadata = %+v, want anthropic model metadata", resp.Metadata)
+	}
 }
 
 func TestAnthropicCompleteParsesToolCalls(t *testing.T) {

@@ -55,6 +55,38 @@ func TestCompilePlansCompilesPipeBudgetAndExecutionOptions(t *testing.T) {
 	}
 }
 
+func TestCompilePlansCompilesBashCapability(t *testing.T) {
+	root := t.TempDir()
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("inspect logs",
+			Model("anthropic/claude-sonnet-4-6"),
+			Bash(Sandbox(root, AllowEnv("PATH")), UnsafeBashHostExecution(), BashTimeout("2s"), BashMaxOutputBytes(1024)),
+		),
+		Reply(JSON[toolReply]()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	bashes := plans[0].Steps[0].Bash
+	if len(bashes) != 1 {
+		t.Fatalf("bash tools = %d, want 1", len(bashes))
+	}
+	if bashes[0].Name != "bash" || bashes[0].SandboxRoot != root {
+		t.Fatalf("bash plan = %+v, want default name and sandbox root", bashes[0])
+	}
+	if bashes[0].Timeout != 2*time.Second || bashes[0].MaxOutputBytes != 1024 {
+		t.Fatalf("bash limits = timeout %s output %d", bashes[0].Timeout, bashes[0].MaxOutputBytes)
+	}
+	if !bashes[0].UnsafeHostExecution {
+		t.Fatal("UnsafeHostExecution = false, want true")
+	}
+	if len(bashes[0].AllowedEnv) != 1 || bashes[0].AllowedEnv[0] != "PATH" {
+		t.Fatalf("allowed env = %+v, want PATH", bashes[0].AllowedEnv)
+	}
+}
+
 func TestValidateRejectsInvalidPipeBudgetAndToolTimeoutOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -79,6 +111,10 @@ func TestValidateRejectsInvalidPipeBudgetAndToolTimeoutOptions(t *testing.T) {
 			name: "negative tool timeout",
 			opt:  Tool("lookup", func(context.Context) error { return nil }, ToolTimeout("-1s")),
 		},
+		{name: "empty bash sandbox", opt: Bash(Sandbox(" "))},
+		{name: "bad bash timeout", opt: Bash(Sandbox(t.TempDir()), BashTimeout("bad"))},
+		{name: "zero bash timeout", opt: Bash(Sandbox(t.TempDir()), BashTimeout("0s"))},
+		{name: "zero bash output", opt: Bash(Sandbox(t.TempDir()), BashMaxOutputBytes(0))},
 	}
 
 	for _, tt := range tests {

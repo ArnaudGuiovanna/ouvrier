@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ouvrier/internal/scaffold"
 )
 
 func TestRunVersionPrintsConfiguredVersion(t *testing.T) {
@@ -43,6 +45,8 @@ func TestRunNewHelpPrintsUsage(t *testing.T) {
 	for _, want := range []string{
 		"Usage: ouvrier new",
 		"Bubble Tea",
+		"preview",
+		"HTTP trigger",
 		"--help",
 	} {
 		if !strings.Contains(got, want) {
@@ -106,6 +110,34 @@ func TestRunNewWithFlagsScaffoldsProject(t *testing.T) {
 	}
 	if got := errOut.String(); got != "" {
 		t.Fatalf("stderr = %q, want empty", got)
+	}
+}
+
+func TestRunNewWithFlagsRejectsNonHTTPTriggerClearly(t *testing.T) {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	parent := t.TempDir()
+	app := New("dev", WithStreams(nil, &out, &errOut))
+
+	err := app.Run(context.Background(), []string{
+		"new",
+		"--name", "demo",
+		"--trigger", "kafka://tickets",
+		"--model", "anthropic/claude-sonnet-4-6",
+		"--yes",
+		"--dir", parent,
+	})
+	if !errors.Is(err, scaffold.ErrInvalidConfig) {
+		t.Fatalf("Run() error = %v, want ErrInvalidConfig", err)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+	if got := errOut.String(); !strings.Contains(got, "--trigger accepts only HTTP routes") {
+		t.Fatalf("stderr = %q, want HTTP-only trigger guidance", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "demo")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("project directory stat error = %v, want os.ErrNotExist", statErr)
 	}
 }
 

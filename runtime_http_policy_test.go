@@ -3,6 +3,7 @@ package ovr
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -273,6 +274,49 @@ func TestNewHTTPHandlerAllowsExplicitWebhookPushPolicy(t *testing.T) {
 	assertOutputPermissionDecision(t, stream, "push_webhook", true)
 }
 
+func TestNewHTTPHandlerRoutesWebhookPushThroughOutputToolPolicy(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	permissionPolicy := &outputToolOnlyPolicy{kind: policy.ActionPushWebhook}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{
+		provider:    scripted,
+		eventStream: stream,
+		toolExecutor: tools.NewExecutor(tools.WithPermissionPolicy(
+			permissionPolicy,
+		)),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"status":"classified"}`)
+	if len(permissionPolicy.actions) != 1 {
+		t.Fatalf("policy actions = %+v, want one output tool authorization", permissionPolicy.actions)
+	}
+	action := permissionPolicy.actions[0]
+	if action.Kind != policy.ActionPushWebhook || action.ToolKind != string(tools.ToolKindOutput) || action.ToolName == "" {
+		t.Fatalf("policy action = %+v, want registered output tool push_webhook action", action)
+	}
+	assertOutputPermissionDecision(t, stream, "push_webhook", true)
+}
+
 func TestNewHTTPHandlerDeniesQueuePushByDefault(t *testing.T) {
 	queueURI, publishes := newNATSPublishRecorder(t, "tickets.classified")
 	stream, err := events.NewEventStream()
@@ -401,7 +445,7 @@ func TestRunnerSandboxConfiguresFileSinkBoundary(t *testing.T) {
 	outputRoot := t.TempDir()
 	outputPath := filepath.Join(outputRoot, "tickets.json")
 	runner := NewRunner(
-		WithPermissionPolicy(AllowSideEffects("file")),
+		WithPermissionPolicy(AllowSideEffectTargets("file", outputPath)),
 		WithSandbox(Sandbox(outputRoot)),
 	)
 	rt := httpRuntime{provider: &httpScriptedProvider{
@@ -598,9 +642,29 @@ func (p *denySubAgentPolicy) deniedSubAgent() bool {
 }
 
 func outputAllowedExecutor(labels ...string) *tools.Executor {
+	options := []policy.PolicyOption{policy.AllowSideEffects(labels...)}
+	for _, label := range labels {
+		options = append(options, policy.AllowSideEffectTargets(label, "*"))
+	}
 	return tools.NewExecutor(tools.WithPermissionPolicy(
-		policy.NewDefaultPolicy(policy.AllowSideEffects(labels...)),
+		policy.NewDefaultPolicy(options...),
 	))
+}
+
+type outputToolOnlyPolicy struct {
+	kind    policy.ActionKind
+	actions []policy.Action
+}
+
+func (p *outputToolOnlyPolicy) Authorize(ctx context.Context, action policy.Action) (policy.Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return policy.Decision{}, err
+	}
+	p.actions = append(p.actions, action)
+	if action.Kind == p.kind && action.ToolKind == string(tools.ToolKindOutput) && strings.TrimSpace(action.ToolName) != "" {
+		return policy.Allow("registered output tool action allowed"), nil
+	}
+	return policy.Deny("not a registered output tool action"), nil
 }
 
 func fileSinkSandbox(t *testing.T, root string) *internalsandbox.Sandbox {
@@ -621,6 +685,9 @@ func assertOutputPermissionDecision(t *testing.T, stream *events.EventStream, ac
 		if event.Payload["action"] == action && event.Payload["allowed"] == allowed {
 			if _, leaked := event.Payload["target"]; leaked {
 				t.Fatalf("permission event leaked output target: %+v", event.Payload)
+			}
+			if action != "sink_log" && strings.TrimSpace(fmt.Sprint(event.Payload["target_hash"])) == "" {
+				t.Fatalf("permission event = %+v, want target_hash", event.Payload)
 			}
 			return
 		}

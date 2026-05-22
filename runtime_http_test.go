@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -300,6 +301,36 @@ func TestNewHTTPHandlerRedactsSensitiveLogSinkJSONOutput(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
 	}
 	assertSinkLoggedEvent(t, stream, "output", `{"password":"[REDACTED]","safe":"ok"}`)
+}
+
+func TestNewHTTPHandlerRedactsSensitiveLogSinkStringValues(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"message":"upstream failed with Authorization: Bearer root-token","safe":"ok"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Sink(Log()),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	event := assertSinkLoggedEvent(t, stream, "output", `{"message":"upstream failed with Authorization: [REDACTED]","safe":"ok"}`)
+	if strings.Contains(fmt.Sprint(event.Payload), "root-token") {
+		t.Fatalf("sink_logged event leaked token: %+v", event.Payload)
+	}
 }
 
 func TestNewHTTPHandlerFileSinkDoesNotLogToEventStream(t *testing.T) {

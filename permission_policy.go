@@ -54,10 +54,21 @@ type defaultPermissionPolicy struct {
 	internal internalpolicy.PermissionPolicy
 }
 
-// AllowSideEffects returns the default production policy plus explicit non-idempotent side-effect allowances.
+// AllowSideEffects returns the default production policy plus explicit
+// non-idempotent side-effect allowances for non-targeted tool calls. Targeted
+// actions such as Push, file Sink, MCP, and Bash require AllowSideEffectTargets.
 func AllowSideEffects(labels ...string) PermissionPolicy {
 	return defaultPermissionPolicy{
 		internal: internalpolicy.NewDefaultPolicy(internalpolicy.AllowSideEffects(labels...)),
+	}
+}
+
+// AllowSideEffectTargets returns the default production policy plus an explicit
+// target-scoped allowance for non-idempotent output actions such as Push and
+// file Sink. Use "*" only when intentionally allowing every target for a label.
+func AllowSideEffectTargets(label string, targets ...string) PermissionPolicy {
+	return defaultPermissionPolicy{
+		internal: internalpolicy.NewDefaultPolicy(internalpolicy.AllowSideEffectTargets(label, targets...)),
 	}
 }
 

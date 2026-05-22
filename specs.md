@@ -1,7 +1,9 @@
 # Ouvrier — Spécifications du framework
 
 **Version** : v0.1
-**Statut** : spécification d'implémentation
+**Statut** : spécification d'implémentation. Les sections fonctionnelles
+décrivent la cible v0.1 ; quand une capacité n'est pas encore complète dans le
+checkout courant, le statut d'implémentation doit le dire explicitement.
 **Auteur** : Arnaud Guiovanna
 
 ---
@@ -128,13 +130,23 @@ mon-projet/
 
 Définit l'événement qui déclenche le pipeline. C'est toujours le premier argument de `Run`.
 
-**Variantes supportées en v0** :
+**Variantes prévues pour v0.1** :
 
 - `ovr.From("POST /chemin/{param}")` — endpoint HTTP, méthode + path
 - `ovr.From("GET /chemin")` — endpoint HTTP GET
 - `ovr.From(ovr.Cron("0 6 * * *"))` — planification cron
 - `ovr.From(ovr.Webhook("provider"))` — webhook signé (Stripe, GitHub, etc.)
 - `ovr.From(ovr.Stream("kafka://topic"))` — stream Kafka / NATS / Redis
+
+Statut courant : le scaffold CLI `ouvrier new --trigger` ne génère que des
+triggers HTTP (`"GET /path"` ou `"POST /path"`). Les triggers Cron, Webhook et
+Stream restent déclarables dans le code Go avec les primitives typées ; la
+génération interactive/non-HTTP par la CLI reste à terminer.
+Les receivers stream Kafka/NATS/Redis sont encore expérimentaux. En particulier,
+Redis Streams avec `WorkerPool > 1` peut rejouer un message déjà acké si un
+message concurrent plus ancien échoue ensuite ; garder la concurrence Redis à 1
+ou protéger tous les side effects par idempotence durable jusqu'au durcissement
+v0.1 complet.
 
 **Options du From** :
 
@@ -157,7 +169,7 @@ Une étape du pipeline. Un agent autonome défini par un goal en langage naturel
 - `ovr.Tool("name", goFunc)` — fonction Go enregistrée comme tool
 - `ovr.Skill("dossier-name")` — référence un dossier `./skills/dossier-name/SKILL.md`
 - `ovr.MCP("server-name")` — connecte un MCP server externe (URL dans .env)
-- `ovr.Bash(ovr.Sandbox("/tmp/workdir"))` — shell sandboxé
+- `ovr.Bash(ovr.Sandbox("/tmp/workdir"))` — shell sandboxé cible ; l'exécution shell hôte actuelle exige `ovr.UnsafeBashHostExecution()`
 - `ovr.Timeout("30s")` — borne temporelle du Pipe
 - `ovr.Retry(3, ovr.ExponentialBackoff())` — politique de retry
 - `ovr.NoCache()` — désactive le prompt caching pour ce Pipe
@@ -420,9 +432,15 @@ ovr.Pipe("...", ovr.MCP("moodle-mcp"))
 
 ### 5.4 Bash — shell sandboxé
 
+Statut courant : la surface Bash et les tests de base existent. Le runtime
+échoue explicitement au boot si `UnsafeBashHostExecution()` n'est pas fourni,
+car l'implémentation shell hôte actuelle ne garantit pas encore l'isolation
+filesystem/process/réseau complète. Le durcissement sandbox complet et les
+garanties multi-plateformes ci-dessous restent des critères v0.1 à finaliser.
+
 ```go
 ovr.Pipe("Analyse les logs",
-    ovr.Bash(ovr.Sandbox("/tmp/workspace")),
+    ovr.Bash(ovr.Sandbox("/tmp/workspace"), ovr.UnsafeBashHostExecution()),
 )
 ```
 
@@ -448,7 +466,14 @@ La CLI `ouvrier` est la porte d'entrée du framework. Elle est construite avec C
 
 #### `ouvrier new`
 
-Scaffolding interactif d'un nouveau projet. Pose des questions, génère tous les fichiers.
+Cible v0.1 : scaffolding interactif d'un nouveau projet. Pose des questions,
+génère tous les fichiers.
+
+Statut courant : sans flags, `ouvrier new` ouvre une prévisualisation TUI Bubble
+Tea v2 qui ne génère pas encore de projet. La génération fonctionnelle actuelle
+passe par `ouvrier new --yes --name NAME --trigger "POST /path" --model
+"provider/model"` et `--trigger` accepte uniquement des routes HTTP. Le wizard
+complet ci-dessous reste la cible v0.1.
 
 **Étapes** :
 
@@ -691,6 +716,7 @@ Ces composants sont obligatoires pour l'implémentation, mais ils ne sont pas to
 
 - Défaut sécurisé : deny filesystem hors workspace, env non whitelistée, réseau, process, side effects non déclarés
 - Autorisations déclaratives : read file, write file, exec, network host, env var, MCP server, side effect
+- Les actions targetées (`Push(Webhook)`, `Push(Queue)`, `Sink(File)`, tools/MCP/Bash avec `Target`) exigent une autorisation liée à la cible via `AllowSideEffectTargets`; un label générique `AllowSideEffects` ne suffit pas
 - Mode dev explicite, jamais équivalent à production
 - Décisions auditables dans `EventStream`
 - Les admin endpoints, hooks et outils MCP ne bypassent jamais la policy
@@ -865,13 +891,19 @@ Ces métriques sont dérivées de `EventStream` et `StateStore`, pas de compteur
 
 ### 10.2 Endpoints admin
 
-Exposés automatiquement sur le serveur du déployé, protégés par `PIP_ADMIN_TOKEN` :
+Cible v0.1 : exposés automatiquement sur le serveur du déployé, protégés par
+`PIP_ADMIN_TOKEN` :
 
 - `GET /admin/health` — liveness + dernières N exécutions
 - `GET /admin/status` — santé fonctionnelle + qualité, coûts
 - `GET /admin/traces?last=N` — dernières exécutions avec spans
 - `GET /admin/traces/<exec-id>` — détail d'une exécution
 - `POST /admin/trigger` — force une exécution (utile pour cron en debug)
+
+Statut courant : les endpoints admin de base existent pour les diagnostics
+locaux sur les runtimes HTTP, webhook, cron-only, stream-only et mixed. La
+surface production complète, les métriques de statut et le trace viewer restent
+en cours.
 
 ### 10.3 Trace viewer (dev uniquement)
 
@@ -927,6 +959,7 @@ En mode `ouvrier dev`, `GET /dev` expose une UI web autonome :
 - Toute action privilégiée passe par `PermissionPolicy`
 - Les tools sont classés : `ReadOnly`, `Idempotent`, `SideEffecting`, `RequiresApproval`
 - Sans classification, un tool est traité comme side-effecting non idempotent
+- Les side effects targetés sont autorisés par cible exacte, avec wildcard explicite uniquement si le projet accepte ce risque
 - Les retries automatiques sont interdits pour side effects non idempotents
 - Les décisions de permissions sont auditables mais ne contiennent jamais de secrets
 - Les hooks peuvent bloquer une action, mais doivent produire une erreur structurée et un événement

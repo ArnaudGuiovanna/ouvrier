@@ -156,6 +156,12 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	}()
 
 	if tool.handler != nil {
+		if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
+			return errorResult(call, err), nil
+		}
+		if err := reserveIdempotency(toolCtx, tool, call.Arguments); err != nil {
+			return errorResult(call, err), nil
+		}
 		return e.executeWithRetry(toolCtx, tool, call, func() (provider.ToolResult, error) {
 			result, err := tool.handler.Execute(toolCtx, call)
 			if err != nil {

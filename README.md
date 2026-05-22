@@ -74,15 +74,16 @@ Current working foundations include:
 - Skill loading and deterministic prompt injection from `skills/<name>/SKILL.md`.
 - Typed `Output[T]()` and `Reply(JSON[T]())` schema validation.
 - Memory and SQLite state stores.
-- Event stream, hooks, traces, and basic admin endpoints.
+- Event stream, hooks, persisted trace events, and early HTTP admin endpoints.
 - Provider adapters for the v0.1 model prefixes.
 - `Parallel`, `Map`, bounded `Concurrency`, and `PartialOK` composition.
-- Early CLI/scaffold and Bubble Tea TUI foundations.
+- HTTP-only CLI scaffold and a Bubble Tea TUI preview.
 - Governed `SubAgent` foundations in active development.
 
-The v0.1 backlog remains broader: webhook/stream runtime transports, mixed
-HTTP+Cron serving, broader queue/backpressure semantics, full CLI workflows,
-deployment, trace viewer, docs, examples, and release gates.
+The v0.1 backlog remains broader: webhook/stream runtime hardening, mixed
+runtime hardening, broader queue/backpressure semantics, full CLI workflows,
+deployment, production admin/trace viewer hardening, docs, examples, Bash
+sandbox hardening, DLQ behavior, and release gates.
 
 ## Mental Model
 
@@ -132,7 +133,8 @@ back to this checkout.
 
 ## Create A Worker
 
-The non-interactive scaffold is the fastest way to create a development worker:
+The non-interactive scaffold is the fastest way to create a development worker.
+Today it generates HTTP-triggered workers only:
 
 ```sh
 ouvrier new \
@@ -176,8 +178,13 @@ terminals now execute through the same harness path when run as a cron-only
 runtime. Webhook trigger plans now expose `POST /webhooks/<provider>` routes,
 wrap the request as `{trigger, provider, body}`, and reuse the same signature,
 idempotency, harness, state, event, and policy guarantees as HTTP triggers.
-HTTP and Webhook pipelines can run in the same server. Stream consumers remain
-a v0.1 backlog item.
+Mixed HTTP, Webhook, Cron, and Stream runtime plumbing exists, but stream
+transports are still experimental: stream URIs validate and receiver boundaries
+exist, with minimal NATS, Redis Streams, and Kafka receiver code. Production
+ack/retry, backpressure, and durable DLQ behavior are not ready yet. Redis
+Streams with `WorkerPool > 1` can replay already-acked messages after an
+earlier concurrent nack; keep Redis stream workers single-concurrency unless a
+state store idempotency key fully protects side effects.
 
 ### Pipes
 
@@ -281,7 +288,8 @@ ovr.Sink(ovr.File("./out/result.json"))
 
 `Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push, NATS/HTTP
 queue push, log sink, and file sink have current runtime coverage. Broader queue
-protocols, backpressure, retry, and DLQ semantics are tracked for v0.1.
+protocols and production delivery semantics, including backpressure, retry, and
+DLQ behavior, are tracked for v0.1.
 
 ### SubAgents
 
@@ -356,15 +364,17 @@ OUVRIER_STATE_BACKEND=sqlite
 OUVRIER_STATE_PATH=.ouvrier/state.db
 ```
 
-Admin endpoints are mounted under `/admin/*`. Set `PIP_ADMIN_TOKEN` outside
-local development when exposing a worker.
+Early admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
+stream-only, and mixed runtimes. Set `PIP_ADMIN_TOKEN` outside local
+development when exposing a worker; the full v0.1 admin/status/trace viewer
+surface is still in progress.
 
 ## Observability
 
 Ouvrier records structured events for pipeline, pipe, session, LLM, tool,
 permission, schema, budget, sink, and subagent task activity.
 
-Useful endpoints in the current HTTP runtime:
+Useful early endpoints in the current runtime:
 
 ```txt
 GET  /admin/health
@@ -374,8 +384,8 @@ GET  /admin/traces/{exec-id}
 POST /admin/trigger
 ```
 
-Events are redacted before persistence or admin output. Status and trace data
-are derived from `EventStream` and `StateStore`, not separate ad hoc counters.
+Events are redacted before persistence or admin output. The current endpoints
+are diagnostics, not the complete v0.1 admin experience.
 
 ## CLI
 
@@ -387,9 +397,11 @@ ouvrier new --yes --name NAME --trigger "POST /path" --model "provider/model"
 ouvrier new
 ```
 
-The interactive `new` command uses Bubble Tea v2 and the Ouvrier visual
-identity. The full v0.1 CLI backlog includes `add agent`, `add tool`,
-`add skill`, `show`, `dev`, `build`, `deploy`, `status`, `logs`, and `trace`.
+`ouvrier new --yes` currently supports HTTP trigger strings only, such as
+`"POST /tickets"`. The no-flag `ouvrier new` command opens a Bubble Tea v2
+preview, but it does not generate a project yet. The full v0.1 CLI backlog
+includes interactive `new`, `add agent`, `add tool`, `add skill`, `show`, `dev`,
+`build`, `deploy`, `status`, `logs`, and `trace`.
 
 ## Development
 

@@ -43,6 +43,7 @@ type Step struct {
 	Goal            string
 	Model           string
 	Tools           []Tool
+	Bash            []BashTool
 	Skills          []Skill
 	MCPServers      []MCPServer
 	SubAgents       []SubAgent
@@ -84,6 +85,15 @@ type Tool struct {
 	SideEffects      []string
 	RequiresApproval bool
 	Timeout          time.Duration
+}
+
+type BashTool struct {
+	Name                string
+	SandboxRoot         string
+	AllowedEnv          []string
+	Timeout             time.Duration
+	MaxOutputBytes      int
+	UnsafeHostExecution bool
 }
 
 type Skill struct {

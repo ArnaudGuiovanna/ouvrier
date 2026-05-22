@@ -27,6 +27,24 @@ func TestAllowSideEffectsPublicPolicyAllowsExplicitLabel(t *testing.T) {
 }
 
 func TestAllowSideEffectsPublicPolicyAllowsQueuePush(t *testing.T) {
+	target := "nats://127.0.0.1:4222/tickets"
+	permissionPolicy := ovr.AllowSideEffectTargets("queue", target)
+
+	decision, err := permissionPolicy.Authorize(context.Background(), ovr.PermissionAction{
+		Kind:        ovr.PermissionActionPushQueue,
+		Target:      target,
+		Effect:      ovr.EffectSideEffecting,
+		SideEffects: []string{"queue"},
+	})
+	if err != nil {
+		t.Fatalf("Authorize returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	}
+}
+
+func TestAllowSideEffectsPublicPolicyDoesNotAllowTargetBlindQueuePush(t *testing.T) {
 	permissionPolicy := ovr.AllowSideEffects("queue")
 
 	decision, err := permissionPolicy.Authorize(context.Background(), ovr.PermissionAction{
@@ -38,8 +56,8 @@ func TestAllowSideEffectsPublicPolicyAllowsQueuePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authorize returned error: %v", err)
 	}
-	if !decision.Allowed {
-		t.Fatalf("Allowed = false, reason=%q", decision.Reason)
+	if decision.Allowed {
+		t.Fatal("Allowed = true, want target-scoped denial")
 	}
 }
 

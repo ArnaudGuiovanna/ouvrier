@@ -80,6 +80,9 @@ func TestOllamaCompleteSendsChatRequestAndParsesText(t *testing.T) {
 	if resp.Usage.InputTokens != 9 || resp.Usage.OutputTokens != 4 {
 		t.Fatalf("Usage = %+v, want input 9 output 4", resp.Usage)
 	}
+	if resp.Metadata.Provider != "ollama" || resp.Metadata.Model != "ollama/llama3.1" || resp.Metadata.Latency <= 0 {
+		t.Fatalf("Metadata = %+v, want ollama model metadata", resp.Metadata)
+	}
 }
 
 func TestOllamaCompleteParsesToolCalls(t *testing.T) {

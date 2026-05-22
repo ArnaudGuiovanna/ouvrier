@@ -70,6 +70,35 @@ func TestNewHTTPHandlerRepliesWithPipelineOutputSSE(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerRedactsSensitiveSSEOutput(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"message":"Authorization: Bearer root-token","safe":"ok"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(SSE()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "root-token") {
+		t.Fatalf("SSE body leaked token:\n%s", body)
+	}
+	if !strings.Contains(body, `event: output`+"\n"+`data: {"message":"Authorization: [REDACTED]","safe":"ok"}`+"\n\n") {
+		t.Fatalf("SSE body missing redacted output:\n%s", body)
+	}
+}
+
 func TestNewHTTPHandlerStreamsSSEPipelineErrors(t *testing.T) {
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),

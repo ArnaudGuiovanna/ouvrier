@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type openAICompatConfig struct {
@@ -78,6 +79,7 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (Respo
 	if ref.Provider != p.name {
 		return Response{}, fmt.Errorf("%s provider cannot run model %q", p.name, req.Model)
 	}
+	started := time.Now()
 
 	body, err := buildOpenAICompatRequest(ref.Name, req)
 	if err != nil {
@@ -115,5 +117,5 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (Respo
 	if err != nil {
 		return Response{}, fmt.Errorf("decode %s response: %w", p.name, err)
 	}
-	return resp, nil
+	return attachResponseMetadata(resp, p.name, req.Model, started), nil
 }

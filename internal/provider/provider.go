@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
 
 // Provider is the LLM boundary used by the agent harness.
@@ -36,6 +37,13 @@ type Response struct {
 	ToolCalls  []ToolCall
 	StopReason StopReason
 	Usage      Usage
+	Metadata   ResponseMetadata
+}
+
+type ResponseMetadata struct {
+	Provider string
+	Model    string
+	Latency  time.Duration
 }
 
 type StopReason string

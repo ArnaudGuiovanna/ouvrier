@@ -607,6 +607,7 @@ func TestNewHTTPHandlerRepairsTerminalReplySchemaViolationWhenConfigured(t *test
 }
 
 func TestNewHTTPHandlerExposesSchemaRepairThroughAdminState(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {

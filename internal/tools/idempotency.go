@@ -47,7 +47,7 @@ func reserveIdempotency(ctx context.Context, tool registeredTool, raw json.RawMe
 
 	reservation, ok := idempotencyFromContext(ctx)
 	if !ok {
-		return nil
+		return errors.New("idempotent tool requires an idempotency StateStore")
 	}
 	key, err := idempotencyReservationKey(tool.name, expression, raw)
 	if err != nil {

@@ -35,11 +35,16 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 	if permissionPolicy == nil {
 		permissionPolicy = policy.NewDefaultPolicy()
 	}
+	actionKind := tool.metadata.ActionKind
+	if actionKind == "" {
+		actionKind = policy.ActionToolCall
+	}
 	action := policy.Action{
-		Kind:             policy.ActionToolCall,
+		Kind:             actionKind,
 		ToolName:         tool.name,
 		ToolCallID:       call.ID,
 		ToolKind:         string(tool.metadata.Kind),
+		Target:           tool.metadata.Target,
 		Effect:           normalizeEffect(tool.metadata.Effect),
 		IdempotencyKey:   tool.metadata.IdempotencyKey,
 		SideEffects:      append([]string(nil), tool.metadata.SideEffects...),

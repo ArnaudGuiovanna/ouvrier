@@ -167,6 +167,7 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 		eventKind = events.EventToolCallFailed
 		payload["error"] = "tool returned error result"
 	}
+	addToolResultObservability(payload, outcome.result.Content)
 	if err := h.emit(ctx, session, eventKind, payload); err != nil {
 		return provider.Message{}, nil, err
 	}
@@ -203,6 +204,25 @@ func toolResultErrorText(content json.RawMessage) string {
 	return string(content)
 }
 
+func addToolResultObservability(payload map[string]any, content json.RawMessage) {
+	if payload == nil || len(bytes.TrimSpace(content)) == 0 {
+		return
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(content, &fields); err != nil {
+		return
+	}
+	if value, ok := fields["truncated"].(bool); ok && value {
+		payload["output_truncated"] = true
+	}
+	if value, ok := fields["stdout_truncated"].(bool); ok && value {
+		payload["stdout_truncated"] = true
+	}
+	if value, ok := fields["stderr_truncated"].(bool); ok && value {
+		payload["stderr_truncated"] = true
+	}
+}
+
 func (h *Harness) emitBeforeToolCall(ctx context.Context, session runtimecore.Session, call provider.ToolCall) error {
 	return h.emit(ctx, session, events.EventBeforeTool, map[string]any{
 		"tool":         call.Name,
@@ -225,6 +245,9 @@ func (h *Harness) emitPermissionDecision(ctx context.Context, session runtimecor
 	}
 	if audit.Action.ToolKind != "" {
 		payload["tool_kind"] = audit.Action.ToolKind
+	}
+	if audit.Action.Target != "" {
+		payload["target"] = audit.Action.Target
 	}
 	if len(audit.Action.SideEffects) > 0 {
 		payload["side_effects"] = append([]string(nil), audit.Action.SideEffects...)

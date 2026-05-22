@@ -110,10 +110,6 @@ func publishNATSQueue(ctx context.Context, uri *url.URL, output string) error {
 			return nil
 		case strings.HasPrefix(line, "-ERR"):
 			return fmt.Errorf("nats queue error: %s", line)
-		case line == "" || line == "+OK" || strings.HasPrefix(line, "INFO "):
-			continue
-		default:
-			continue
 		}
 	}
 }

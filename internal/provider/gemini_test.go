@@ -90,6 +90,9 @@ func TestGeminiCompleteSendsGenerateContentRequestAndParsesText(t *testing.T) {
 	if resp.Usage.InputTokens != 7 || resp.Usage.OutputTokens != 5 {
 		t.Fatalf("Usage = %+v, want input 7 output 5", resp.Usage)
 	}
+	if resp.Metadata.Provider != "gemini" || resp.Metadata.Model != "gemini/gemini-2.0-flash" || resp.Metadata.Latency <= 0 {
+		t.Fatalf("Metadata = %+v, want gemini model metadata", resp.Metadata)
+	}
 }
 
 func TestGeminiCompleteParsesToolCalls(t *testing.T) {

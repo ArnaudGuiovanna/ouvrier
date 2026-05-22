@@ -86,6 +86,8 @@ func renderNewProject(m newProjectModel) string {
 		mutedStyle.Render("Workers for your APIs."),
 		"",
 		labelStyle.Render("new project"),
+		mutedStyle.Render("preview only - use --yes flags to scaffold"),
+		"",
 		"Project name",
 		"Trigger",
 		"Pipeline agents",
