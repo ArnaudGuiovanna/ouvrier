@@ -159,6 +159,40 @@ func runCompatChatCompletionTest(t *testing.T, providerName, modelName, wantAuth
 	assertJSONEqual(t, gotTool.Function.Parameters, `{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`)
 }
 
+func TestOpenAICompatPromptCacheNoOpMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"chatcmpl_test",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":11,"completion_tokens":7}
+		}`)
+	}))
+	defer server.Close()
+
+	p, err := provider.NewOpenAI(provider.OpenAIConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewOpenAI returned error: %v", err)
+	}
+	resp, err := p.Complete(context.Background(), provider.Request{
+		Model:    "openai/gpt-4.1-mini",
+		System:   "Stable harness prompt.",
+		Messages: []provider.Message{provider.UserText("hello")},
+		CacheKey: "prompt:test-cache-key",
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	cache := resp.Metadata.PromptCache
+	if cache.CacheKey != "prompt:test-cache-key" ||
+		!cache.Requested ||
+		cache.Supported ||
+		cache.Applied ||
+		cache.Reason == "" {
+		t.Fatalf("PromptCache = %+v, want explicit unsupported no-op metadata", cache)
+	}
+}
+
 func runCompatToolCallResponseTest(t *testing.T, providerName, modelName string, factory compatProviderFactory) {
 	t.Helper()
 

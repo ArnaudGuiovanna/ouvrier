@@ -3,12 +3,13 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type anthropicRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
+	System    any                `json:"system,omitempty"`
 	Messages  []anthropicMessage `json:"messages"`
 	Tools     []anthropicTool    `json:"tools,omitempty"`
 }
@@ -27,20 +28,32 @@ type anthropicBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
+	Cache     *anthropicCache `json:"cache_control,omitempty"`
 }
 
 type anthropicTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	Cache       *anthropicCache `json:"cache_control,omitempty"`
+}
+
+type anthropicCache struct {
+	Type string `json:"type"`
 }
 
 type anthropicResponse struct {
 	Content    []anthropicBlock `json:"content"`
 	StopReason string           `json:"stop_reason"`
 	Usage      struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens   int `json:"input_tokens"`
+		OutputTokens  int `json:"output_tokens"`
+		CacheRead     int `json:"cache_read_input_tokens"`
+		CacheCreate   int `json:"cache_creation_input_tokens"`
+		CacheCreation struct {
+			Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+			Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+		} `json:"cache_creation"`
 	} `json:"usage"`
 }
 
@@ -49,13 +62,44 @@ func buildAnthropicRequest(model string, req Request) (anthropicRequest, error) 
 	if err != nil {
 		return anthropicRequest{}, err
 	}
+	system, tools, _ := anthropicPromptPrefix(req)
 	return anthropicRequest{
 		Model:     model,
 		MaxTokens: defaultAnthropicMaxTokens,
-		System:    req.System,
+		System:    system,
 		Messages:  messages,
-		Tools:     anthropicToolsFromProvider(req.Tools),
+		Tools:     tools,
 	}, nil
+}
+
+func anthropicPromptPrefix(req Request) (any, []anthropicTool, bool) {
+	tools := anthropicToolsFromProvider(req.Tools)
+	var system any
+	if strings.TrimSpace(req.System) != "" {
+		system = req.System
+	}
+	if strings.TrimSpace(req.CacheKey) == "" {
+		return system, tools, false
+	}
+	cache := &anthropicCache{Type: "ephemeral"}
+	if system != nil {
+		system = []anthropicBlock{{
+			Type:  "text",
+			Text:  req.System,
+			Cache: cache,
+		}}
+		return system, tools, true
+	}
+	if len(tools) > 0 {
+		tools[len(tools)-1].Cache = cache
+		return system, tools, true
+	}
+	return system, tools, false
+}
+
+func anthropicPromptCacheRequestedPrefix(req Request) bool {
+	_, _, applied := anthropicPromptPrefix(req)
+	return applied
 }
 
 func anthropicMessagesFromProvider(messages []Message) ([]anthropicMessage, error) {
@@ -126,7 +170,11 @@ func anthropicBlockFromProvider(block Block) (anthropicBlock, error) {
 func anthropicToolsFromProvider(tools []ToolSpec) []anthropicTool {
 	out := make([]anthropicTool, 0, len(tools))
 	for _, tool := range tools {
-		out = append(out, anthropicTool(tool))
+		out = append(out, anthropicTool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: append(json.RawMessage(nil), tool.InputSchema...),
+		})
 	}
 	return out
 }
@@ -137,6 +185,13 @@ func (r anthropicResponse) toProviderResponse() (Response, error) {
 		Usage: Usage{
 			InputTokens:  r.Usage.InputTokens,
 			OutputTokens: r.Usage.OutputTokens,
+		},
+		Metadata: ResponseMetadata{
+			PromptCache: PromptCacheMetadata{
+				Applied:          r.promptCacheApplied(),
+				ReadInputTokens:  r.Usage.CacheRead,
+				WriteInputTokens: r.promptCacheWriteTokens(),
+			},
 		},
 	}
 	for _, block := range r.Content {
@@ -152,6 +207,16 @@ func (r anthropicResponse) toProviderResponse() (Response, error) {
 		}
 	}
 	return resp, nil
+}
+
+func (r anthropicResponse) promptCacheApplied() bool {
+	return r.Usage.CacheRead > 0 || r.promptCacheWriteTokens() > 0
+}
+
+func (r anthropicResponse) promptCacheWriteTokens() int {
+	return r.Usage.CacheCreate +
+		r.Usage.CacheCreation.Ephemeral5m +
+		r.Usage.CacheCreation.Ephemeral1h
 }
 
 func anthropicStopReason(reason string) StopReason {

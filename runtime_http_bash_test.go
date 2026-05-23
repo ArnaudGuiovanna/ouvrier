@@ -3,6 +3,7 @@ package ovr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,6 +88,62 @@ func TestNewHTTPHandlerRunsBashThroughToolExecutorSandbox(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerRunsIsolatedBashByDefaultWhenAvailable(t *testing.T) {
+	if err := checkBashIsolationAvailable(context.Background()); err != nil {
+		t.Skipf("isolated bash sandbox unavailable on this host: %v", err)
+	}
+	root := t.TempDir()
+	t.Setenv("VISIBLE", "ok")
+	t.Setenv("SECRET", "hidden")
+	call := provider.ToolCall{
+		ID:        "call_bash",
+		Name:      "bash",
+		Arguments: []byte(`{"command":"printf '%s' \"$VISIBLE:$SECRET:$PWD\""}`),
+	}
+	scripted := &httpScriptedProvider{
+		responses: []provider.Response{
+			{Text: "need shell", StopReason: provider.StopToolUse, ToolCalls: []provider.ToolCall{call}},
+			{Text: `{"status":"done"}`, StopReason: provider.StopEndTurn},
+		},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /logs"),
+		Pipe("inspect logs",
+			Model("anthropic/claude-sonnet-4-6"),
+			Bash(Sandbox(root, AllowEnv("VISIBLE"))),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{
+		provider:     scripted,
+		toolExecutor: bashAllowedExecutor(),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/logs", strings.NewReader(`{"file":"app.log"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	toolResult := scripted.requests[1].Messages[len(scripted.requests[1].Messages)-1].Blocks[0].ToolResult
+	if toolResult == nil || toolResult.IsError {
+		t.Fatalf("tool result = %+v, want successful isolated bash result", toolResult)
+	}
+	var bashResult runtimeHTTPBashResult
+	if err := json.Unmarshal(toolResult.Content, &bashResult); err != nil {
+		t.Fatalf("bash result content is not JSON: %v; content=%s", err, toolResult.Content)
+	}
+	if !strings.Contains(bashResult.Stdout, "ok::/workspace") {
+		t.Fatalf("stdout = %q, want allowlisted env and container workspace PWD", bashResult.Stdout)
+	}
+	if strings.Contains(bashResult.Stdout, "hidden") || strings.Contains(bashResult.Stdout, root) {
+		t.Fatalf("stdout leaked host details: %q", bashResult.Stdout)
+	}
+}
+
 func TestNewHTTPHandlerDeniesBashByDefault(t *testing.T) {
 	root := t.TempDir()
 	call := provider.ToolCall{
@@ -125,7 +182,15 @@ func TestNewHTTPHandlerDeniesBashByDefault(t *testing.T) {
 	}
 }
 
-func TestRuntimeRejectsBashWithoutUnsafeHostExecution(t *testing.T) {
+func TestRuntimeRejectsBashWhenIsolatedBackendUnavailable(t *testing.T) {
+	originalCheck := checkBashIsolationAvailable
+	t.Cleanup(func() {
+		checkBashIsolationAvailable = originalCheck
+	})
+	checkBashIsolationAvailable = func(context.Context) error {
+		return errors.New("namespace disabled")
+	}
+
 	root := t.TempDir()
 	nodes := []Node{
 		From("POST /logs"),
@@ -135,21 +200,13 @@ func TestRuntimeRejectsBashWithoutUnsafeHostExecution(t *testing.T) {
 		),
 		Reply(JSON[httpTestReply]()),
 	}
-	plans, err := compilePlans(nodes)
-	if err != nil {
-		t.Fatalf("compilePlans returned error: %v", err)
-	}
-	_, _, err = httpRuntime{}.registerStepTools(context.Background(), bashAllowedExecutor(), plans[0].Steps[0])
-	if err == nil || !strings.Contains(err.Error(), "cannot enforce filesystem, process, and network isolation") {
-		t.Fatalf("registerStepTools error = %v, want bash isolation fail-fast", err)
-	}
 
-	_, err = newHTTPHandlerWithRuntime(nodes, httpRuntime{
+	_, err := newHTTPHandlerWithRuntime(nodes, httpRuntime{
 		provider:     &httpScriptedProvider{},
 		toolExecutor: bashAllowedExecutor(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "requires UnsafeBashHostExecution") {
-		t.Fatalf("newHTTPHandlerWithRuntime error = %v, want bash runtime guard fail-fast", err)
+	if err == nil || !strings.Contains(err.Error(), "isolated Bash sandbox unavailable") {
+		t.Fatalf("newHTTPHandlerWithRuntime error = %v, want bash isolation fail-fast", err)
 	}
 }
 

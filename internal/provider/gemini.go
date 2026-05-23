@@ -94,5 +94,5 @@ func (p *Gemini) Complete(ctx context.Context, req Request) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	return attachResponseMetadata(resp, p.Name(), req.Model, started), nil
+	return attachResponseMetadata(resp, p.Name(), req.Model, started, req, promptCacheUnsupported), nil
 }

@@ -101,5 +101,6 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 	if err != nil {
 		return Response{}, err
 	}
-	return attachResponseMetadata(resp, a.Name(), req.Model, started), nil
+	resp.Metadata.PromptCache.Applied = resp.Metadata.PromptCache.Applied || anthropicPromptCacheRequestedPrefix(req)
+	return attachResponseMetadata(resp, a.Name(), req.Model, started, req, promptCacheAnthropic), nil
 }

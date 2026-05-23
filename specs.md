@@ -169,7 +169,7 @@ Une étape du pipeline. Un agent autonome défini par un goal en langage naturel
 - `ovr.Tool("name", goFunc)` — fonction Go enregistrée comme tool
 - `ovr.Skill("dossier-name")` — référence un dossier `./skills/dossier-name/SKILL.md`
 - `ovr.MCP("server-name")` — connecte un MCP server externe (URL dans .env)
-- `ovr.Bash(ovr.Sandbox("/tmp/workdir"))` — shell sandboxé cible ; l'exécution shell hôte actuelle exige `ovr.UnsafeBashHostExecution()`
+- `ovr.Bash(ovr.Sandbox("/tmp/workdir"))` — shell sandboxé cible ; échoue au boot si la plateforme ne peut pas appliquer l'isolation demandée
 - `ovr.Timeout("30s")` — borne temporelle du Pipe
 - `ovr.Retry(3, ovr.ExponentialBackoff())` — politique de retry
 - `ovr.NoCache()` — désactive le prompt caching pour ce Pipe
@@ -432,15 +432,16 @@ ovr.Pipe("...", ovr.MCP("moodle-mcp"))
 
 ### 5.4 Bash — shell sandboxé
 
-Statut courant : la surface Bash et les tests de base existent. Le runtime
-échoue explicitement au boot si `UnsafeBashHostExecution()` n'est pas fourni,
-car l'implémentation shell hôte actuelle ne garantit pas encore l'isolation
-filesystem/process/réseau complète. Le durcissement sandbox complet et les
-garanties multi-plateformes ci-dessous restent des critères v0.1 à finaliser.
+Statut courant : la surface Bash et les tests de base existent. Par défaut,
+le runtime exige un backend d'isolation plateforme capable de créer un
+workspace borné, un environnement filtré, un namespace réseau fermé et un
+process group tué au timeout. Si ces garanties ne sont pas disponibles, le
+runtime échoue explicitement au boot. `UnsafeBashHostExecution()` reste un
+fallback explicite pour le local/dev ou les workloads de confiance.
 
 ```go
 ovr.Pipe("Analyse les logs",
-    ovr.Bash(ovr.Sandbox("/tmp/workspace"), ovr.UnsafeBashHostExecution()),
+    ovr.Bash(ovr.Sandbox("/tmp/workspace")),
 )
 ```
 

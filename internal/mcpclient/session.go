@@ -64,21 +64,18 @@ func (s *Session) RegisterTools(ctx context.Context, executor *tools.Executor) (
 		return nil, err
 	}
 
-	specs := make([]provider.ToolSpec, 0, len(remoteTools))
-	for _, remoteTool := range remoteTools {
-		if remoteTool == nil {
-			continue
-		}
-		spec, err := providerToolSpec(s.serverName, remoteTool)
-		if err != nil {
-			return nil, err
-		}
+	registrations, err := providerToolSpecs(s.serverName, remoteTools)
+	if err != nil {
+		return nil, err
+	}
+	specs := make([]provider.ToolSpec, 0, len(registrations))
+	for _, registration := range registrations {
 		handler := mcpToolHandler{
 			session:    s,
-			localName:  spec.Name,
-			remoteName: remoteTool.Name,
+			localName:  registration.Name,
+			remoteName: registration.remoteName,
 		}
-		if err := executor.RegisterHandler(spec.Name, handler, tools.WithMetadata(tools.Metadata{
+		if err := executor.RegisterHandler(registration.Name, handler, tools.WithMetadata(tools.Metadata{
 			Kind:        tools.ToolKindMCP,
 			Target:      s.serverName,
 			Effect:      policy.EffectSideEffecting,
@@ -86,7 +83,7 @@ func (s *Session) RegisterTools(ctx context.Context, executor *tools.Executor) (
 		})); err != nil {
 			return nil, err
 		}
-		specs = append(specs, spec)
+		specs = append(specs, registration.ToolSpec)
 	}
 	return specs, nil
 }
@@ -115,6 +112,9 @@ func (s *Session) listTools(ctx context.Context) ([]*mcp.Tool, error) {
 }
 
 func providerToolSpec(serverName string, tool *mcp.Tool) (provider.ToolSpec, error) {
+	if strings.TrimSpace(tool.Name) == "" {
+		return provider.ToolSpec{}, fmt.Errorf("%w: MCP tool name is required", ErrInvalidServer)
+	}
 	schema := []byte(`{"type":"object"}`)
 	if tool.InputSchema != nil {
 		encoded, err := json.Marshal(tool.InputSchema)
@@ -128,6 +128,34 @@ func providerToolSpec(serverName string, tool *mcp.Tool) (provider.ToolSpec, err
 		Description: strings.TrimSpace(tool.Description),
 		InputSchema: schema,
 	}, nil
+}
+
+type providerToolRegistration struct {
+	provider.ToolSpec
+	remoteName string
+}
+
+func providerToolSpecs(serverName string, tools []*mcp.Tool) ([]providerToolRegistration, error) {
+	specs := make([]providerToolRegistration, 0, len(tools))
+	seen := make(map[string]string)
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		spec, err := providerToolSpec(serverName, tool)
+		if err != nil {
+			return nil, err
+		}
+		if previous, ok := seen[spec.Name]; ok {
+			return nil, fmt.Errorf("%w: MCP tools %q and %q both map to local tool %q", ErrInvalidServer, previous, tool.Name, spec.Name)
+		}
+		seen[spec.Name] = tool.Name
+		specs = append(specs, providerToolRegistration{
+			ToolSpec:   spec,
+			remoteName: tool.Name,
+		})
+	}
+	return specs, nil
 }
 
 type mcpToolHandler struct {

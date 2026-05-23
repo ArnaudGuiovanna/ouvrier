@@ -103,6 +103,129 @@ func TestAnthropicCompleteSendsMessagesRequest(t *testing.T) {
 	}
 }
 
+func TestAnthropicCompleteMarksSystemPromptForPromptCaching(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if err := json.NewDecoder(req.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("request body is not JSON: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"content": [{"type": "text", "text": "done"}],
+			"stop_reason": "end_turn",
+			"usage": {
+				"input_tokens": 7,
+				"output_tokens": 11,
+				"cache_creation_input_tokens": 5,
+				"cache_read_input_tokens": 3
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	p, err := provider.NewAnthropic(provider.AnthropicConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewAnthropic returned error: %v", err)
+	}
+
+	resp, err := p.Complete(context.Background(), provider.Request{
+		Model:    "anthropic/claude-sonnet-4-6",
+		System:   "Stable harness prompt.",
+		Messages: []provider.Message{provider.UserText("hello")},
+		CacheKey: "prompt:test-cache-key",
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+
+	system, ok := gotBody["system"].([]any)
+	if !ok || len(system) != 1 {
+		t.Fatalf("system = %#v, want one cached system block", gotBody["system"])
+	}
+	block, ok := system[0].(map[string]any)
+	if !ok {
+		t.Fatalf("system block = %#v, want object", system[0])
+	}
+	if block["text"] != "Stable harness prompt." {
+		t.Fatalf("system text = %#v, want stable prompt", block["text"])
+	}
+	cache, ok := block["cache_control"].(map[string]any)
+	if !ok || cache["type"] != "ephemeral" {
+		t.Fatalf("cache_control = %#v, want ephemeral cache control", block["cache_control"])
+	}
+	if resp.Metadata.PromptCache.CacheKey != "prompt:test-cache-key" ||
+		!resp.Metadata.PromptCache.Requested ||
+		!resp.Metadata.PromptCache.Supported ||
+		!resp.Metadata.PromptCache.Applied ||
+		resp.Metadata.PromptCache.WriteInputTokens != 5 ||
+		resp.Metadata.PromptCache.ReadInputTokens != 3 {
+		t.Fatalf("PromptCache = %+v, want applied Anthropic prompt cache metadata", resp.Metadata.PromptCache)
+	}
+}
+
+func TestAnthropicCompleteMarksLastToolForPromptCachingWhenSystemEmpty(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if err := json.NewDecoder(req.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("request body is not JSON: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"content": [{"type": "text", "text": "done"}],
+			"stop_reason": "end_turn",
+			"usage": {
+				"input_tokens": 7,
+				"output_tokens": 11,
+				"cache_creation": {"ephemeral_5m_input_tokens": 13}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	p, err := provider.NewAnthropic(provider.AnthropicConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewAnthropic returned error: %v", err)
+	}
+
+	resp, err := p.Complete(context.Background(), provider.Request{
+		Model:    "anthropic/claude-sonnet-4-6",
+		Messages: []provider.Message{provider.UserText("hello")},
+		CacheKey: "prompt:test-cache-key",
+		Tools: []provider.ToolSpec{{
+			Name:        "lookup",
+			Description: "Lookup data.",
+			InputSchema: []byte(`{"type":"object"}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if _, ok := gotBody["system"]; ok {
+		t.Fatalf("system = %#v, want omitted system", gotBody["system"])
+	}
+	tools, ok := gotBody["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one tool", gotBody["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tool = %#v, want object", tools[0])
+	}
+	cache, ok := tool["cache_control"].(map[string]any)
+	if !ok || cache["type"] != "ephemeral" {
+		t.Fatalf("cache_control = %#v, want ephemeral cache control", tool["cache_control"])
+	}
+	if resp.Metadata.PromptCache.WriteInputTokens != 13 {
+		t.Fatalf("PromptCache = %+v, want nested cache creation tokens", resp.Metadata.PromptCache)
+	}
+}
+
 func TestAnthropicCompleteParsesToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -85,6 +85,31 @@ func TestOllamaCompleteSendsChatRequestAndParsesText(t *testing.T) {
 	}
 }
 
+func TestOllamaPromptCacheNoOpMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"model": "llama3.1",
+			"message": {"role": "assistant", "content": "done"},
+			"done": true,
+			"done_reason": "stop"
+		}`))
+	}))
+	defer server.Close()
+
+	p := provider.NewOllama(provider.OllamaConfig{BaseURL: server.URL})
+	resp, err := p.Complete(context.Background(), provider.Request{
+		Model:    "ollama/llama3.1",
+		System:   "Stable harness prompt.",
+		Messages: []provider.Message{provider.UserText("hello")},
+		CacheKey: "prompt:test-cache-key",
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	assertPromptCacheNoOp(t, resp.Metadata.PromptCache)
+}
+
 func TestOllamaCompleteParsesToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

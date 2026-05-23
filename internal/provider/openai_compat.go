@@ -117,5 +117,5 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (Respo
 	if err != nil {
 		return Response{}, fmt.Errorf("decode %s response: %w", p.name, err)
 	}
-	return attachResponseMetadata(resp, p.name, req.Model, started), nil
+	return attachResponseMetadata(resp, p.name, req.Model, started, req, promptCacheUnsupported), nil
 }

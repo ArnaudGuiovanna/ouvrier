@@ -31,6 +31,8 @@ const shutdownTimeout = 5 * time.Second
 const maxHTTPRequestBodyBytes = 1 << 20
 const directReplyOKOutput = `{"status":"ok"}`
 
+var checkBashIsolationAvailable = tools.CheckBashIsolationAvailable
+
 type httpStatusResponse struct {
 	Status string `json:"status"`
 	Output string `json:"output,omitempty"`
@@ -130,7 +132,12 @@ func validateRuntimeGuardsForStep(step runtimeplan.Step) error {
 			if name == "" {
 				name = defaultBashToolName
 			}
-			return fmt.Errorf("%w: Bash tool %q requires UnsafeBashHostExecution because host execution cannot enforce filesystem, process, and network isolation", ErrInvalidNode, name)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := checkBashIsolationAvailable(ctx)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("%w: isolated Bash sandbox unavailable for tool %q: %w", ErrInvalidNode, name, err)
+			}
 		}
 	}
 	for _, branch := range step.Branches {

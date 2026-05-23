@@ -1333,6 +1333,61 @@ func TestRunEmitsProviderResponseMetadataAfterLLM(t *testing.T) {
 	}
 }
 
+func TestRunEmitsPromptCacheMetadataAfterLLM(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+			Metadata: provider.ResponseMetadata{
+				Provider: "scripted",
+				Model:    "anthropic/claude-sonnet-4-6",
+				PromptCache: provider.PromptCacheMetadata{
+					Requested:        true,
+					Supported:        true,
+					Applied:          true,
+					CacheKey:         "prompt:test-cache-key",
+					ReadInputTokens:  17,
+					WriteInputTokens: 23,
+				},
+			},
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+
+	event, ok := findEvent(stream.List(), events.EventAfterLLM)
+	if !ok {
+		t.Fatal("EventAfterLLM not emitted")
+	}
+	if event.Payload["prompt_cache_requested"] != true ||
+		event.Payload["prompt_cache_supported"] != true ||
+		event.Payload["prompt_cache_applied"] != true ||
+		event.Payload["prompt_cache_read_tokens"] != 17 ||
+		event.Payload["prompt_cache_write_tokens"] != 23 {
+		t.Fatalf("after LLM payload = %+v, want prompt cache metadata", event.Payload)
+	}
+	if _, ok := event.Payload["prompt_cache_key"]; ok {
+		t.Fatalf("after LLM payload = %+v, must not expose prompt cache key", event.Payload)
+	}
+}
+
 func TestRunBlocksProviderCallWhenBeforeLLMHookFails(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

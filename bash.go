@@ -32,9 +32,9 @@ type bashPipeOption struct {
 
 // Bash declares a bash command tool named "bash" for a Pipe.
 //
-// The current host-shell implementation cannot enforce full filesystem,
-// process, and network isolation. Execution therefore requires the explicit
-// UnsafeBashHostExecution option until a real platform sandbox is available.
+// By default Bash requires a platform sandbox that can enforce workspace,
+// process, environment, and network boundaries. The runtime fails at startup
+// when those guarantees are unavailable.
 func Bash(sandbox SandboxConfig, options ...BashOption) PipeOption {
 	spec := bashSpec{
 		name:           defaultBashToolName,
@@ -104,7 +104,7 @@ func (o bashMaxOutputBytesOption) applyBash(spec *bashSpec) {
 
 type bashUnsafeHostExecutionOption struct{}
 
-// UnsafeBashHostExecution allows the current host-shell Bash implementation.
+// UnsafeBashHostExecution allows the host-shell Bash fallback.
 //
 // Use this only for local/dev or trusted workloads. Ouvrier still enforces
 // ToolExecutor permission decisions, environment allowlisting, working

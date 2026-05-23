@@ -94,3 +94,20 @@ func TestSessionRegistersSDKToolsWithExecutor(t *testing.T) {
 		t.Fatalf("permission action = %+v, want mcp kind and server target", audit.Action)
 	}
 }
+
+func TestProviderToolSpecsRejectDuplicateLocalNames(t *testing.T) {
+	_, err := providerToolSpecs("moodle-mcp", []*mcp.Tool{
+		{Name: "lookup.ticket", Description: "first"},
+		{Name: "lookup/ticket", Description: "second"},
+	})
+	if err == nil {
+		t.Fatal("providerToolSpecs returned nil error for duplicate local names")
+	}
+}
+
+func TestProviderToolSpecsRejectUnnamedRemoteTool(t *testing.T) {
+	_, err := providerToolSpecs("moodle-mcp", []*mcp.Tool{{Description: "missing name"}})
+	if err == nil {
+		t.Fatal("providerToolSpecs returned nil error for unnamed remote tool")
+	}
+}

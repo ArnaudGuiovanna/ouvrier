@@ -95,6 +95,34 @@ func TestGeminiCompleteSendsGenerateContentRequestAndParsesText(t *testing.T) {
 	}
 }
 
+func TestGeminiPromptCacheNoOpMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": "done"}]},
+				"finishReason": "STOP"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	p, err := provider.NewGemini(provider.GeminiConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewGemini returned error: %v", err)
+	}
+	resp, err := p.Complete(context.Background(), provider.Request{
+		Model:    "gemini/gemini-2.0-flash",
+		System:   "Stable harness prompt.",
+		Messages: []provider.Message{provider.UserText("hello")},
+		CacheKey: "prompt:test-cache-key",
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	assertPromptCacheNoOp(t, resp.Metadata.PromptCache)
+}
+
 func TestGeminiCompleteParsesToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -232,6 +260,17 @@ func assertNestedString(t *testing.T, value any, want string, path ...any) {
 	}
 	if gotString != want {
 		t.Fatalf("%v = %q, want %q", path, gotString, want)
+	}
+}
+
+func assertPromptCacheNoOp(t *testing.T, cache provider.PromptCacheMetadata) {
+	t.Helper()
+	if cache.CacheKey != "prompt:test-cache-key" ||
+		!cache.Requested ||
+		cache.Supported ||
+		cache.Applied ||
+		cache.Reason == "" {
+		t.Fatalf("PromptCache = %+v, want explicit unsupported no-op metadata", cache)
 	}
 }
 

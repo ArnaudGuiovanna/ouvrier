@@ -41,9 +41,20 @@ type Response struct {
 }
 
 type ResponseMetadata struct {
-	Provider string
-	Model    string
-	Latency  time.Duration
+	Provider    string
+	Model       string
+	Latency     time.Duration
+	PromptCache PromptCacheMetadata
+}
+
+type PromptCacheMetadata struct {
+	Requested        bool
+	Supported        bool
+	Applied          bool
+	CacheKey         string
+	ReadInputTokens  int
+	WriteInputTokens int
+	Reason           string
 }
 
 type StopReason string

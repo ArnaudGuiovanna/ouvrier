@@ -77,13 +77,15 @@ Current working foundations include:
 - Event stream, hooks, persisted trace events, and early HTTP admin endpoints.
 - Provider adapters for the v0.1 model prefixes.
 - `Parallel`, `Map`, bounded `Concurrency`, and `PartialOK` composition.
+- Bash capability execution through `ToolExecutor` with a platform sandbox probe
+  and explicit unsafe host fallback.
 - HTTP-only CLI scaffold and a Bubble Tea TUI preview.
 - Governed `SubAgent` foundations in active development.
 
 The v0.1 backlog remains broader: webhook/stream runtime hardening, mixed
 runtime hardening, broader queue/backpressure semantics, full CLI workflows,
-deployment, production admin/trace viewer hardening, docs, examples, Bash
-sandbox hardening, DLQ behavior, and release gates.
+deployment, production admin/trace viewer hardening, docs, examples, remaining
+Bash hardening, DLQ behavior, and release gates.
 
 ## Mental Model
 

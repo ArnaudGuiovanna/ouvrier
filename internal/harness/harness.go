@@ -239,6 +239,25 @@ func addLLMResponseMetadata(payload map[string]any, metadata provider.ResponseMe
 	if metadata.Latency > 0 {
 		payload["latency_ms"] = metadata.Latency.Milliseconds()
 	}
+	addPromptCacheMetadata(payload, metadata.PromptCache)
+}
+
+func addPromptCacheMetadata(payload map[string]any, metadata provider.PromptCacheMetadata) {
+	if payload == nil || !metadata.Requested {
+		return
+	}
+	payload["prompt_cache_requested"] = true
+	payload["prompt_cache_supported"] = metadata.Supported
+	payload["prompt_cache_applied"] = metadata.Applied
+	if metadata.ReadInputTokens > 0 {
+		payload["prompt_cache_read_tokens"] = metadata.ReadInputTokens
+	}
+	if metadata.WriteInputTokens > 0 {
+		payload["prompt_cache_write_tokens"] = metadata.WriteInputTokens
+	}
+	if metadata.Reason != "" {
+		payload["prompt_cache_reason"] = metadata.Reason
+	}
 }
 
 func providerAttemptNumber(err error, retryAllowed bool, maxRetries int) int {
