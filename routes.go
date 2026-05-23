@@ -150,6 +150,7 @@ func registerHTTPAdminRoutes(mux *http.ServeMux, rt httpRuntime) {
 	mux.HandleFunc("GET /admin/traces", rt.serveAdminTraces)
 	mux.HandleFunc("GET /admin/traces/{execID}", rt.serveAdminTrace)
 	mux.HandleFunc("POST /admin/trigger", rt.serveAdminTrigger)
+	registerHTTPDevRoutes(mux, rt)
 }
 
 func (rt httpRuntime) serveAdminHealth(w http.ResponseWriter, req *http.Request) {
@@ -244,16 +245,28 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 		writeJSONStatus(w, http.StatusNotFound, "not_found")
 		return
 	}
+	selector, err := parseAdminTraceSelector(execID)
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trace")
+		return
+	}
+	afterID, err := parseAdminTraceAfterID(req.URL.Query().Get("after_id"))
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_trace_cursor")
+		return
+	}
 
 	response := adminTraceResponse{Status: "ok"}
-	if rt.stateStore != nil {
-		execution, ok, err := rt.stateStore.Execution(req.Context(), execID)
+	knownTrace := false
+	if rt.stateStore != nil && selector.kind == adminTraceSelectorExec {
+		execution, ok, err := rt.stateStore.Execution(req.Context(), selector.value)
 		if err != nil {
 			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
 			return
 		}
 		if ok {
 			response.Execution = adminExecutionResponseFromState(execution)
+			knownTrace = true
 		}
 
 		sessions, err := rt.stateStore.Sessions(req.Context())
@@ -261,29 +274,65 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
 			return
 		}
+		traceSessions := make([]runtimeplan.Session, 0)
 		for _, session := range sessions {
-			if session.ExecID == execID {
-				response.Sessions++
+			if session.ExecID == selector.value {
+				traceSessions = append(traceSessions, session)
 			}
 		}
+		sort.Slice(traceSessions, func(i, j int) bool {
+			if !traceSessions[i].StartedAt.Equal(traceSessions[j].StartedAt) {
+				return traceSessions[i].StartedAt.Before(traceSessions[j].StartedAt)
+			}
+			return traceSessions[i].SessionID < traceSessions[j].SessionID
+		})
+		response.Sessions = len(traceSessions)
+		response.SessionDetails = make([]adminSessionResponse, 0, len(traceSessions))
+		for _, session := range traceSessions {
+			response.SessionDetails = append(response.SessionDetails, adminSessionResponseFromRuntime(session))
+		}
+		if response.Sessions > 0 {
+			knownTrace = true
+		}
 
-		violations, err := rt.stateStore.SchemaViolations(req.Context(), execID)
+		violations, err := rt.stateStore.SchemaViolations(req.Context(), selector.value)
 		if err != nil {
 			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
 			return
 		}
 		response.SchemaViolations = len(violations)
+		if response.SchemaViolations > 0 {
+			knownTrace = true
+		}
 	}
 
-	recorded, err := rt.adminEvents(req.Context(), execID)
+	recorded, err := rt.adminEventsForSelectorSince(req.Context(), selector, afterID)
 	if err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
 		return
 	}
 	for _, event := range recorded {
 		response.Events = append(response.Events, adminEventResponseFromEvent(event))
+		knownTrace = true
+		if event.ID > response.LastEventID {
+			response.LastEventID = event.ID
+		}
 	}
-	if response.Execution == nil && len(response.Events) == 0 {
+	if afterID > 0 && len(recorded) == 0 && !knownTrace {
+		var lastExistingID uint64
+		knownTrace, lastExistingID, err = rt.adminTraceKnown(req.Context(), selector)
+		if err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+			return
+		}
+		if lastExistingID > response.LastEventID {
+			response.LastEventID = lastExistingID
+		}
+	}
+	if afterID > 0 && knownTrace && response.LastEventID < afterID {
+		response.LastEventID = afterID
+	}
+	if !knownTrace {
 		writeJSONStatus(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -292,8 +341,12 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 }
 
 func (rt httpRuntime) adminEvents(ctx context.Context, execID string) ([]events.Event, error) {
+	return rt.adminEventsSince(ctx, execID, 0)
+}
+
+func (rt httpRuntime) adminEventsSince(ctx context.Context, execID string, afterID uint64) ([]events.Event, error) {
 	if rt.stateStore != nil {
-		recorded, err := rt.stateStore.Events(ctx, execID)
+		recorded, err := rt.stateStore.EventsSince(ctx, execID, afterID)
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +357,7 @@ func (rt httpRuntime) adminEvents(ctx context.Context, execID string) ([]events.
 	if rt.eventStream == nil {
 		return nil, nil
 	}
-	recorded := rt.eventStream.List()
+	recorded := rt.eventStream.Since(afterID)
 	if execID == "" {
 		return recorded, nil
 	}
@@ -315,6 +368,95 @@ func (rt httpRuntime) adminEvents(ctx context.Context, execID string) ([]events.
 		}
 	}
 	return filtered, nil
+}
+
+func (rt httpRuntime) adminEventsForSelectorSince(ctx context.Context, selector adminTraceSelector, afterID uint64) ([]events.Event, error) {
+	if selector.kind == adminTraceSelectorExec {
+		return rt.adminEventsSince(ctx, selector.value, afterID)
+	}
+	recorded, err := rt.adminEventsSince(ctx, "", afterID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]events.Event, 0, len(recorded))
+	for _, event := range recorded {
+		if selector.matches(event) {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered, nil
+}
+
+func (rt httpRuntime) adminTraceKnown(ctx context.Context, selector adminTraceSelector) (bool, uint64, error) {
+	recorded, err := rt.adminEventsForSelectorSince(ctx, selector, 0)
+	if err != nil {
+		return false, 0, err
+	}
+	var lastID uint64
+	for _, event := range recorded {
+		if event.ID > lastID {
+			lastID = event.ID
+		}
+	}
+	return len(recorded) > 0, lastID, nil
+}
+
+type adminTraceSelectorKind string
+
+const (
+	adminTraceSelectorExec    adminTraceSelectorKind = "exec"
+	adminTraceSelectorTrace   adminTraceSelectorKind = "trace"
+	adminTraceSelectorSession adminTraceSelectorKind = "session"
+	adminTraceSelectorEvent   adminTraceSelectorKind = "event"
+)
+
+type adminTraceSelector struct {
+	kind    adminTraceSelectorKind
+	value   string
+	eventID uint64
+}
+
+func parseAdminTraceSelector(raw string) (adminTraceSelector, error) {
+	raw = strings.TrimSpace(raw)
+	prefix, value, hasPrefix := strings.Cut(raw, ":")
+	if !hasPrefix {
+		return adminTraceSelector{kind: adminTraceSelectorExec, value: raw}, nil
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return adminTraceSelector{}, errors.New("trace selector value is required")
+	}
+	switch prefix {
+	case string(adminTraceSelectorExec):
+		return adminTraceSelector{kind: adminTraceSelectorExec, value: value}, nil
+	case string(adminTraceSelectorTrace):
+		return adminTraceSelector{kind: adminTraceSelectorTrace, value: value}, nil
+	case string(adminTraceSelectorSession):
+		return adminTraceSelector{kind: adminTraceSelectorSession, value: value}, nil
+	case string(adminTraceSelectorEvent):
+		eventID, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return adminTraceSelector{}, err
+		}
+		return adminTraceSelector{kind: adminTraceSelectorEvent, value: value, eventID: eventID}, nil
+	default:
+		return adminTraceSelector{kind: adminTraceSelectorExec, value: raw}, nil
+	}
+}
+
+func (s adminTraceSelector) matches(event events.Event) bool {
+	switch s.kind {
+	case adminTraceSelectorExec:
+		return event.ExecID == s.value
+	case adminTraceSelectorTrace:
+		return event.TraceID == s.value
+	case adminTraceSelectorSession:
+		return event.SessionID == s.value
+	case adminTraceSelectorEvent:
+		return event.ID == s.eventID
+	default:
+		return false
+	}
 }
 
 func countAdminEventsByKind(recorded []events.Event, kind events.EventKind) int {
@@ -792,6 +934,7 @@ type adminTracesResponse struct {
 }
 
 type adminTraceSummary struct {
+	TraceKey     string    `json:"trace_key"`
 	ExecID       string    `json:"exec_id,omitempty"`
 	TraceID      string    `json:"trace_id,omitempty"`
 	SessionID    string    `json:"session_id,omitempty"`
@@ -813,7 +956,9 @@ type adminTraceResponse struct {
 	Execution        *adminExecutionResponse `json:"execution,omitempty"`
 	Events           []adminEventResponse    `json:"events"`
 	Sessions         int                     `json:"sessions"`
+	SessionDetails   []adminSessionResponse  `json:"session_details,omitempty"`
 	SchemaViolations int                     `json:"schema_violations"`
+	LastEventID      uint64                  `json:"last_event_id"`
 }
 
 type adminTriggerRequest struct {
@@ -910,6 +1055,19 @@ type adminExecutionResponse struct {
 	CompletedAt time.Time `json:"completed_at,omitempty"`
 }
 
+type adminSessionResponse struct {
+	ExecID          string    `json:"exec_id"`
+	SessionID       string    `json:"session_id"`
+	ParentSessionID string    `json:"parent_session_id,omitempty"`
+	TraceID         string    `json:"trace_id,omitempty"`
+	Model           string    `json:"model,omitempty"`
+	StartedAt       time.Time `json:"started_at,omitempty"`
+	MaxIterations   int       `json:"max_iterations,omitempty"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	MaxCostUSD      float64   `json:"max_cost_usd,omitempty"`
+	MaxWallClockMS  int64     `json:"max_wallclock_ms,omitempty"`
+}
+
 type adminEventResponse struct {
 	ID        uint64         `json:"id"`
 	At        time.Time      `json:"at"`
@@ -934,6 +1092,18 @@ func parseAdminTraceLimit(raw string) int {
 	return limit
 }
 
+func parseAdminTraceAfterID(raw string) (uint64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	afterID, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return afterID, nil
+}
+
 func summarizeAdminTraces(recorded []events.Event, limit int) []adminTraceSummary {
 	byKey := make(map[string]*adminTraceSummary)
 	order := make([]string, 0)
@@ -942,6 +1112,7 @@ func summarizeAdminTraces(recorded []events.Event, limit int) []adminTraceSummar
 		summary, ok := byKey[key]
 		if !ok {
 			summary = &adminTraceSummary{
+				TraceKey:     key,
 				ExecID:       event.ExecID,
 				TraceID:      event.TraceID,
 				SessionID:    event.SessionID,
@@ -1004,6 +1175,21 @@ func adminExecutionResponseFromState(execution state.Execution) *adminExecutionR
 		Status:      string(execution.Status),
 		StartedAt:   execution.StartedAt,
 		CompletedAt: execution.CompletedAt,
+	}
+}
+
+func adminSessionResponseFromRuntime(session runtimeplan.Session) adminSessionResponse {
+	return adminSessionResponse{
+		ExecID:          session.ExecID,
+		SessionID:       session.SessionID,
+		ParentSessionID: session.ParentSessionID,
+		TraceID:         session.TraceID,
+		Model:           session.Model,
+		StartedAt:       session.StartedAt,
+		MaxIterations:   session.Budget.MaxIterations,
+		MaxTokens:       session.Budget.MaxTokens,
+		MaxCostUSD:      session.Budget.MaxCostUSD,
+		MaxWallClockMS:  session.Budget.MaxWallClock.Milliseconds(),
 	}
 }
 

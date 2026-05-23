@@ -417,6 +417,78 @@ func TestHTTPAdminTracesListsPersistentTraceSummariesFromStateStore(t *testing.T
 	}
 }
 
+func TestHTTPAdminTracesIncludesSelectableKeyForEventsWithoutExecution(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{
+		Kind: events.EventSignatureDecision,
+		Payload: map[string]any{
+			"decision": "missing",
+		},
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Traces []struct {
+			TraceKey string `json:"trace_key"`
+			ExecID   string `json:"exec_id"`
+			Events   int    `json:"events"`
+		} `json:"traces"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Traces) != 1 {
+		t.Fatalf("body = %+v, want one runtime event trace", body)
+	}
+	if body.Traces[0].TraceKey != "event:1" || body.Traces[0].ExecID != "" || body.Traces[0].Events != 1 {
+		t.Fatalf("trace = %+v, want selectable event key without exec id", body.Traces[0])
+	}
+}
+
+func TestHTTPAdminTraceByKeyReturnsRuntimeEventWithoutExecution(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSignatureDecision, Payload: map[string]any{"decision": "missing"}})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces/event:1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status      string `json:"status"`
+		LastEventID uint64 `json:"last_event_id"`
+		Events      []struct {
+			ID     uint64 `json:"id"`
+			ExecID string `json:"exec_id"`
+			Kind   string `json:"kind"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Events) != 1 {
+		t.Fatalf("body = %+v, want one runtime event", body)
+	}
+	if body.Events[0].ID != 1 || body.Events[0].ExecID != "" || body.Events[0].Kind != string(events.EventSignatureDecision) {
+		t.Fatalf("events = %+v, want signature event without exec id", body.Events)
+	}
+	if body.LastEventID != 1 {
+		t.Fatalf("last_event_id = %d, want 1", body.LastEventID)
+	}
+}
+
 func TestHTTPAdminTraceByExecutionIncludesExecutionAndEvents(t *testing.T) {
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
@@ -437,6 +509,20 @@ func TestHTTPAdminTraceByExecutionIncludesExecutionAndEvents(t *testing.T) {
 		TraceID:   "trace_1",
 		Model:     "anthropic/claude-sonnet-4-6",
 		StartedAt: now,
+		Budget: runtimecore.Budget{
+			MaxIterations: 8,
+			MaxTokens:     1200,
+			MaxCostUSD:    0.25,
+			MaxWallClock:  2 * time.Second,
+		},
+	})
+	saveAdminSession(t, store, runtimecore.Session{
+		ExecID:          "exec_1",
+		SessionID:       "sess_child",
+		ParentSessionID: "sess_1",
+		TraceID:         "trace_1",
+		Model:           "anthropic/claude-haiku-4-5",
+		StartedAt:       now.Add(500 * time.Millisecond),
 	})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventPipeFailed, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
@@ -460,7 +546,18 @@ func TestHTTPAdminTraceByExecutionIncludesExecutionAndEvents(t *testing.T) {
 			ExecID string `json:"exec_id"`
 			Kind   string `json:"kind"`
 		} `json:"events"`
-		Sessions int `json:"sessions"`
+		Sessions       int `json:"sessions"`
+		SessionDetails []struct {
+			ExecID          string  `json:"exec_id"`
+			SessionID       string  `json:"session_id"`
+			ParentSessionID string  `json:"parent_session_id"`
+			TraceID         string  `json:"trace_id"`
+			Model           string  `json:"model"`
+			MaxIterations   int     `json:"max_iterations"`
+			MaxTokens       int     `json:"max_tokens"`
+			MaxCostUSD      float64 `json:"max_cost_usd"`
+			MaxWallClockMS  int64   `json:"max_wallclock_ms"`
+		} `json:"session_details"`
 	}
 	decodeAdminJSON(t, rec, &body)
 	if body.Status != "ok" || body.Execution.ExecID != "exec_1" || body.Execution.Status != "failed" {
@@ -469,8 +566,18 @@ func TestHTTPAdminTraceByExecutionIncludesExecutionAndEvents(t *testing.T) {
 	if len(body.Events) != 2 || body.Events[0].ExecID != "exec_1" || body.Events[1].Kind != string(events.EventPipeFailed) {
 		t.Fatalf("events = %+v, want only exec_1 events", body.Events)
 	}
-	if body.Sessions != 1 {
-		t.Fatalf("sessions = %d, want 1", body.Sessions)
+	if body.Sessions != 2 || len(body.SessionDetails) != 2 {
+		t.Fatalf("sessions = %d details=%+v, want two session details", body.Sessions, body.SessionDetails)
+	}
+	if body.SessionDetails[0].SessionID != "sess_1" || body.SessionDetails[0].ParentSessionID != "" {
+		t.Fatalf("root session details = %+v, want sess_1 without parent", body.SessionDetails[0])
+	}
+	if body.SessionDetails[0].MaxIterations != 8 || body.SessionDetails[0].MaxTokens != 1200 ||
+		body.SessionDetails[0].MaxCostUSD != 0.25 || body.SessionDetails[0].MaxWallClockMS != 2000 {
+		t.Fatalf("root session budget = %+v, want budget fields", body.SessionDetails[0])
+	}
+	if body.SessionDetails[1].SessionID != "sess_child" || body.SessionDetails[1].ParentSessionID != "sess_1" {
+		t.Fatalf("child session details = %+v, want child lineage", body.SessionDetails[1])
 	}
 }
 
@@ -519,6 +626,115 @@ func TestHTTPAdminTraceByExecutionReadsPersistentEventsFromStateStore(t *testing
 	}
 	if body.Sessions != 1 {
 		t.Fatalf("sessions = %d, want 1", body.Sessions)
+	}
+}
+
+func TestHTTPAdminTraceByExecutionSupportsAfterIDFromStateStore(t *testing.T) {
+	store := state.NewMemoryStore()
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:    "exec_1",
+		TraceID:   "trace_1",
+		Status:    state.ExecutionRunning,
+		StartedAt: now,
+	})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventLLMCallStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventLLMCallStarted, ExecID: "exec_other", SessionID: "sess_other", TraceID: "trace_other"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventLLMCallCompleted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces/exec_1?after_id=1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status      string `json:"status"`
+		LastEventID uint64 `json:"last_event_id"`
+		Events      []struct {
+			ID     uint64 `json:"id"`
+			ExecID string `json:"exec_id"`
+			Kind   string `json:"kind"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Events) != 2 {
+		t.Fatalf("body = %+v, want two exec_1 events after id 1", body)
+	}
+	if body.Events[0].ID != 2 || body.Events[0].Kind != string(events.EventLLMCallStarted) ||
+		body.Events[1].ID != 4 || body.Events[1].Kind != string(events.EventLLMCallCompleted) {
+		t.Fatalf("events = %+v, want exec_1 events 2 and 4", body.Events)
+	}
+	if body.LastEventID != 4 {
+		t.Fatalf("last_event_id = %d, want 4", body.LastEventID)
+	}
+}
+
+func TestHTTPAdminTraceByExecutionSupportsAfterIDFromEventStream(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallStarted, ExecID: "exec_other", SessionID: "sess_other", TraceID: "trace_other"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallCompleted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces/exec_1?after_id=1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status      string `json:"status"`
+		LastEventID uint64 `json:"last_event_id"`
+		Events      []struct {
+			ID     uint64 `json:"id"`
+			ExecID string `json:"exec_id"`
+			Kind   string `json:"kind"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Events) != 2 {
+		t.Fatalf("body = %+v, want two exec_1 events after id 1", body)
+	}
+	if body.Events[0].ID != 2 || body.Events[1].ID != 4 || body.LastEventID != 4 {
+		t.Fatalf("body = %+v, want event IDs 2 and 4 with last_event_id 4", body)
+	}
+}
+
+func TestHTTPAdminTraceByExecutionAfterIDReturnsOKWithNoNewEventsForKnownExecution(t *testing.T) {
+	store := state.NewMemoryStore()
+	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:    "exec_1",
+		TraceID:   "trace_1",
+		Status:    state.ExecutionRunning,
+		StartedAt: now,
+	})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces/exec_1?after_id=1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Status      string `json:"status"`
+		LastEventID uint64 `json:"last_event_id"`
+		Events      []struct {
+			ID uint64 `json:"id"`
+		} `json:"events"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Events) != 0 || body.LastEventID != 1 {
+		t.Fatalf("body = %+v, want ok with no new events and last_event_id 1", body)
 	}
 }
 
@@ -641,6 +857,89 @@ func TestHTTPAdminTraceByExecutionIncludesRedactedEventPayload(t *testing.T) {
 	}
 	if body.Events[0].Payload["tool"] != "load_ticket" || nested["safe"] != "visible" {
 		t.Fatalf("payload = %+v, want non-sensitive fields preserved", body.Events[0].Payload)
+	}
+}
+
+func TestHTTPDevTraceViewerIsUnavailableOutsideDevMode(t *testing.T) {
+	t.Setenv("PIP_ENV", "production")
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{adminToken: "secret-admin-token"})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dev", nil)
+	req.Header.Set("Authorization", "Bearer secret-admin-token")
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if strings.Contains(rec.Body.String(), "secret-admin-token") {
+		t.Fatalf("response leaked admin token: %q", rec.Body.String())
+	}
+}
+
+func TestHTTPDevTraceViewerServesSelfContainedUIInDevMode(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	handler := newTestAdminHTTPHandler(t, httpRuntime{})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dev", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	contentType := rec.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", contentType)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Ouvrier Dev Trace Viewer",
+		"/admin/status",
+		"/admin/traces",
+		"/admin/traces/",
+		"trace_key",
+		"after_id",
+		"last_event_id",
+		"session_details",
+		"schema_violations",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("/dev body does not contain %q", want)
+		}
+	}
+}
+
+func TestHTTPDevTraceViewerRequiresConfiguredAdminToken(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{adminToken: "secret-admin-token"})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/dev", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+
+	authorized := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dev", nil)
+	req.Header.Set("Authorization", "Bearer secret-admin-token")
+	handler.ServeHTTP(authorized, req)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want %d", authorized.Code, http.StatusOK)
+	}
+	if strings.Contains(authorized.Body.String(), "secret-admin-token") {
+		t.Fatalf("/dev body leaked admin token: %q", authorized.Body.String())
 	}
 }
 
