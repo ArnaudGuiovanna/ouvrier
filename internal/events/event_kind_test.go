@@ -22,6 +22,7 @@ func TestEventKindSpecMinimumConstants(t *testing.T) {
 		"permission_decision":      EventPermissionDecision,
 		"idempotency_decision":     EventIdempotencyDecision,
 		"signature_decision":       EventSignatureDecision,
+		"hook_failed":              EventHookFailed,
 		"schema_validation_passed": EventSchemaValidationPassed,
 		"schema_validation_failed": EventSchemaValidationFailed,
 		"schema_repair_started":    EventSchemaRepairStarted,

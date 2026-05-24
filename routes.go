@@ -645,16 +645,9 @@ func (s *adminHarnessMetricsSummary) AddEvent(event events.Event) {
 		case "iterations":
 			s.BudgetExceededIterations++
 		}
-	case events.EventPipeFailed, events.EventPipelineFailed:
-		if adminHookFailureEvent(event) {
-			s.HookFailures++
-		}
+	case events.EventHookFailed:
+		s.HookFailures++
 	}
-}
-
-func adminHookFailureEvent(event events.Event) bool {
-	errText := adminStringPayload(event.Payload, "error")
-	return strings.Contains(errText, "hook ") && strings.Contains(errText, "blocked event")
 }
 
 func adminNumericPayload(payload map[string]any, key string) float64 {
@@ -1229,6 +1222,7 @@ type adminTraceSummary struct {
 	TasksFailed            int       `json:"tasks_failed"`
 	PermissionAllowed      int       `json:"permission_allowed"`
 	PermissionDenied       int       `json:"permission_denied"`
+	HookFailures           int       `json:"hook_failures"`
 	InputTokens            int       `json:"input_tokens"`
 	OutputTokens           int       `json:"output_tokens"`
 	CostUSD                float64   `json:"cost_usd"`
@@ -1275,6 +1269,8 @@ func (s *adminTraceSummary) AddEvent(event events.Event) {
 		} else {
 			s.PermissionDenied++
 		}
+	case events.EventHookFailed:
+		s.HookFailures++
 	case events.EventSignatureDecision, events.EventIdempotencyDecision:
 		s.decisionMetrics.AddEvent(event)
 		s.SignatureDecisions = s.decisionMetrics.SignatureDecisions

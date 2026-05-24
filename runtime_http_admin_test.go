@@ -482,8 +482,9 @@ func TestHTTPAdminStatusIncludesHarnessMetricsFromEvents(t *testing.T) {
 	addAdminStoreEvent(t, store, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
 		"budget": "iterations",
 	}})
-	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPipeFailed, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
-		"error": "hook llm_call_completed blocked event: audit denied",
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventHookFailed, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"blocked_kind": string(events.EventLLMCallCompleted),
+		"error":        "hook llm_call_completed blocked event: audit denied",
 	}})
 	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
 
@@ -612,6 +613,7 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventTaskStarted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventTaskCompleted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventTaskFailed, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventHookFailed, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
 
@@ -635,6 +637,7 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 			TasksStarted     int     `json:"tasks_started"`
 			TasksCompleted   int     `json:"tasks_completed"`
 			TasksFailed      int     `json:"tasks_failed"`
+			HookFailures     int     `json:"hook_failures"`
 			SchemaViolations int     `json:"schema_violations"`
 			SchemaRepairs    int     `json:"schema_repairs"`
 			BudgetExceeded   int     `json:"budget_exceeded"`
@@ -650,11 +653,11 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	if body.Status != "ok" || len(body.Traces) != 1 {
 		t.Fatalf("body = %+v, want one trace", body)
 	}
-	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 10 {
+	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 11 {
 		t.Fatalf("trace = %+v, want exec_2 summary", body.Traces[0])
 	}
-	if body.Traces[0].LastEventID != 11 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
-		t.Fatalf("trace last event = %+v, want event 11 budget exceeded", body.Traces[0])
+	if body.Traces[0].LastEventID != 12 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
+		t.Fatalf("trace last event = %+v, want event 12 budget exceeded", body.Traces[0])
 	}
 	if body.Traces[0].LLMCalls != 1 || body.Traces[0].InputTokens != 13 || body.Traces[0].OutputTokens != 8 ||
 		body.Traces[0].CostUSD < 0.0209 || body.Traces[0].CostUSD > 0.0211 || body.Traces[0].AverageLatencyMS != 41 {
@@ -669,6 +672,9 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	}
 	if body.Traces[0].TasksStarted != 1 || body.Traces[0].TasksCompleted != 1 || body.Traces[0].TasksFailed != 1 {
 		t.Fatalf("trace task counts = %+v, want task counters", body.Traces[0])
+	}
+	if body.Traces[0].HookFailures != 1 {
+		t.Fatalf("trace hook failures = %+v, want one hook failure", body.Traces[0])
 	}
 }
 

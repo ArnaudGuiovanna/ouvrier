@@ -145,3 +145,9 @@ func TestPublicHooksRejectInvalidRegistration(t *testing.T) {
 		t.Fatal("Register returned nil for nil hook")
 	}
 }
+
+func TestPublicHookFailedEventKind(t *testing.T) {
+	if ovr.EventHookFailed != ovr.EventKind("hook_failed") {
+		t.Fatalf("EventHookFailed = %q, want hook_failed", ovr.EventHookFailed)
+	}
+}

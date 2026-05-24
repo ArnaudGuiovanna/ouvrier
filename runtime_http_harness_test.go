@@ -3,6 +3,7 @@ package ovr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -411,13 +412,15 @@ func TestNewHTTPHandlerUsesStablePipelineTraceAcrossMultiplePipes(t *testing.T) 
 }
 
 func TestNewHTTPHandlerEmitsPipelineFailedWhenStartHookBlocks(t *testing.T) {
+	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {
 		t.Fatalf("NewEventStream returned error: %v", err)
 	}
 	hooks := events.NewHookBus()
+	blocked := errors.New("pipeline audit denied token=secret123")
 	if err := hooks.Register(events.EventPipelineStarted, func(ctx context.Context, event events.Event) (events.Event, error) {
-		return event, context.Canceled
+		return event, blocked
 	}); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -428,7 +431,7 @@ func TestNewHTTPHandlerEmitsPipelineFailedWhenStartHookBlocks(t *testing.T) {
 		From("POST /tickets"),
 		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
 		Reply(JSON[httpTestReply]()),
-	}, httpRuntime{provider: scripted, eventStream: stream, hookBus: hooks})
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream, hookBus: hooks})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -446,12 +449,40 @@ func TestNewHTTPHandlerEmitsPipelineFailedWhenStartHookBlocks(t *testing.T) {
 	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineStarted); ok {
 		t.Fatalf("events = %+v, blocked pipeline_started event must not be appended", stream.List())
 	}
+	hookFailed, ok := findRuntimeHTTPEvent(stream.List(), events.EventHookFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want hook_failed event", stream.List())
+	}
+	if hookFailed.ExecID == "" || hookFailed.SessionID == "" || hookFailed.TraceID == "" {
+		t.Fatalf("hook_failed event = %+v, want session identifiers", hookFailed)
+	}
+	if hookFailed.Payload["blocked_kind"] != string(events.EventPipelineStarted) {
+		t.Fatalf("hook_failed payload = %+v, want blocked pipeline_started kind", hookFailed.Payload)
+	}
+	hookErrorText, _ := hookFailed.Payload["error"].(string)
+	if !strings.Contains(hookErrorText, "[REDACTED]") || strings.Contains(hookErrorText, "secret123") {
+		t.Fatalf("hook_failed error = %q, want redacted secret", hookErrorText)
+	}
 	failed, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineFailed)
 	if !ok {
 		t.Fatalf("events = %+v, want pipeline_failed event", stream.List())
 	}
 	if failed.ExecID == "" || failed.TraceID == "" || failed.Payload["error"] == "" {
 		t.Fatalf("pipeline failed event = %+v, want IDs and error payload", failed)
+	}
+	persisted, err := store.Events(context.Background(), hookFailed.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findRuntimeHTTPEvent(persisted, events.EventPipelineStarted); ok {
+		t.Fatalf("persisted events = %+v, blocked pipeline_started event must not be stored", persisted)
+	}
+	if persistedHookFailed, ok := findRuntimeHTTPEvent(persisted, events.EventHookFailed); !ok ||
+		persistedHookFailed.Payload["blocked_kind"] != string(events.EventPipelineStarted) {
+		t.Fatalf("persisted events = %+v, want hook_failed event with blocked kind", persisted)
+	}
+	if _, ok := findRuntimeHTTPEvent(persisted, events.EventPipelineFailed); !ok {
+		t.Fatalf("persisted events = %+v, want pipeline_failed event", persisted)
 	}
 }
 

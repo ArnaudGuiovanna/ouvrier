@@ -622,13 +622,36 @@ func (h *Harness) emit(ctx context.Context, session runtimecore.Session, kind ev
 	}
 	event = events.SanitizeEvent(event)
 	if h.hookBus != nil {
-		var err error
-		event, err = h.hookBus.Emit(ctx, event)
+		blocked := event
+		updated, err := h.hookBus.Emit(ctx, event)
 		if err != nil {
-			return err
+			return errors.Join(err, h.emitHookFailure(ctx, blocked, err))
 		}
+		event = updated
 		event = events.SanitizeEvent(event)
 	}
+	return h.appendEvent(ctx, event)
+}
+
+func (h *Harness) emitHookFailure(ctx context.Context, blocked events.Event, err error) error {
+	if err == nil || (h.eventStream == nil && h.stateStore == nil) {
+		return nil
+	}
+	event := events.Event{
+		Kind:      events.EventHookFailed,
+		ExecID:    blocked.ExecID,
+		SessionID: blocked.SessionID,
+		TraceID:   blocked.TraceID,
+		Payload: map[string]any{
+			"blocked_kind": string(events.CanonicalKind(blocked.Kind)),
+			"error":        err.Error(),
+		},
+	}
+	return h.appendEvent(ctx, event)
+}
+
+func (h *Harness) appendEvent(ctx context.Context, event events.Event) error {
+	event = events.SanitizeEvent(event)
 	if h.eventStream == nil {
 		if h.stateStore == nil {
 			return nil

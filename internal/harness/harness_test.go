@@ -1557,11 +1557,18 @@ func TestRunReturnsHookErrorBeforePersistingBlockedEvent(t *testing.T) {
 		t.Fatalf("NewEventStream returned error: %v", err)
 	}
 	hooks := events.NewHookBus()
-	blocked := errors.New("audit hook denied")
+	blocked := errors.New("audit hook denied token=secret123")
 	if err := hooks.Register(events.EventAfterLLM, func(ctx context.Context, event events.Event) (events.Event, error) {
 		return event, blocked
 	}); err != nil {
 		t.Fatalf("Register returned error: %v", err)
+	}
+	hookFailedHookCalled := false
+	if err := hooks.Register(events.EventHookFailed, func(ctx context.Context, event events.Event) (events.Event, error) {
+		hookFailedHookCalled = true
+		return event, errors.New("hook_failed hook must not run")
+	}); err != nil {
+		t.Fatalf("Register hook_failed returned error: %v", err)
 	}
 	p := &scriptedProvider{
 		responses: []provider.Response{{
@@ -1592,12 +1599,32 @@ func TestRunReturnsHookErrorBeforePersistingBlockedEvent(t *testing.T) {
 	if _, ok := findEvent(stream.List(), events.EventAfterLLM); ok {
 		t.Fatalf("stream events = %+v, blocked after-LLM event must not be appended", stream.List())
 	}
+	if hookFailedHookCalled {
+		t.Fatal("hook_failed hook was called; hook failure recording must bypass HookBus")
+	}
+	hookFailed, ok := findEvent(stream.List(), events.EventHookFailed)
+	if !ok {
+		t.Fatalf("stream events = %+v, want hook_failed event", stream.List())
+	}
+	if hookFailed.ExecID != out.Session.ExecID || hookFailed.SessionID != out.Session.SessionID || hookFailed.TraceID != out.Session.TraceID {
+		t.Fatalf("hook_failed event = %+v, session = %+v, want matching identifiers", hookFailed, out.Session)
+	}
+	if hookFailed.Payload["blocked_kind"] != string(events.EventAfterLLM) {
+		t.Fatalf("hook_failed payload = %+v, want blocked after-LLM kind", hookFailed.Payload)
+	}
+	hookErrorText, _ := hookFailed.Payload["error"].(string)
+	if !strings.Contains(hookErrorText, "[REDACTED]") || strings.Contains(hookErrorText, "secret123") {
+		t.Fatalf("hook_failed error = %q, want redacted secret", hookErrorText)
+	}
 	persisted, err := store.Events(context.Background(), out.Session.ExecID)
 	if err != nil {
 		t.Fatalf("Events returned error: %v", err)
 	}
 	if _, ok := findEvent(persisted, events.EventAfterLLM); ok {
 		t.Fatalf("persisted events = %+v, blocked after-LLM event must not be stored", persisted)
+	}
+	if persistedHookFailed, ok := findEvent(persisted, events.EventHookFailed); !ok || persistedHookFailed.Payload["blocked_kind"] != string(events.EventAfterLLM) {
+		t.Fatalf("persisted events = %+v, want hook_failed event with blocked kind", persisted)
 	}
 	failed, ok := findEvent(stream.List(), events.EventPipeFailed)
 	errorText, _ := failed.Payload["error"].(string)

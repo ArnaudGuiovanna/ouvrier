@@ -704,13 +704,19 @@ func (rt httpRuntime) emitRuntimeEvent(ctx context.Context, result planRunResult
 	}
 	event = events.SanitizeEvent(event)
 	if rt.hookBus != nil {
-		var err error
-		event, err = rt.hookBus.Emit(ctx, event)
+		blocked := event
+		updated, err := rt.hookBus.Emit(ctx, event)
 		if err != nil {
-			return err
+			return errors.Join(err, rt.emitHookFailureEvent(ctx, blocked, err))
 		}
+		event = updated
 		event = events.SanitizeEvent(event)
 	}
+	return rt.appendRuntimeEvent(ctx, event)
+}
+
+func (rt httpRuntime) appendRuntimeEvent(ctx context.Context, event events.Event) error {
+	event = events.SanitizeEvent(event)
 	if rt.eventStream == nil {
 		if rt.stateStore == nil {
 			return nil
@@ -742,29 +748,32 @@ func (rt httpRuntime) emitSessionEvent(ctx context.Context, session runtimeplan.
 	}
 	event = events.SanitizeEvent(event)
 	if rt.hookBus != nil {
-		var err error
-		event, err = rt.hookBus.Emit(ctx, event)
+		blocked := event
+		updated, err := rt.hookBus.Emit(ctx, event)
 		if err != nil {
-			return err
+			return errors.Join(err, rt.emitHookFailureEvent(ctx, blocked, err))
 		}
+		event = updated
 		event = events.SanitizeEvent(event)
 	}
-	if rt.eventStream == nil {
-		if rt.stateStore == nil {
-			return nil
-		}
-		_, err := rt.stateStore.AddEvent(ctx, event)
-		return err
-	}
-	appended, err := rt.eventStream.Append(ctx, event)
-	if err != nil {
-		return err
-	}
-	if rt.stateStore == nil {
+	return rt.appendRuntimeEvent(ctx, event)
+}
+
+func (rt httpRuntime) emitHookFailureEvent(ctx context.Context, blocked events.Event, err error) error {
+	if err == nil || (rt.eventStream == nil && rt.stateStore == nil) {
 		return nil
 	}
-	_, err = rt.stateStore.AddEvent(ctx, appended)
-	return err
+	event := events.Event{
+		Kind:      events.EventHookFailed,
+		ExecID:    blocked.ExecID,
+		SessionID: blocked.SessionID,
+		TraceID:   blocked.TraceID,
+		Payload: map[string]any{
+			"blocked_kind": string(events.CanonicalKind(blocked.Kind)),
+			"error":        err.Error(),
+		},
+	}
+	return rt.appendRuntimeEvent(ctx, event)
 }
 
 func (rt httpRuntime) emitPipelineEvent(ctx context.Context, result planRunResult, plan runtimeplan.Plan, kind events.EventKind, status string, eventErr error) error {
