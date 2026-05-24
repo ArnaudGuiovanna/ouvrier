@@ -23,11 +23,20 @@ type Event struct {
 }
 
 type EventStream struct {
-	mu     sync.RWMutex
-	nextID uint64
-	now    func() time.Time
-	events []Event
+	mu          sync.RWMutex
+	nextID      uint64
+	now         func() time.Time
+	events      []Event
+	subscribers []Subscriber
 }
+
+// Subscriber is called for every Event appended to the stream, after
+// sanitization and ID assignment. Subscribers must not mutate the supplied
+// Event and must return quickly; long-running observers should hand the event
+// off to their own goroutine. Subscribers run synchronously under the stream
+// lock; panics are recovered to keep the runtime from crashing on a broken
+// observer.
+type Subscriber func(context.Context, Event)
 
 const redactedPayloadValue = "[REDACTED]"
 
@@ -83,8 +92,6 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.nextID++
 	event.ID = s.nextID
 	event.Kind = CanonicalKind(event.Kind)
@@ -93,7 +100,40 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 	}
 	event.Payload = sanitizePayload(event.Payload)
 	s.events = append(s.events, event)
-	return cloneEvent(event), nil
+	subscribers := append([]Subscriber(nil), s.subscribers...)
+	stored := cloneEvent(event)
+	s.mu.Unlock()
+
+	for _, sub := range subscribers {
+		if sub == nil {
+			continue
+		}
+		notifySubscriber(ctx, sub, stored)
+	}
+	return stored, nil
+}
+
+// Subscribe registers a Subscriber. Subscribers receive each Event after it is
+// appended. Pass a nil Subscriber to no-op (returns an error). Subscriber
+// registration is concurrency-safe.
+func (s *EventStream) Subscribe(sub Subscriber) error {
+	if s == nil {
+		return errors.New("event stream is required")
+	}
+	if sub == nil {
+		return errors.New("event subscriber is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subscribers = append(s.subscribers, sub)
+	return nil
+}
+
+func notifySubscriber(ctx context.Context, sub Subscriber, event Event) {
+	defer func() {
+		_ = recover()
+	}()
+	sub(ctx, event)
 }
 
 func (s *EventStream) List() []Event {
