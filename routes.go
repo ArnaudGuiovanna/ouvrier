@@ -210,6 +210,9 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	response.ToolCalls = harnessMetrics.ToolCalls
 	response.ToolCallsCompleted = harnessMetrics.ToolCallsCompleted
 	response.ToolFailures = harnessMetrics.ToolFailures
+	response.TasksStarted = harnessMetrics.TasksStarted
+	response.TasksCompleted = harnessMetrics.TasksCompleted
+	response.TasksFailed = harnessMetrics.TasksFailed
 	response.PermissionAllowed = harnessMetrics.PermissionAllowed
 	response.PermissionDenied = harnessMetrics.PermissionDenied
 	response.BudgetExceeded = harnessMetrics.BudgetExceeded
@@ -517,6 +520,9 @@ type adminHarnessMetricsSummary struct {
 	ToolCalls                int
 	ToolCallsCompleted       int
 	ToolFailures             int
+	TasksStarted             int
+	TasksCompleted           int
+	TasksFailed              int
 	PermissionAllowed        int
 	PermissionDenied         int
 	BudgetExceeded           int
@@ -554,6 +560,12 @@ func (s *adminHarnessMetricsSummary) AddEvent(event events.Event) {
 		s.ToolCallsCompleted++
 	case events.EventToolCallFailed:
 		s.ToolFailures++
+	case events.EventTaskStarted:
+		s.TasksStarted++
+	case events.EventTaskCompleted:
+		s.TasksCompleted++
+	case events.EventTaskFailed:
+		s.TasksFailed++
 	case events.EventPermissionDecision:
 		if adminBoolPayload(event.Payload, "allowed") {
 			s.PermissionAllowed++
@@ -1059,6 +1071,9 @@ type adminStatusResponse struct {
 	ToolCalls                int                            `json:"tool_calls"`
 	ToolCallsCompleted       int                            `json:"tool_calls_completed"`
 	ToolFailures             int                            `json:"tool_failures"`
+	TasksStarted             int                            `json:"tasks_started"`
+	TasksCompleted           int                            `json:"tasks_completed"`
+	TasksFailed              int                            `json:"tasks_failed"`
 	PermissionAllowed        int                            `json:"permission_allowed"`
 	PermissionDenied         int                            `json:"permission_denied"`
 	SchemaViolations         int                            `json:"schema_violations"`
@@ -1139,6 +1154,9 @@ type adminTraceSummary struct {
 	LLMFinalFailures     int       `json:"llm_final_failures"`
 	ToolCalls            int       `json:"tool_calls"`
 	ToolFailures         int       `json:"tool_failures"`
+	TasksStarted         int       `json:"tasks_started"`
+	TasksCompleted       int       `json:"tasks_completed"`
+	TasksFailed          int       `json:"tasks_failed"`
 	InputTokens          int       `json:"input_tokens"`
 	OutputTokens         int       `json:"output_tokens"`
 	CostUSD              float64   `json:"cost_usd"`
@@ -1163,6 +1181,12 @@ func (s *adminTraceSummary) AddEvent(event events.Event) {
 		s.ToolCalls++
 	case events.EventToolCallFailed:
 		s.ToolFailures++
+	case events.EventTaskStarted:
+		s.TasksStarted++
+	case events.EventTaskCompleted:
+		s.TasksCompleted++
+	case events.EventTaskFailed:
+		s.TasksFailed++
 	case events.EventSchemaValidationFailed:
 		s.SchemaViolations++
 	case events.EventSchemaRepairCompleted:

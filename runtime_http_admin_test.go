@@ -461,6 +461,9 @@ func TestHTTPAdminStatusIncludesHarnessMetricsFromEvents(t *testing.T) {
 	addAdminStoreEvent(t, store, events.Event{Kind: events.EventToolCallStarted, ExecID: "exec_1", SessionID: "sess_1"})
 	addAdminStoreEvent(t, store, events.Event{Kind: events.EventToolCallCompleted, ExecID: "exec_1", SessionID: "sess_1"})
 	addAdminStoreEvent(t, store, events.Event{Kind: events.EventToolCallFailed, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventTaskStarted, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventTaskCompleted, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventTaskFailed, ExecID: "exec_1", SessionID: "sess_1"})
 	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPermissionDecision, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
 		"allowed": true,
 	}})
@@ -498,6 +501,9 @@ func TestHTTPAdminStatusIncludesHarnessMetricsFromEvents(t *testing.T) {
 		ToolCalls              int    `json:"tool_calls"`
 		ToolCallsCompleted     int    `json:"tool_calls_completed"`
 		ToolFailures           int    `json:"tool_failures"`
+		TasksStarted           int    `json:"tasks_started"`
+		TasksCompleted         int    `json:"tasks_completed"`
+		TasksFailed            int    `json:"tasks_failed"`
 		PermissionAllowed      int    `json:"permission_allowed"`
 		PermissionDenied       int    `json:"permission_denied"`
 		BudgetExceeded         int    `json:"budget_exceeded"`
@@ -516,6 +522,9 @@ func TestHTTPAdminStatusIncludesHarnessMetricsFromEvents(t *testing.T) {
 	}
 	if body.ToolCalls != 1 || body.ToolCallsCompleted != 1 || body.ToolFailures != 1 {
 		t.Fatalf("tool metrics = %+v, want started/completed/failed counts", body)
+	}
+	if body.TasksStarted != 1 || body.TasksCompleted != 1 || body.TasksFailed != 1 {
+		t.Fatalf("task metrics = %+v, want started/completed/failed counts", body)
 	}
 	if body.PermissionAllowed != 1 || body.PermissionDenied != 1 {
 		t.Fatalf("permission metrics = %+v, want allowed and denied counts", body)
@@ -554,6 +563,9 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventToolCallStarted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaValidationFailed, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaRepairCompleted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventTaskStarted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventTaskCompleted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventTaskFailed, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
 
@@ -574,6 +586,9 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 			LLMRetries       int     `json:"llm_retries"`
 			LLMFinalFailures int     `json:"llm_final_failures"`
 			ToolCalls        int     `json:"tool_calls"`
+			TasksStarted     int     `json:"tasks_started"`
+			TasksCompleted   int     `json:"tasks_completed"`
+			TasksFailed      int     `json:"tasks_failed"`
 			SchemaViolations int     `json:"schema_violations"`
 			SchemaRepairs    int     `json:"schema_repairs"`
 			BudgetExceeded   int     `json:"budget_exceeded"`
@@ -589,11 +604,11 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	if body.Status != "ok" || len(body.Traces) != 1 {
 		t.Fatalf("body = %+v, want one trace", body)
 	}
-	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 7 {
+	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 10 {
 		t.Fatalf("trace = %+v, want exec_2 summary", body.Traces[0])
 	}
-	if body.Traces[0].LastEventID != 8 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
-		t.Fatalf("trace last event = %+v, want event 8 budget exceeded", body.Traces[0])
+	if body.Traces[0].LastEventID != 11 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
+		t.Fatalf("trace last event = %+v, want event 11 budget exceeded", body.Traces[0])
 	}
 	if body.Traces[0].LLMCalls != 1 || body.Traces[0].InputTokens != 13 || body.Traces[0].OutputTokens != 8 ||
 		body.Traces[0].CostUSD < 0.0209 || body.Traces[0].CostUSD > 0.0211 || body.Traces[0].AverageLatencyMS != 41 {
@@ -605,6 +620,9 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	if body.Traces[0].ToolCalls != 1 || body.Traces[0].SchemaViolations != 1 ||
 		body.Traces[0].SchemaRepairs != 1 || body.Traces[0].BudgetExceeded != 1 {
 		t.Fatalf("trace event counts = %+v, want tool/schema/budget counters", body.Traces[0])
+	}
+	if body.Traces[0].TasksStarted != 1 || body.Traces[0].TasksCompleted != 1 || body.Traces[0].TasksFailed != 1 {
+		t.Fatalf("trace task counts = %+v, want task counters", body.Traces[0])
 	}
 }
 
