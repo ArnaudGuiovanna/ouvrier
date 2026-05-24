@@ -53,6 +53,57 @@ func TestRunnerStateStoreConfiguresHTTPRuntime(t *testing.T) {
 	}
 }
 
+func TestRunnerStateStoreSeedsEventStreamFromExistingEvents(t *testing.T) {
+	store := newRecordingStateStore()
+	store.events = append(store.events, Event{
+		ID:     41,
+		Kind:   EventSessionStarted,
+		ExecID: "exec_existing",
+	})
+	runner := NewRunner(WithStateStore(store))
+	rt, closeRuntime, err := runner.defaultHTTPRuntimeForRun()
+	if err != nil {
+		t.Fatalf("defaultHTTPRuntimeForRun returned error: %v", err)
+	}
+	defer func() {
+		if err := closeRuntime(); err != nil {
+			t.Fatalf("closeRuntime returned error: %v", err)
+		}
+	}()
+
+	if err := rt.emitRuntimeEvent(context.Background(), planRunResult{}, internalEvent(Event{Kind: EventHookFailed}).Kind, map[string]any{
+		"blocked_kind": string(EventPipelineStarted),
+		"error":        "hook pipeline_started blocked event: audit denied",
+	}); err != nil {
+		t.Fatalf("emitRuntimeEvent returned error: %v", err)
+	}
+	if got := store.events[len(store.events)-1].ID; got != 42 {
+		t.Fatalf("new event ID = %d, want 42 after existing event ID 41", got)
+	}
+
+	handler := newTestAdminHTTPHandler(t, rt)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces?last=1", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body struct {
+		Status string `json:"status"`
+		Traces []struct {
+			LastEventID uint64 `json:"last_event_id"`
+			LastKind    string `json:"last_kind"`
+		} `json:"traces"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Traces) != 1 {
+		t.Fatalf("body = %+v, want one recent trace", body)
+	}
+	if body.Traces[0].LastEventID != 42 || body.Traces[0].LastKind != string(EventHookFailed) {
+		t.Fatalf("trace = %+v, want hook_failed at event ID 42", body.Traces[0])
+	}
+}
+
 func TestRunnerHooksConfigureHTTPRuntime(t *testing.T) {
 	hooks := NewHooks()
 	seen := false

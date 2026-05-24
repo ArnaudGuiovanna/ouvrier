@@ -222,6 +222,10 @@ func (r *Runner) defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 			}
 			return closer.Close()
 		}
+		if err := seedHTTPEventStreamFromStore(&rt, rt.stateStore); err != nil {
+			_ = closeRuntime()
+			return httpRuntime{}, nil, err
+		}
 	} else {
 		rt, closeRuntime, err = defaultHTTPRuntimeForRun()
 		if err != nil {
