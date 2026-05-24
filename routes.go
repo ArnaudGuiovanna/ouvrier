@@ -193,6 +193,7 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	response.SchemaValidationFailed = countAdminEventsByKind(recorded, events.EventSchemaValidationFailed)
 	response.SchemaRepairsStarted = countAdminEventsByKind(recorded, events.EventSchemaRepairStarted)
 	response.SchemaRepairsCompleted = countAdminEventsByKind(recorded, events.EventSchemaRepairCompleted)
+	response.SchemaRepairsFailed = countAdminEventsByKind(recorded, events.EventSchemaRepairFailed)
 	response.SchemaViolations = response.SchemaValidationFailed
 	llm := summarizeAdminLLMUsage(recorded)
 	response.LLMCalls = llm.Calls
@@ -1135,6 +1136,7 @@ type adminStatusResponse struct {
 	SchemaValidationFailed   int                            `json:"schema_validation_failed"`
 	SchemaRepairsStarted     int                            `json:"schema_repairs_started"`
 	SchemaRepairsCompleted   int                            `json:"schema_repairs_completed"`
+	SchemaRepairsFailed      int                            `json:"schema_repairs_failed"`
 	RecentSchemaViolations   []adminSchemaViolationResponse `json:"recent_schema_violations,omitempty"`
 	BudgetExceeded           int                            `json:"budget_exceeded"`
 	BudgetExceededTokens     int                            `json:"budget_exceeded_tokens"`

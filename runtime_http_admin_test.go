@@ -274,6 +274,16 @@ func TestHTTPAdminStatusIncludesSchemaConformanceFromStateStore(t *testing.T) {
 		},
 	})
 	addAdminStoreEvent(t, store, events.Event{
+		Kind:      events.EventSchemaRepairFailed,
+		ExecID:    "exec_1",
+		SessionID: "sess_1",
+		TraceID:   "trace_1",
+		Payload: map[string]any{
+			"schema": "ovr.httpTestReply",
+			"error":  "repair still invalid",
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
 		Kind:      events.EventSchemaValidationPassed,
 		ExecID:    "exec_1",
 		SessionID: "sess_1",
@@ -298,6 +308,7 @@ func TestHTTPAdminStatusIncludesSchemaConformanceFromStateStore(t *testing.T) {
 		SchemaValidationFailed int    `json:"schema_validation_failed"`
 		SchemaRepairsStarted   int    `json:"schema_repairs_started"`
 		SchemaRepairsCompleted int    `json:"schema_repairs_completed"`
+		SchemaRepairsFailed    int    `json:"schema_repairs_failed"`
 	}
 	decodeAdminJSON(t, rec, &body)
 	if body.Status != "ok" {
@@ -311,6 +322,9 @@ func TestHTTPAdminStatusIncludesSchemaConformanceFromStateStore(t *testing.T) {
 	}
 	if body.SchemaRepairsStarted != 1 || body.SchemaRepairsCompleted != 1 {
 		t.Fatalf("schema repair counts = started %d completed %d, want 1/1", body.SchemaRepairsStarted, body.SchemaRepairsCompleted)
+	}
+	if body.SchemaRepairsFailed != 1 {
+		t.Fatalf("schema_repairs_failed = %d, want 1", body.SchemaRepairsFailed)
 	}
 }
 
