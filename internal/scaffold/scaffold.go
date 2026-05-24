@@ -149,6 +149,20 @@ func normalizeConfig(cfg Config) (Config, error) {
 	}, nil
 }
 
+// NormalizeHTTPTrigger validates and canonicalizes an HTTP trigger string
+// supplied via the wizard or --trigger flag. It is exported so that the
+// interactive TUI can reuse the exact same parser the scaffold uses.
+func NormalizeHTTPTrigger(trigger string) (string, error) {
+	return normalizeHTTPScaffoldTrigger(trigger)
+}
+
+// ValidProjectName reports whether name satisfies the scaffold's project
+// directory naming rules. Exported so the wizard can validate inline before
+// invoking Generate.
+func ValidProjectName(name string) bool {
+	return validProjectName(strings.TrimSpace(name))
+}
+
 func normalizeHTTPScaffoldTrigger(trigger string) (string, error) {
 	fields := strings.Fields(trigger)
 	if len(fields) != 2 {

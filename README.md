@@ -55,8 +55,8 @@ func main() {
 
 ## Status
 
-Ouvrier v0.1 is under active implementation. The runtime and harness foundations
-are in place, but the release is not complete yet. The public Go module path is:
+Ouvrier v0.1 is feature-complete against the documented milestone backlog.
+The public Go module path is:
 
 ```txt
 module github.com/ArnaudGuiovanna/ouvrier
@@ -67,26 +67,39 @@ development before the repository is published, scaffolded projects add a
 `replace github.com/ArnaudGuiovanna/ouvrier => <local-checkout>` directive so
 they keep building against the working tree.
 
-Current working foundations include:
+The CI gate (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`,
+`staticcheck`, `go test ./...`, race tests on concurrency-sensitive
+packages, and builds the `ouvrier` CLI on every push and pull request.
 
-- HTTP triggers, Cron triggers, and compiled runtime plans.
-- Sequential `Pipe` execution through the harness path.
-- Go tools through `ToolExecutor` and `PermissionPolicy`.
-- Skill loading and deterministic prompt injection from `skills/<name>/SKILL.md`.
-- Typed `Output[T]()` and `Reply(JSON[T]())` schema validation.
-- Memory and SQLite state stores.
-- Event stream, hooks, persisted trace events, and early HTTP admin endpoints.
-- Provider adapters for the v0.1 model prefixes.
-- `Parallel`, `Map`, bounded `Concurrency`, and `PartialOK` composition.
-- Bash capability execution through `ToolExecutor` with a platform sandbox probe
-  and explicit unsafe host fallback.
-- HTTP-only CLI scaffold and a Bubble Tea TUI preview.
-- Governed `SubAgent` foundations in active development.
+What ships in v0.1:
 
-The v0.1 backlog remains broader: webhook/stream runtime hardening, mixed
-runtime hardening, broader queue/backpressure semantics, full CLI workflows,
-deployment, production admin/trace viewer hardening, docs, examples, remaining
-Bash hardening, DLQ behavior, and release gates.
+- HTTP, Cron, Webhook, and Stream (NATS / Redis / Kafka) triggers with
+  worker pools, signed inbound HMAC verification, and idempotency keys.
+- Sequential, `Parallel`, `Map`, `Concurrency`, and `PartialOK` composition.
+- The full SOTA harness: `Session`, `EventStream`, `HookBus`, `StateStore`
+  (memory + embedded SQLite), `PermissionPolicy`, `Sandbox`, `ToolExecutor`,
+  `ResultSchema`, governed `SubAgent`/Task.
+- Go tools, MCP through the official Go SDK, Skill loading with
+  frontmatter validation, and a sandboxed Bash capability with workspace,
+  env allowlist, timeout, output bounds, and process cleanup.
+- Provider adapters for `anthropic/*`, `openai/*`, `ollama/*`, `mistral/*`,
+  `gemini/*`, and `vllm/*` with tool use, typed final results, and
+  classified errors.
+- Reply (`JSON[T]`, `SSE`, `Accepted`), Push (webhook, queue), and Sink
+  (log, file) outputs.
+- Protected admin endpoints (`/admin/health`, `/admin/status`,
+  `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`) plus a
+  dev-mode trace viewer at `/dev`.
+- OpenTelemetry-compatible `Tracer` hook for pipeline, pipe, session,
+  LLM, tool, schema, and subagent spans.
+- The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
+  `add agent|tool|skill`, `dev`, `build` (static cross-compile), and
+  `deploy ssh|docker`.
+
+Documented v0.1 limitations: provider response streaming is not yet
+surfaced through `EventStream`, hot reload of `ouvrier dev` is a future
+enhancement, and provider cost estimates are best-effort (compute from
+token usage and your own pricing table).
 
 ## Mental Model
 
