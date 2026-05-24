@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"ouvrier/internal/events"
@@ -43,7 +44,20 @@ func (s *SQLiteStore) AddEvent(ctx context.Context, event events.Event) (events.
 		}
 		event.ID = uint64(id)
 	} else {
-		_, err := s.db.ExecContext(ctx, `INSERT INTO ouvrier_events (
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return events.Event{}, err
+		}
+		var maxID uint64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM ouvrier_events`).Scan(&maxID); err != nil {
+			_ = tx.Rollback()
+			return events.Event{}, err
+		}
+		if event.ID <= maxID {
+			_ = tx.Rollback()
+			return events.Event{}, errors.New("event ID must be greater than existing event IDs")
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO ouvrier_events (
 			id, at, kind, exec_id, session_id, trace_id, payload
 		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			event.ID,
@@ -55,6 +69,10 @@ func (s *SQLiteStore) AddEvent(ctx context.Context, event events.Event) (events.
 			string(payload),
 		)
 		if err != nil {
+			_ = tx.Rollback()
+			return events.Event{}, err
+		}
+		if err := tx.Commit(); err != nil {
 			return events.Event{}, err
 		}
 	}

@@ -243,6 +243,48 @@ func TestSQLiteStorePreservesEventIDsAndFiltersEventsSinceAcrossReopen(t *testin
 	}
 }
 
+func TestSQLiteStoreRejectsNonMonotonicExplicitEventIDsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store := newTestSQLiteStore(t, path)
+	_, err := store.AddEvent(context.Background(), events.Event{
+		ID:     10,
+		Kind:   events.EventSessionStarted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	reopened := newTestSQLiteStore(t, path)
+	if _, err := reopened.AddEvent(context.Background(), events.Event{
+		ID:     9,
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+	}); err == nil {
+		t.Fatal("AddEvent returned nil for non-monotonic explicit event ID")
+	}
+	next, err := reopened.AddEvent(context.Background(), events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error after rejected ID: %v", err)
+	}
+	if next.ID != 11 {
+		t.Fatalf("next ID = %d, want 11", next.ID)
+	}
+	recorded, err := reopened.EventsSince(context.Background(), "exec_1", 10)
+	if err != nil {
+		t.Fatalf("EventsSince returned error: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].ID != 11 {
+		t.Fatalf("events since 10 = %+v, want exec_1 event 11", recorded)
+	}
+}
+
 func TestSQLiteStoreRecordsSchemaViolations(t *testing.T) {
 	store := newTestSQLiteStore(t, filepath.Join(t.TempDir(), "state.db"))
 	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)

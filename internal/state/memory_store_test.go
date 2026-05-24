@@ -187,6 +187,43 @@ func TestMemoryStorePreservesEventIDsAndFiltersEventsSince(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreRejectsNonMonotonicExplicitEventIDs(t *testing.T) {
+	store := NewMemoryStore()
+
+	_, err := store.AddEvent(context.Background(), events.Event{
+		ID:     10,
+		Kind:   events.EventSessionStarted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error: %v", err)
+	}
+	if _, err := store.AddEvent(context.Background(), events.Event{
+		ID:     9,
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+	}); err == nil {
+		t.Fatal("AddEvent returned nil for non-monotonic explicit event ID")
+	}
+	next, err := store.AddEvent(context.Background(), events.Event{
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
+	})
+	if err != nil {
+		t.Fatalf("AddEvent returned error after rejected ID: %v", err)
+	}
+	if next.ID != 11 {
+		t.Fatalf("next ID = %d, want 11", next.ID)
+	}
+	recorded, err := store.EventsSince(context.Background(), "exec_1", 10)
+	if err != nil {
+		t.Fatalf("EventsSince returned error: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0].ID != 11 {
+		t.Fatalf("events since 10 = %+v, want exec_1 event 11", recorded)
+	}
+}
+
 func TestMemoryStoreRecordsSchemaViolations(t *testing.T) {
 	store := NewMemoryStore()
 	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)

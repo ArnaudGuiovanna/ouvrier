@@ -146,14 +146,10 @@ func (s *MemoryStore) AddEvent(ctx context.Context, event events.Event) (events.
 		s.nextEventID++
 		event.ID = s.nextEventID
 	} else {
-		for _, existing := range s.events {
-			if existing.ID == event.ID {
-				return events.Event{}, errors.New("event ID already exists")
-			}
+		if event.ID <= s.nextEventID {
+			return events.Event{}, errors.New("event ID must be greater than existing event IDs")
 		}
-		if event.ID > s.nextEventID {
-			s.nextEventID = event.ID
-		}
+		s.nextEventID = event.ID
 	}
 	if event.At.IsZero() {
 		event.At = time.Now().UTC()
