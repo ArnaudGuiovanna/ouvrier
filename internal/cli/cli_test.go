@@ -63,9 +63,9 @@ func TestRunNewWithoutFlagsUsesTUIRunner(t *testing.T) {
 	var errOut bytes.Buffer
 	called := false
 	app := New("dev", WithStreams(strings.NewReader(""), &out, &errOut))
-	app.runNew = func(_ io.Reader, _ io.Writer) error {
+	app.runNew = func(_ context.Context, _ io.Reader, _ io.Writer, _ string) (*scaffold.Project, error) {
 		called = true
-		return nil
+		return nil, nil
 	}
 
 	err := app.Run(context.Background(), []string{"new"})
@@ -78,6 +78,23 @@ func TestRunNewWithoutFlagsUsesTUIRunner(t *testing.T) {
 	}
 	if got := errOut.String(); got != "" {
 		t.Fatalf("stderr = %q, want empty", got)
+	}
+}
+
+func TestRunNewWithoutFlagsPrintsGeneratedProjectPath(t *testing.T) {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	app := New("dev", WithStreams(strings.NewReader(""), &out, &errOut))
+	app.runNew = func(_ context.Context, _ io.Reader, _ io.Writer, parent string) (*scaffold.Project, error) {
+		return &scaffold.Project{Name: "demo", Dir: filepath.Join(parent, "demo")}, nil
+	}
+
+	if err := app.Run(context.Background(), []string{"new"}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if got := out.String(); !strings.Contains(got, "created ") || !strings.Contains(got, "demo") {
+		t.Fatalf("stdout = %q, want created <path>/demo", got)
 	}
 }
 

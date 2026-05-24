@@ -12,6 +12,11 @@ import (
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
 
+// RunNewFunc is the function-typed seam used to launch the interactive
+// `ouvrier new` wizard. Tests substitute a fake implementation so they don't
+// have to drive the Bubble Tea runtime.
+type RunNewFunc func(ctx context.Context, in io.Reader, out io.Writer, parentDir string) (*scaffold.Project, error)
+
 var (
 	ErrUnknownCommand = errors.New("unknown command")
 	ErrUsage          = errors.New("usage error")
@@ -22,7 +27,7 @@ type App struct {
 	in      io.Reader
 	out     io.Writer
 	errOut  io.Writer
-	runNew  func(io.Reader, io.Writer) error
+	runNew  RunNewFunc
 }
 
 type Option func(*App)
@@ -37,7 +42,7 @@ func New(version string, opts ...Option) *App {
 		in:      os.Stdin,
 		out:     os.Stdout,
 		errOut:  os.Stderr,
-		runNew:  tui.RunNewProject,
+		runNew:  defaultRunNew,
 	}
 	for _, opt := range opts {
 		opt(app)
@@ -125,7 +130,18 @@ func (app *App) runNewCommand(ctx context.Context, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return app.runNew(app.in, app.out)
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = "."
+		}
+		project, err := app.runNew(ctx, app.in, app.out, cwd)
+		if err != nil {
+			return fmt.Errorf("new project wizard: %w", err)
+		}
+		if project != nil {
+			fmt.Fprintf(app.out, "created %s\n", project.Dir)
+		}
+		return nil
 	}
 
 	cfg, yes, err := parseNewFlags(args)
@@ -167,6 +183,12 @@ func parseNewFlags(args []string) (scaffold.Config, bool, error) {
 		Model:   *model,
 		Dir:     *dir,
 	}, *yes, nil
+}
+
+func defaultRunNew(_ context.Context, in io.Reader, out io.Writer, parentDir string) (*scaffold.Project, error) {
+	return tui.RunNewProject(in, out, tui.NewProjectWizardOptions{
+		ParentDir: parentDir,
+	})
 }
 
 func hasHelpFlag(args []string) bool {
