@@ -43,7 +43,8 @@ func FromType(typ reflect.Type) (*runtimecore.ResultSchema, error) {
 func resultSchemaForOptions() *jsonschema.ForOptions {
 	return &jsonschema.ForOptions{
 		TypeSchemas: map[reflect.Type]*jsonschema.Schema{
-			reflect.TypeFor[json.Number](): {Type: "number"},
+			reflect.TypeFor[json.Number]():     {Type: "number"},
+			reflect.TypeFor[json.RawMessage](): {Types: []string{"null", "boolean", "number", "string", "array", "object"}},
 		},
 	}
 }
@@ -101,6 +102,9 @@ func tightenGeneratedSchema(generated *jsonschema.Schema, typ reflect.Type) {
 
 func tightenSchemaForType(generated *jsonschema.Schema, typ reflect.Type) {
 	if generated == nil || typ == nil {
+		return
+	}
+	if typ == reflect.TypeFor[json.RawMessage]() {
 		return
 	}
 	if typ.Kind() == reflect.Pointer {

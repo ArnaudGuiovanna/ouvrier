@@ -67,6 +67,11 @@ type resultSchemaNumberReply struct {
 	Maybe  *json.Number `json:"maybe,omitempty"`
 }
 
+type resultSchemaRawMessageReply struct {
+	Payload json.RawMessage  `json:"payload"`
+	Maybe   *json.RawMessage `json:"maybe,omitempty"`
+}
+
 func TestFromTypeGeneratesStrictJSONSchema(t *testing.T) {
 	contract, err := schema.FromType(reflect.TypeFor[resultSchemaReply]())
 	if err != nil {
@@ -407,6 +412,41 @@ func TestFromTypePreservesJSONNumberAsNumber(t *testing.T) {
 	}
 	if err := schema.ValidateJSON(contract, []byte(`{"amount":12.5,"maybe":"12.5"}`)); err == nil {
 		t.Fatal("ValidateJSON returned nil for string in *json.Number field")
+	}
+}
+
+func TestFromTypePreservesRawMessageAsAnyJSON(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaRawMessageReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	payload := generated.Properties["payload"]
+	if payload == nil {
+		t.Fatalf("schema properties = %+v, want payload schema", generated.Properties)
+	}
+	for _, typ := range []string{"null", "boolean", "number", "string", "array", "object"} {
+		if !slices.Contains(payload.Types, typ) {
+			t.Fatalf("payload schema = %+v, want type %q for json.RawMessage", payload, typ)
+		}
+	}
+	maybe := generated.Properties["maybe"]
+	if maybe == nil || !slices.Contains(maybe.Types, "null") || !slices.Contains(maybe.Types, "object") {
+		t.Fatalf("maybe schema = %+v, want nullable any JSON schema for *json.RawMessage", maybe)
+	}
+
+	for _, data := range [][]byte{
+		[]byte(`{"payload":{"nested":[1,true,null]},"maybe":[{"ok":true}]}`),
+		[]byte(`{"payload":["ok",2,true],"maybe":null}`),
+		[]byte(`{"payload":"ok","maybe":{"safe":true}}`),
+	} {
+		if err := schema.ValidateJSON(contract, data); err != nil {
+			t.Fatalf("ValidateJSON returned error for valid raw message output %s: %v", data, err)
+		}
 	}
 }
 
