@@ -242,6 +242,7 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 		return
 	}
 	response.SchemaViolations = len(violations)
+	response.RecentSchemaViolations = recentAdminSchemaViolations(violations, parseAdminTraceLimit(req.URL.Query().Get("last")))
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1036,35 +1037,36 @@ type adminHealthResponse struct {
 }
 
 type adminStatusResponse struct {
-	Status                   string         `json:"status"`
-	Sessions                 int            `json:"sessions"`
-	Executions               int            `json:"executions"`
-	ByStatus                 map[string]int `json:"by_status"`
-	Events                   int            `json:"events"`
-	SessionsStarted          int            `json:"sessions_started"`
-	SessionsCompleted        int            `json:"sessions_completed"`
-	SessionsCancelled        int            `json:"sessions_cancelled"`
-	LLMCalls                 int            `json:"llm_calls"`
-	InputTokens              int            `json:"input_tokens"`
-	OutputTokens             int            `json:"output_tokens"`
-	CostUSD                  float64        `json:"cost_usd"`
-	AverageLatencyMS         float64        `json:"average_latency_ms"`
-	ToolCalls                int            `json:"tool_calls"`
-	ToolCallsCompleted       int            `json:"tool_calls_completed"`
-	ToolFailures             int            `json:"tool_failures"`
-	PermissionAllowed        int            `json:"permission_allowed"`
-	PermissionDenied         int            `json:"permission_denied"`
-	SchemaViolations         int            `json:"schema_violations"`
-	SchemaValidationPassed   int            `json:"schema_validation_passed"`
-	SchemaValidationFailed   int            `json:"schema_validation_failed"`
-	SchemaRepairsStarted     int            `json:"schema_repairs_started"`
-	SchemaRepairsCompleted   int            `json:"schema_repairs_completed"`
-	BudgetExceeded           int            `json:"budget_exceeded"`
-	BudgetExceededTokens     int            `json:"budget_exceeded_tokens"`
-	BudgetExceededCostUSD    int            `json:"budget_exceeded_cost_usd"`
-	BudgetExceededWallClock  int            `json:"budget_exceeded_wallclock"`
-	BudgetExceededIterations int            `json:"budget_exceeded_iterations"`
-	HookFailures             int            `json:"hook_failures"`
+	Status                   string                         `json:"status"`
+	Sessions                 int                            `json:"sessions"`
+	Executions               int                            `json:"executions"`
+	ByStatus                 map[string]int                 `json:"by_status"`
+	Events                   int                            `json:"events"`
+	SessionsStarted          int                            `json:"sessions_started"`
+	SessionsCompleted        int                            `json:"sessions_completed"`
+	SessionsCancelled        int                            `json:"sessions_cancelled"`
+	LLMCalls                 int                            `json:"llm_calls"`
+	InputTokens              int                            `json:"input_tokens"`
+	OutputTokens             int                            `json:"output_tokens"`
+	CostUSD                  float64                        `json:"cost_usd"`
+	AverageLatencyMS         float64                        `json:"average_latency_ms"`
+	ToolCalls                int                            `json:"tool_calls"`
+	ToolCallsCompleted       int                            `json:"tool_calls_completed"`
+	ToolFailures             int                            `json:"tool_failures"`
+	PermissionAllowed        int                            `json:"permission_allowed"`
+	PermissionDenied         int                            `json:"permission_denied"`
+	SchemaViolations         int                            `json:"schema_violations"`
+	SchemaValidationPassed   int                            `json:"schema_validation_passed"`
+	SchemaValidationFailed   int                            `json:"schema_validation_failed"`
+	SchemaRepairsStarted     int                            `json:"schema_repairs_started"`
+	SchemaRepairsCompleted   int                            `json:"schema_repairs_completed"`
+	RecentSchemaViolations   []adminSchemaViolationResponse `json:"recent_schema_violations,omitempty"`
+	BudgetExceeded           int                            `json:"budget_exceeded"`
+	BudgetExceededTokens     int                            `json:"budget_exceeded_tokens"`
+	BudgetExceededCostUSD    int                            `json:"budget_exceeded_cost_usd"`
+	BudgetExceededWallClock  int                            `json:"budget_exceeded_wallclock"`
+	BudgetExceededIterations int                            `json:"budget_exceeded_iterations"`
+	HookFailures             int                            `json:"hook_failures"`
 }
 
 type adminLLMUsageSummary struct {
@@ -1430,6 +1432,27 @@ func adminSchemaViolationResponseFromState(violation state.SchemaViolation) admi
 		SchemaName: violation.SchemaName,
 		Error:      events.RedactText(violation.Error),
 	}
+}
+
+func recentAdminSchemaViolations(violations []state.SchemaViolation, limit int) []adminSchemaViolationResponse {
+	if limit <= 0 || len(violations) == 0 {
+		return nil
+	}
+	sorted := append([]state.SchemaViolation(nil), violations...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if !sorted[i].At.Equal(sorted[j].At) {
+			return sorted[i].At.After(sorted[j].At)
+		}
+		return sorted[i].ID > sorted[j].ID
+	})
+	if len(sorted) > limit {
+		sorted = sorted[:limit]
+	}
+	recent := make([]adminSchemaViolationResponse, 0, len(sorted))
+	for _, violation := range sorted {
+		recent = append(recent, adminSchemaViolationResponseFromState(violation))
+	}
+	return recent
 }
 
 func adminEventResponseFromEvent(event events.Event) adminEventResponse {

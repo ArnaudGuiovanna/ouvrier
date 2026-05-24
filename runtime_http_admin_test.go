@@ -314,6 +314,62 @@ func TestHTTPAdminStatusIncludesSchemaConformanceFromStateStore(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminStatusIncludesRecentSchemaViolationsFromStateStore(t *testing.T) {
+	store := state.NewMemoryStore()
+	now := time.Date(2026, 5, 24, 15, 0, 0, 0, time.UTC)
+	addAdminSchemaViolation(t, store, state.SchemaViolation{
+		At:         now.Add(-3 * time.Minute),
+		ExecID:     "exec_1",
+		SessionID:  "sess_1",
+		SchemaName: "First",
+		Error:      "old violation",
+	})
+	addAdminSchemaViolation(t, store, state.SchemaViolation{
+		At:         now.Add(-2 * time.Minute),
+		ExecID:     "exec_2",
+		SessionID:  "sess_2",
+		SchemaName: "Second",
+		Error:      "middle token=middle-secret",
+	})
+	addAdminSchemaViolation(t, store, state.SchemaViolation{
+		At:         now.Add(-1 * time.Minute),
+		ExecID:     "exec_3",
+		SessionID:  "sess_3",
+		SchemaName: "Third",
+		Error:      "newest api_key=newest-secret",
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/status?last=2", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status                 string `json:"status"`
+		SchemaViolations       int    `json:"schema_violations"`
+		RecentSchemaViolations []struct {
+			ExecID     string `json:"exec_id"`
+			SessionID  string `json:"session_id"`
+			SchemaName string `json:"schema_name"`
+			Error      string `json:"error"`
+		} `json:"recent_schema_violations"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || body.SchemaViolations != 3 || len(body.RecentSchemaViolations) != 2 {
+		t.Fatalf("body = %+v, want two of three recent schema violations", body)
+	}
+	if body.RecentSchemaViolations[0].ExecID != "exec_3" || body.RecentSchemaViolations[0].SchemaName != "Third" ||
+		body.RecentSchemaViolations[0].Error != "newest api_key=[REDACTED]" {
+		t.Fatalf("newest violation = %+v, want redacted exec_3 violation", body.RecentSchemaViolations[0])
+	}
+	if body.RecentSchemaViolations[1].ExecID != "exec_2" || body.RecentSchemaViolations[1].SchemaName != "Second" ||
+		body.RecentSchemaViolations[1].Error != "middle token=[REDACTED]" {
+		t.Fatalf("second newest violation = %+v, want redacted exec_2 violation", body.RecentSchemaViolations[1])
+	}
+}
+
 func TestHTTPAdminStatusIncludesLLMUsageFromEvents(t *testing.T) {
 	store := state.NewMemoryStore()
 	addAdminStoreEvent(t, store, events.Event{
