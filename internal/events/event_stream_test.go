@@ -342,6 +342,7 @@ func TestEventStreamAppendAcceptsNilContext(t *testing.T) {
 		t.Fatalf("NewEventStream returned error: %v", err)
 	}
 
+	//lint:ignore SA1012 the test asserts Append tolerates a nil context for backwards compatibility callers.
 	event, err := stream.Append(nil, Event{Kind: EventSessionStarted})
 	if err != nil {
 		t.Fatalf("Append returned error: %v", err)

@@ -637,10 +637,6 @@ func validateTerminalReplyOutput(plan runtimeplan.Plan, output string) error {
 	return schema.ValidateJSON(plan.Terminal.ResultSchema, []byte(output))
 }
 
-func (rt httpRuntime) validateDirectTerminalReplyOutput(ctx context.Context, plan runtimeplan.Plan) error {
-	return rt.validateObservedTerminalReplyOutput(ctx, plan, planRunResult{Output: directReplyOKOutput})
-}
-
 func (rt httpRuntime) validateObservedTerminalReplyOutput(ctx context.Context, plan runtimeplan.Plan, result planRunResult) error {
 	if terminalReplySchemaAlreadyValidated(plan) {
 		return nil
