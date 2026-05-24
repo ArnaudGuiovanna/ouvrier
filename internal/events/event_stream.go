@@ -157,6 +157,20 @@ func sanitizePayloadValue(key string, value any) any {
 			}
 		}
 		return clone
+	case map[string][]string:
+		clone := make(map[string][]string, len(typed))
+		for childKey, childValues := range typed {
+			if isSensitivePayloadKey(childKey) {
+				clone[childKey] = []string{redactedPayloadValue}
+				continue
+			}
+			cloneValues := make([]string, len(childValues))
+			for i, childValue := range childValues {
+				cloneValues[i] = RedactJSONText(childValue)
+			}
+			clone[childKey] = cloneValues
+		}
+		return clone
 	case []any:
 		clone := make([]any, len(typed))
 		for i, item := range typed {

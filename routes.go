@@ -221,6 +221,16 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	response.BudgetExceededWallClock = harnessMetrics.BudgetExceededWallClock
 	response.BudgetExceededIterations = harnessMetrics.BudgetExceededIterations
 	response.HookFailures = harnessMetrics.HookFailures
+	decisionMetrics := summarizeAdminDecisionMetrics(recorded)
+	response.SignatureDecisions = decisionMetrics.SignatureDecisions
+	response.SignatureValid = decisionMetrics.SignatureValid
+	response.SignatureInvalid = decisionMetrics.SignatureInvalid
+	response.SignatureMissing = decisionMetrics.SignatureMissing
+	response.SignatureSecretMissing = decisionMetrics.SignatureSecretMissing
+	response.IdempotencyDecisions = decisionMetrics.IdempotencyDecisions
+	response.IdempotencyReserved = decisionMetrics.IdempotencyReserved
+	response.IdempotencyDuplicate = decisionMetrics.IdempotencyDuplicate
+	response.IdempotencyRetry = decisionMetrics.IdempotencyRetry
 	if rt.stateStore == nil {
 		writeJSON(w, http.StatusOK, response)
 		return
@@ -533,12 +543,63 @@ type adminHarnessMetricsSummary struct {
 	HookFailures             int
 }
 
+type adminDecisionMetricsSummary struct {
+	SignatureDecisions     int
+	SignatureValid         int
+	SignatureInvalid       int
+	SignatureMissing       int
+	SignatureSecretMissing int
+	IdempotencyDecisions   int
+	IdempotencyReserved    int
+	IdempotencyDuplicate   int
+	IdempotencyRetry       int
+}
+
 func summarizeAdminHarnessMetrics(recorded []events.Event) adminHarnessMetricsSummary {
 	var summary adminHarnessMetricsSummary
 	for _, event := range recorded {
 		summary.AddEvent(event)
 	}
 	return summary
+}
+
+func summarizeAdminDecisionMetrics(recorded []events.Event) adminDecisionMetricsSummary {
+	var summary adminDecisionMetricsSummary
+	for _, event := range recorded {
+		summary.AddEvent(event)
+	}
+	return summary
+}
+
+func (s *adminDecisionMetricsSummary) AddEvent(event events.Event) {
+	if s == nil {
+		return
+	}
+	decision := adminStringPayload(event.Payload, "decision")
+	switch events.CanonicalKind(event.Kind) {
+	case events.EventSignatureDecision:
+		s.SignatureDecisions++
+		switch decision {
+		case "valid":
+			s.SignatureValid++
+		case "invalid":
+			s.SignatureInvalid++
+		case "missing":
+			s.SignatureMissing++
+		case "secret_missing":
+			s.SignatureSecretMissing++
+		}
+	case events.EventIdempotencyDecision:
+		s.IdempotencyDecisions++
+		switch decision {
+		case "reserved":
+			s.IdempotencyReserved++
+		case "duplicate":
+			s.IdempotencyDuplicate++
+		case "retry":
+			s.IdempotencyRetry++
+		}
+	}
 }
 
 func (s *adminHarnessMetricsSummary) AddEvent(event events.Event) {
@@ -1088,6 +1149,15 @@ type adminStatusResponse struct {
 	BudgetExceededWallClock  int                            `json:"budget_exceeded_wallclock"`
 	BudgetExceededIterations int                            `json:"budget_exceeded_iterations"`
 	HookFailures             int                            `json:"hook_failures"`
+	SignatureDecisions       int                            `json:"signature_decisions"`
+	SignatureValid           int                            `json:"signature_valid"`
+	SignatureInvalid         int                            `json:"signature_invalid"`
+	SignatureMissing         int                            `json:"signature_missing"`
+	SignatureSecretMissing   int                            `json:"signature_secret_missing"`
+	IdempotencyDecisions     int                            `json:"idempotency_decisions"`
+	IdempotencyReserved      int                            `json:"idempotency_reserved"`
+	IdempotencyDuplicate     int                            `json:"idempotency_duplicate"`
+	IdempotencyRetry         int                            `json:"idempotency_retry"`
 }
 
 type adminLLMUsageSummary struct {
@@ -1143,35 +1213,45 @@ type adminTracesResponse struct {
 }
 
 type adminTraceSummary struct {
-	TraceKey             string    `json:"trace_key"`
-	ExecID               string    `json:"exec_id,omitempty"`
-	TraceID              string    `json:"trace_id,omitempty"`
-	SessionID            string    `json:"session_id,omitempty"`
-	Events               int       `json:"events"`
-	LLMCalls             int       `json:"llm_calls"`
-	LLMFailures          int       `json:"llm_failures"`
-	LLMRetries           int       `json:"llm_retries"`
-	LLMFinalFailures     int       `json:"llm_final_failures"`
-	ToolCalls            int       `json:"tool_calls"`
-	ToolFailures         int       `json:"tool_failures"`
-	TasksStarted         int       `json:"tasks_started"`
-	TasksCompleted       int       `json:"tasks_completed"`
-	TasksFailed          int       `json:"tasks_failed"`
-	PermissionAllowed    int       `json:"permission_allowed"`
-	PermissionDenied     int       `json:"permission_denied"`
-	InputTokens          int       `json:"input_tokens"`
-	OutputTokens         int       `json:"output_tokens"`
-	CostUSD              float64   `json:"cost_usd"`
-	LatencyMS            float64   `json:"average_latency_ms"`
-	SchemaViolations     int       `json:"schema_violations"`
-	SchemaRepairs        int       `json:"schema_repairs"`
-	SchemaRepairFailures int       `json:"schema_repair_failures"`
-	BudgetExceeded       int       `json:"budget_exceeded"`
-	FirstEventID         uint64    `json:"first_event_id"`
-	LastEventID          uint64    `json:"last_event_id"`
-	LastKind             string    `json:"last_kind,omitempty"`
-	LastAt               time.Time `json:"last_at,omitempty"`
-	llmUsage             adminLLMUsageSummary
+	TraceKey               string    `json:"trace_key"`
+	ExecID                 string    `json:"exec_id,omitempty"`
+	TraceID                string    `json:"trace_id,omitempty"`
+	SessionID              string    `json:"session_id,omitempty"`
+	Events                 int       `json:"events"`
+	LLMCalls               int       `json:"llm_calls"`
+	LLMFailures            int       `json:"llm_failures"`
+	LLMRetries             int       `json:"llm_retries"`
+	LLMFinalFailures       int       `json:"llm_final_failures"`
+	ToolCalls              int       `json:"tool_calls"`
+	ToolFailures           int       `json:"tool_failures"`
+	TasksStarted           int       `json:"tasks_started"`
+	TasksCompleted         int       `json:"tasks_completed"`
+	TasksFailed            int       `json:"tasks_failed"`
+	PermissionAllowed      int       `json:"permission_allowed"`
+	PermissionDenied       int       `json:"permission_denied"`
+	InputTokens            int       `json:"input_tokens"`
+	OutputTokens           int       `json:"output_tokens"`
+	CostUSD                float64   `json:"cost_usd"`
+	LatencyMS              float64   `json:"average_latency_ms"`
+	SchemaViolations       int       `json:"schema_violations"`
+	SchemaRepairs          int       `json:"schema_repairs"`
+	SchemaRepairFailures   int       `json:"schema_repair_failures"`
+	BudgetExceeded         int       `json:"budget_exceeded"`
+	SignatureDecisions     int       `json:"signature_decisions"`
+	SignatureValid         int       `json:"signature_valid"`
+	SignatureInvalid       int       `json:"signature_invalid"`
+	SignatureMissing       int       `json:"signature_missing"`
+	SignatureSecretMissing int       `json:"signature_secret_missing"`
+	IdempotencyDecisions   int       `json:"idempotency_decisions"`
+	IdempotencyReserved    int       `json:"idempotency_reserved"`
+	IdempotencyDuplicate   int       `json:"idempotency_duplicate"`
+	IdempotencyRetry       int       `json:"idempotency_retry"`
+	FirstEventID           uint64    `json:"first_event_id"`
+	LastEventID            uint64    `json:"last_event_id"`
+	LastKind               string    `json:"last_kind,omitempty"`
+	LastAt                 time.Time `json:"last_at,omitempty"`
+	llmUsage               adminLLMUsageSummary
+	decisionMetrics        adminDecisionMetricsSummary
 }
 
 func (s *adminTraceSummary) AddEvent(event events.Event) {
@@ -1195,6 +1275,17 @@ func (s *adminTraceSummary) AddEvent(event events.Event) {
 		} else {
 			s.PermissionDenied++
 		}
+	case events.EventSignatureDecision, events.EventIdempotencyDecision:
+		s.decisionMetrics.AddEvent(event)
+		s.SignatureDecisions = s.decisionMetrics.SignatureDecisions
+		s.SignatureValid = s.decisionMetrics.SignatureValid
+		s.SignatureInvalid = s.decisionMetrics.SignatureInvalid
+		s.SignatureMissing = s.decisionMetrics.SignatureMissing
+		s.SignatureSecretMissing = s.decisionMetrics.SignatureSecretMissing
+		s.IdempotencyDecisions = s.decisionMetrics.IdempotencyDecisions
+		s.IdempotencyReserved = s.decisionMetrics.IdempotencyReserved
+		s.IdempotencyDuplicate = s.decisionMetrics.IdempotencyDuplicate
+		s.IdempotencyRetry = s.decisionMetrics.IdempotencyRetry
 	case events.EventSchemaValidationFailed:
 		s.SchemaViolations++
 	case events.EventSchemaRepairCompleted:

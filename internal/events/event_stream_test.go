@@ -224,6 +224,24 @@ func TestEventStreamAppendHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestEventStreamAppendAcceptsNilContext(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+
+	event, err := stream.Append(nil, Event{Kind: EventSessionStarted})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+	if event.ID != 1 {
+		t.Fatalf("event ID = %d, want 1", event.ID)
+	}
+	if len(stream.List()) != 1 {
+		t.Fatalf("events = %d, want 1", len(stream.List()))
+	}
+}
+
 func TestEventStreamSinceFiltersByID(t *testing.T) {
 	stream, err := NewEventStream()
 	if err != nil {
@@ -239,6 +257,44 @@ func TestEventStreamSinceFiltersByID(t *testing.T) {
 	}
 	if events[0].ID != 2 || events[1].ID != 3 {
 		t.Fatalf("Since IDs = %d, %d; want 2, 3", events[0].ID, events[1].ID)
+	}
+}
+
+func TestEventStreamSinceReturnsDefensiveCopiesOfHeaderPayloadValues(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	headers := map[string][]string{
+		"Authorization": {"Bearer secret-token"},
+		"X-Request-ID":  {"req_1"},
+	}
+	_, err = stream.Append(context.Background(), Event{
+		Kind:    EventBeforeTool,
+		Payload: map[string]any{"headers": headers},
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	events := stream.Since(0)
+	listedHeaders := events[0].Payload["headers"].(map[string][]string)
+	if listedHeaders["Authorization"][0] != "[REDACTED]" {
+		t.Fatalf("Authorization header = %v, want [REDACTED]", listedHeaders["Authorization"])
+	}
+	listedHeaders["Authorization"][0] = "mutated-secret"
+	listedHeaders["X-Request-ID"][0] = "mutated"
+
+	again := stream.Since(0)
+	againHeaders := again[0].Payload["headers"].(map[string][]string)
+	if againHeaders["Authorization"][0] != "[REDACTED]" {
+		t.Fatalf("stored Authorization header = %v, want [REDACTED]", againHeaders["Authorization"])
+	}
+	if againHeaders["X-Request-ID"][0] != "req_1" {
+		t.Fatalf("stored X-Request-ID header = %v, want req_1", againHeaders["X-Request-ID"])
+	}
+	if headers["Authorization"][0] != "Bearer secret-token" {
+		t.Fatalf("Append mutated caller headers = %v, want original secret", headers["Authorization"])
 	}
 }
 

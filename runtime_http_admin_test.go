@@ -538,6 +538,52 @@ func TestHTTPAdminStatusIncludesHarnessMetricsFromEvents(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminStatusIncludesTriggerDecisionMetricsFromEvents(t *testing.T) {
+	store := state.NewMemoryStore()
+	for _, decision := range []string{"valid", "invalid", "missing", "secret_missing"} {
+		addAdminStoreEvent(t, store, events.Event{Kind: events.EventSignatureDecision, Payload: map[string]any{
+			"decision": decision,
+		}})
+	}
+	for _, decision := range []string{"reserved", "duplicate", "retry"} {
+		addAdminStoreEvent(t, store, events.Event{Kind: events.EventIdempotencyDecision, ExecID: "exec_1", Payload: map[string]any{
+			"decision": decision,
+		}})
+	}
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status                 string `json:"status"`
+		SignatureDecisions     int    `json:"signature_decisions"`
+		SignatureValid         int    `json:"signature_valid"`
+		SignatureInvalid       int    `json:"signature_invalid"`
+		SignatureMissing       int    `json:"signature_missing"`
+		SignatureSecretMissing int    `json:"signature_secret_missing"`
+		IdempotencyDecisions   int    `json:"idempotency_decisions"`
+		IdempotencyReserved    int    `json:"idempotency_reserved"`
+		IdempotencyDuplicate   int    `json:"idempotency_duplicate"`
+		IdempotencyRetry       int    `json:"idempotency_retry"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" {
+		t.Fatalf("status body = %q, want ok", body.Status)
+	}
+	if body.SignatureDecisions != 4 || body.SignatureValid != 1 || body.SignatureInvalid != 1 ||
+		body.SignatureMissing != 1 || body.SignatureSecretMissing != 1 {
+		t.Fatalf("signature metrics = %+v, want per-decision counts", body)
+	}
+	if body.IdempotencyDecisions != 3 || body.IdempotencyReserved != 1 ||
+		body.IdempotencyDuplicate != 1 || body.IdempotencyRetry != 1 {
+		t.Fatalf("idempotency metrics = %+v, want per-decision counts", body)
+	}
+}
+
 func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -694,6 +740,54 @@ func TestHTTPAdminTracesSummarizesPermissionDecisions(t *testing.T) {
 	}
 	if body.Traces[0].ExecID != "exec_1" || body.Traces[0].PermissionAllowed != 1 || body.Traces[0].PermissionDenied != 1 {
 		t.Fatalf("trace = %+v, want allowed and denied permission counts", body.Traces[0])
+	}
+}
+
+func TestHTTPAdminTracesSummarizesTriggerDecisions(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSignatureDecision, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1", Payload: map[string]any{
+		"decision": "valid",
+	}})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSignatureDecision, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1", Payload: map[string]any{
+		"decision": "invalid",
+	}})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventIdempotencyDecision, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1", Payload: map[string]any{
+		"decision": "reserved",
+	}})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventIdempotencyDecision, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1", Payload: map[string]any{
+		"decision": "duplicate",
+	}})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Traces []struct {
+			ExecID               string `json:"exec_id"`
+			SignatureDecisions   int    `json:"signature_decisions"`
+			SignatureValid       int    `json:"signature_valid"`
+			SignatureInvalid     int    `json:"signature_invalid"`
+			IdempotencyDecisions int    `json:"idempotency_decisions"`
+			IdempotencyReserved  int    `json:"idempotency_reserved"`
+			IdempotencyDuplicate int    `json:"idempotency_duplicate"`
+		} `json:"traces"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Traces) != 1 {
+		t.Fatalf("body = %+v, want one trace", body)
+	}
+	if body.Traces[0].ExecID != "exec_1" ||
+		body.Traces[0].SignatureDecisions != 2 || body.Traces[0].SignatureValid != 1 || body.Traces[0].SignatureInvalid != 1 ||
+		body.Traces[0].IdempotencyDecisions != 2 || body.Traces[0].IdempotencyReserved != 1 || body.Traces[0].IdempotencyDuplicate != 1 {
+		t.Fatalf("trace = %+v, want signature and idempotency decision counts", body.Traces[0])
 	}
 }
 

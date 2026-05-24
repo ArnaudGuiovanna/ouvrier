@@ -390,6 +390,47 @@ func TestRunReturnsFailedOutcomeOnProviderError(t *testing.T) {
 	}
 }
 
+func TestRunEmitsProviderFailureMetadataForTrace(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	authErr := provider.AuthError(errors.New("invalid api key"))
+	p := &scriptedProvider{err: authErr}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithProviderRetries(2),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, authErr) {
+		t.Fatalf("Run error = %v, want auth error", err)
+	}
+	if out.Status != harness.StatusFailed {
+		t.Fatalf("Status = %q, want failed", out.Status)
+	}
+
+	event, ok := findEvent(stream.List(), events.EventLLMCallFailed)
+	if !ok {
+		t.Fatalf("events = %+v, want LLM failed event", stream.List())
+	}
+	if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["provider"] != "scripted" ||
+		event.Payload["error_kind"] != string(provider.ErrorAuth) ||
+		event.Payload["model"] != "anthropic/claude-sonnet-4-6" ||
+		event.Payload["attempt"] != 1 ||
+		event.Payload["retrying"] != false ||
+		event.Payload["transient"] != false {
+		t.Fatalf("event payload = %+v, want provider failure metadata for trace/admin", event.Payload)
+	}
+}
+
 func TestRunRetriesTransientProviderErrorBeforeSideEffects(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

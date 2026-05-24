@@ -217,14 +217,31 @@ func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Ses
 }
 
 func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.Session, iteration, attempt int, model string, err error, retrying bool) error {
-	return h.emit(ctx, session, events.EventLLMCallFailed, map[string]any{
+	payload := map[string]any{
 		"iteration": iteration,
 		"attempt":   attempt,
 		"model":     model,
 		"error":     err.Error(),
 		"transient": provider.IsTransientError(err),
 		"retrying":  retrying,
-	})
+	}
+	if h.provider != nil {
+		if name := strings.TrimSpace(h.provider.Name()); name != "" {
+			payload["provider"] = name
+		}
+	}
+	if kind := providerErrorKind(err); kind != "" {
+		payload["error_kind"] = string(kind)
+	}
+	return h.emit(ctx, session, events.EventLLMCallFailed, payload)
+}
+
+func providerErrorKind(err error) provider.ErrorKind {
+	var classified provider.ClassifiedError
+	if errors.As(err, &classified) {
+		return classified.Kind
+	}
+	return ""
 }
 
 func addLLMResponseMetadata(payload map[string]any, metadata provider.ResponseMetadata) {
