@@ -661,6 +661,42 @@ func TestHTTPAdminTracesListsPersistentTraceSummariesFromStateStore(t *testing.T
 	}
 }
 
+func TestHTTPAdminTracesSummarizesPermissionDecisions(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventPermissionDecision, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1", Payload: map[string]any{
+		"allowed": true,
+	}})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventPermissionDecision, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1", Payload: map[string]any{
+		"allowed": false,
+	}})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Traces []struct {
+			ExecID            string `json:"exec_id"`
+			PermissionAllowed int    `json:"permission_allowed"`
+			PermissionDenied  int    `json:"permission_denied"`
+		} `json:"traces"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Traces) != 1 {
+		t.Fatalf("body = %+v, want one trace", body)
+	}
+	if body.Traces[0].ExecID != "exec_1" || body.Traces[0].PermissionAllowed != 1 || body.Traces[0].PermissionDenied != 1 {
+		t.Fatalf("trace = %+v, want allowed and denied permission counts", body.Traces[0])
+	}
+}
+
 func TestHTTPAdminTracesIncludesSelectableKeyForEventsWithoutExecution(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

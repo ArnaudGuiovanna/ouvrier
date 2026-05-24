@@ -1157,6 +1157,8 @@ type adminTraceSummary struct {
 	TasksStarted         int       `json:"tasks_started"`
 	TasksCompleted       int       `json:"tasks_completed"`
 	TasksFailed          int       `json:"tasks_failed"`
+	PermissionAllowed    int       `json:"permission_allowed"`
+	PermissionDenied     int       `json:"permission_denied"`
 	InputTokens          int       `json:"input_tokens"`
 	OutputTokens         int       `json:"output_tokens"`
 	CostUSD              float64   `json:"cost_usd"`
@@ -1187,6 +1189,12 @@ func (s *adminTraceSummary) AddEvent(event events.Event) {
 		s.TasksCompleted++
 	case events.EventTaskFailed:
 		s.TasksFailed++
+	case events.EventPermissionDecision:
+		if adminBoolPayload(event.Payload, "allowed") {
+			s.PermissionAllowed++
+		} else {
+			s.PermissionDenied++
+		}
 	case events.EventSchemaValidationFailed:
 		s.SchemaViolations++
 	case events.EventSchemaRepairCompleted:
