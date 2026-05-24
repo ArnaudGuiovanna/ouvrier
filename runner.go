@@ -6,10 +6,24 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
+
+// Tracer is the public surface for OTel-compatible span emission.
+// Implementations are free to use OpenTelemetry, Jaeger, Honeycomb, or any
+// other observability stack. The harness emits one span per pipeline, pipe,
+// session, LLM call, tool call, schema validation, and subagent task.
+type Tracer = events.Tracer
+
+// Span is a single tracing span minted by a Tracer.
+type Span = events.Span
+
+// NopTracer returns a Tracer whose spans do nothing. Useful for tests or for
+// disabling tracing without removing the WithTracer option.
+func NopTracer() Tracer { return events.NopTracer() }
 
 // Runner owns advanced runtime configuration for Ouvrier pipelines.
 type Runner struct {
@@ -18,6 +32,7 @@ type Runner struct {
 	hooks                *Hooks
 	sandbox              SandboxConfig
 	schemaRepairAttempts int
+	tracer               Tracer
 	err                  error
 }
 
@@ -27,6 +42,7 @@ type runnerConfig struct {
 	hooks                *Hooks
 	sandbox              SandboxConfig
 	schemaRepairAttempts int
+	tracer               Tracer
 	err                  error
 }
 
@@ -81,7 +97,22 @@ func NewRunner(options ...RunnerOption) *Runner {
 		hooks:                cfg.hooks,
 		sandbox:              cfg.sandbox,
 		schemaRepairAttempts: cfg.schemaRepairAttempts,
+		tracer:               cfg.tracer,
 		err:                  cfg.err,
+	}
+}
+
+// WithTracer installs a Tracer that receives span lifecycle events for
+// pipeline, pipe, session, LLM, tool, schema, and subagent activity. The
+// harness pairs *_started events with their *_completed or *_failed
+// counterparts internally; callers see one span per logical operation.
+func WithTracer(tracer Tracer) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if tracer == nil {
+			cfg.setErr(errors.New("tracer is required"))
+			return
+		}
+		cfg.tracer = tracer
 	}
 }
 
@@ -257,6 +288,11 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 			return err
 		}
 		rt.hookBus = hookBus
+	}
+	if r.tracer != nil && rt.eventStream != nil {
+		if err := rt.eventStream.Subscribe(events.TracerSubscriber(r.tracer)); err != nil {
+			return err
+		}
 	}
 	if r.sandbox.root != "" {
 		sandbox, err := internalsandbox.New(r.sandbox.root,

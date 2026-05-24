@@ -86,6 +86,16 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runVersion(args[1:])
 	case "new":
 		return app.runNewCommand(ctx, args[1:])
+	case "build":
+		return app.runBuildCommand(ctx, args[1:])
+	case "show":
+		return app.runShowCommand(args[1:])
+	case "status":
+		return app.runStatusCommand(ctx, args[1:])
+	case "logs":
+		return app.runLogsCommand(ctx, args[1:])
+	case "trace":
+		return app.runTraceCommand(ctx, args[1:])
 	default:
 		return fmt.Errorf("%w %q", ErrUnknownCommand, args[0])
 	}
