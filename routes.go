@@ -1208,51 +1208,55 @@ type adminTracesResponse struct {
 }
 
 type adminTraceSummary struct {
-	TraceKey               string    `json:"trace_key"`
-	ExecID                 string    `json:"exec_id,omitempty"`
-	TraceID                string    `json:"trace_id,omitempty"`
-	SessionID              string    `json:"session_id,omitempty"`
-	Events                 int       `json:"events"`
-	LLMCalls               int       `json:"llm_calls"`
-	LLMFailures            int       `json:"llm_failures"`
-	LLMRetries             int       `json:"llm_retries"`
-	LLMFinalFailures       int       `json:"llm_final_failures"`
-	ToolCalls              int       `json:"tool_calls"`
-	ToolFailures           int       `json:"tool_failures"`
-	TasksStarted           int       `json:"tasks_started"`
-	TasksCompleted         int       `json:"tasks_completed"`
-	TasksFailed            int       `json:"tasks_failed"`
-	PermissionAllowed      int       `json:"permission_allowed"`
-	PermissionDenied       int       `json:"permission_denied"`
-	HookFailures           int       `json:"hook_failures"`
-	InputTokens            int       `json:"input_tokens"`
-	OutputTokens           int       `json:"output_tokens"`
-	CostUSD                float64   `json:"cost_usd"`
-	LatencyMS              float64   `json:"average_latency_ms"`
-	SchemaViolations       int       `json:"schema_violations"`
-	SchemaValidationPassed int       `json:"schema_validation_passed"`
-	SchemaValidationFailed int       `json:"schema_validation_failed"`
-	SchemaRepairsStarted   int       `json:"schema_repairs_started"`
-	SchemaRepairsCompleted int       `json:"schema_repairs_completed"`
-	SchemaRepairsFailed    int       `json:"schema_repairs_failed"`
-	SchemaRepairs          int       `json:"schema_repairs"`
-	SchemaRepairFailures   int       `json:"schema_repair_failures"`
-	BudgetExceeded         int       `json:"budget_exceeded"`
-	SignatureDecisions     int       `json:"signature_decisions"`
-	SignatureValid         int       `json:"signature_valid"`
-	SignatureInvalid       int       `json:"signature_invalid"`
-	SignatureMissing       int       `json:"signature_missing"`
-	SignatureSecretMissing int       `json:"signature_secret_missing"`
-	IdempotencyDecisions   int       `json:"idempotency_decisions"`
-	IdempotencyReserved    int       `json:"idempotency_reserved"`
-	IdempotencyDuplicate   int       `json:"idempotency_duplicate"`
-	IdempotencyRetry       int       `json:"idempotency_retry"`
-	FirstEventID           uint64    `json:"first_event_id"`
-	LastEventID            uint64    `json:"last_event_id"`
-	LastKind               string    `json:"last_kind,omitempty"`
-	LastAt                 time.Time `json:"last_at,omitempty"`
-	llmUsage               adminLLMUsageSummary
-	decisionMetrics        adminDecisionMetricsSummary
+	TraceKey                 string    `json:"trace_key"`
+	ExecID                   string    `json:"exec_id,omitempty"`
+	TraceID                  string    `json:"trace_id,omitempty"`
+	SessionID                string    `json:"session_id,omitempty"`
+	Events                   int       `json:"events"`
+	LLMCalls                 int       `json:"llm_calls"`
+	LLMFailures              int       `json:"llm_failures"`
+	LLMRetries               int       `json:"llm_retries"`
+	LLMFinalFailures         int       `json:"llm_final_failures"`
+	ToolCalls                int       `json:"tool_calls"`
+	ToolFailures             int       `json:"tool_failures"`
+	TasksStarted             int       `json:"tasks_started"`
+	TasksCompleted           int       `json:"tasks_completed"`
+	TasksFailed              int       `json:"tasks_failed"`
+	PermissionAllowed        int       `json:"permission_allowed"`
+	PermissionDenied         int       `json:"permission_denied"`
+	HookFailures             int       `json:"hook_failures"`
+	InputTokens              int       `json:"input_tokens"`
+	OutputTokens             int       `json:"output_tokens"`
+	CostUSD                  float64   `json:"cost_usd"`
+	LatencyMS                float64   `json:"average_latency_ms"`
+	SchemaViolations         int       `json:"schema_violations"`
+	SchemaValidationPassed   int       `json:"schema_validation_passed"`
+	SchemaValidationFailed   int       `json:"schema_validation_failed"`
+	SchemaRepairsStarted     int       `json:"schema_repairs_started"`
+	SchemaRepairsCompleted   int       `json:"schema_repairs_completed"`
+	SchemaRepairsFailed      int       `json:"schema_repairs_failed"`
+	SchemaRepairs            int       `json:"schema_repairs"`
+	SchemaRepairFailures     int       `json:"schema_repair_failures"`
+	BudgetExceeded           int       `json:"budget_exceeded"`
+	BudgetExceededTokens     int       `json:"budget_exceeded_tokens"`
+	BudgetExceededCostUSD    int       `json:"budget_exceeded_cost_usd"`
+	BudgetExceededWallClock  int       `json:"budget_exceeded_wallclock"`
+	BudgetExceededIterations int       `json:"budget_exceeded_iterations"`
+	SignatureDecisions       int       `json:"signature_decisions"`
+	SignatureValid           int       `json:"signature_valid"`
+	SignatureInvalid         int       `json:"signature_invalid"`
+	SignatureMissing         int       `json:"signature_missing"`
+	SignatureSecretMissing   int       `json:"signature_secret_missing"`
+	IdempotencyDecisions     int       `json:"idempotency_decisions"`
+	IdempotencyReserved      int       `json:"idempotency_reserved"`
+	IdempotencyDuplicate     int       `json:"idempotency_duplicate"`
+	IdempotencyRetry         int       `json:"idempotency_retry"`
+	FirstEventID             uint64    `json:"first_event_id"`
+	LastEventID              uint64    `json:"last_event_id"`
+	LastKind                 string    `json:"last_kind,omitempty"`
+	LastAt                   time.Time `json:"last_at,omitempty"`
+	llmUsage                 adminLLMUsageSummary
+	decisionMetrics          adminDecisionMetricsSummary
 }
 
 func (s *adminTraceSummary) AddEvent(event events.Event) {
@@ -1304,6 +1308,16 @@ func (s *adminTraceSummary) AddEvent(event events.Event) {
 		s.SchemaRepairFailures++
 	case events.EventBudgetExceeded:
 		s.BudgetExceeded++
+		switch adminStringPayload(event.Payload, "budget") {
+		case "tokens":
+			s.BudgetExceededTokens++
+		case "cost_usd":
+			s.BudgetExceededCostUSD++
+		case "wallclock":
+			s.BudgetExceededWallClock++
+		case "iterations":
+			s.BudgetExceededIterations++
+		}
 	}
 }
 

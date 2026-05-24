@@ -727,6 +727,51 @@ func TestHTTPAdminTracesListsPersistentTraceSummariesFromStateStore(t *testing.T
 	}
 }
 
+func TestHTTPAdminTracesSummarizesBudgetExceededKinds(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	for _, budget := range []string{"tokens", "cost_usd", "wallclock", "iterations"} {
+		appendAdminEvent(t, stream, events.Event{
+			Kind:      events.EventBudgetExceeded,
+			ExecID:    "exec_1",
+			SessionID: "sess_1",
+			TraceID:   "trace_1",
+			Payload: map[string]any{
+				"budget": budget,
+			},
+		})
+	}
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Traces []struct {
+			BudgetExceeded           int `json:"budget_exceeded"`
+			BudgetExceededTokens     int `json:"budget_exceeded_tokens"`
+			BudgetExceededCostUSD    int `json:"budget_exceeded_cost_usd"`
+			BudgetExceededWallClock  int `json:"budget_exceeded_wallclock"`
+			BudgetExceededIterations int `json:"budget_exceeded_iterations"`
+		} `json:"traces"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Traces) != 1 {
+		t.Fatalf("body = %+v, want one trace", body)
+	}
+	trace := body.Traces[0]
+	if trace.BudgetExceeded != 4 || trace.BudgetExceededTokens != 1 || trace.BudgetExceededCostUSD != 1 ||
+		trace.BudgetExceededWallClock != 1 || trace.BudgetExceededIterations != 1 {
+		t.Fatalf("budget trace counters = %+v, want total and per-budget counts", trace)
+	}
+}
+
 func TestHTTPAdminTracesSummarizesSchemaEventCounters(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
