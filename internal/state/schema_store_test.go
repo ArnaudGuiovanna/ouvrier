@@ -37,6 +37,40 @@ func TestSQLiteStoreRedactsSchemaViolationErrorsBeforePersistence(t *testing.T) 
 	assertSchemaViolationErrorRedaction(t, store)
 }
 
+func TestSQLiteStoreRedactsRawSchemaViolationRowsOnRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store := newTestSQLiteStore(t, path)
+	at := time.Date(2026, 5, 24, 17, 0, 0, 0, time.UTC)
+	_, err := store.db.ExecContext(context.Background(), `INSERT INTO ouvrier_schema_violations (
+		at, exec_id, session_id, schema_name, error
+	) VALUES (?, ?, ?, ?, ?)`,
+		formatSQLiteTime(at),
+		"exec_raw",
+		"sess_raw",
+		"RawReply",
+		"schema failed token=raw-token api_key=raw-key Authorization: Bearer raw-bearer",
+	)
+	if err != nil {
+		t.Fatalf("raw insert returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	reopened := newTestSQLiteStore(t, path)
+	violations, err := reopened.SchemaViolations(context.Background(), "exec_raw")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want 1: %+v", len(violations), violations)
+	}
+	wantError := "schema failed token=[REDACTED] api_key=[REDACTED] Authorization: [REDACTED]"
+	if violations[0].Error != wantError {
+		t.Fatalf("raw violation error = %q, want %q", violations[0].Error, wantError)
+	}
+}
+
 func addSchemaViolationFixtures(t *testing.T, store Store) ([]SchemaViolation, []SchemaViolation) {
 	t.Helper()
 

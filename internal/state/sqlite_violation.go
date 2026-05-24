@@ -91,5 +91,6 @@ func scanSQLiteViolation(scanner sqliteViolationScanner) (SchemaViolation, error
 		return SchemaViolation{}, err
 	}
 	violation.At = parsed
+	violation.Error = events.RedactText(violation.Error)
 	return violation, nil
 }
