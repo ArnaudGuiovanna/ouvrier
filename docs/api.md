@@ -1,9 +1,10 @@
 # Ouvrier v0.1 Public API Reference
 
 This file is a single-source map of the public surface in package
-`ovr "github.com/ArnaudGuiovanna/ouvrier"`. It mirrors the surface listed in
-`specs.md` and is exercised by the `TestPublicV01APIParityCompiles` golden
-test so the doc cannot drift away from the code.
+`ovr "github.com/ArnaudGuiovanna/ouvrier"`. It mirrors the v0.1 framework
+contract documented in the handbook and is exercised by the
+`TestPublicV01APIParityCompiles` golden test so the doc cannot drift away from
+the code.
 
 ## Triggers
 
@@ -21,7 +22,7 @@ Trigger options (passed inside the trigger constructor or via `From`-level
 | ------------------------------------------------- | ---------------------------------------------------- |
 | `IdempotencyKey(header string) FromOption`        | Use the named HTTP/webhook header as the idempotency key. |
 | `VerifySignature(envVar, header string) FromOption` | HMAC-SHA256 signature verification using a shared secret read from `envVar`. |
-| `WorkerPool(limit int) FromOption` *(if exposed)* | Cap concurrent trigger handlers.                     |
+| `WorkerPool(limit int) FromOption`                 | Cap concurrent trigger handlers.                     |
 
 ## Pipe
 
@@ -192,10 +193,13 @@ them from the terminal.
 
 ```go
 ovr.AllowSideEffects(labels ...string) ovr.PermissionPolicy
+ovr.AllowSideEffectTargets(label string, targets ...string) ovr.PermissionPolicy
 ```
 
-Compose more sophisticated policies by implementing the `PermissionPolicy`
-interface.
+Use `AllowSideEffects` for non-targeted Go tool labels. Use
+`AllowSideEffectTargets` for target-scoped output actions such as webhook push,
+queue push, file sink, MCP, Bash process, and Bash filesystem access. Compose
+more sophisticated policies by implementing the `PermissionPolicy` interface.
 
 ## Stability
 

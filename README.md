@@ -14,7 +14,7 @@ import (
 	"context"
 	"log"
 
-	ovr "ouvrier"
+	ovr "github.com/ArnaudGuiovanna/ouvrier"
 )
 
 type Ticket struct {
@@ -96,10 +96,9 @@ What ships in v0.1:
   `add agent|tool|skill`, `dev`, `build` (static cross-compile), and
   `deploy ssh|docker`.
 
-Documented v0.1 limitations: provider response streaming is not yet
-surfaced through `EventStream`, hot reload of `ouvrier dev` is a future
-enhancement, and provider cost estimates are best-effort (compute from
-token usage and your own pricing table).
+Operational notes for v0.1: provider response streaming is not surfaced
+through `EventStream`, `ouvrier dev` runs `go run .` without hot reload, and
+provider cost estimates are best-effort from available provider metadata.
 
 ## Mental Model
 
@@ -194,13 +193,10 @@ terminals now execute through the same harness path when run as a cron-only
 runtime. Webhook trigger plans now expose `POST /webhooks/<provider>` routes,
 wrap the request as `{trigger, provider, body}`, and reuse the same signature,
 idempotency, harness, state, event, and policy guarantees as HTTP triggers.
-Mixed HTTP, Webhook, Cron, and Stream runtime plumbing exists, but stream
-transports are still experimental: stream URIs validate and receiver boundaries
-exist, with minimal NATS, Redis Streams, and Kafka receiver code. Production
-ack/retry, backpressure, and durable DLQ behavior are not ready yet. Redis
-Streams with `WorkerPool > 1` can replay already-acked messages after an
-earlier concurrent nack; keep Redis stream workers single-concurrency unless a
-state store idempotency key fully protects side effects.
+Mixed HTTP, Webhook, Cron, and Stream runtimes can run together. Stream
+receivers support NATS, Redis Streams, and Kafka boundaries, reserve message
+IDs in the state store when available, and emit stream dead-letter events for
+failed delivery handling.
 
 ### Pipes
 
@@ -302,10 +298,10 @@ ovr.Sink(ovr.Log())
 ovr.Sink(ovr.File("./out/result.json"))
 ```
 
-`Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push, NATS/HTTP
-queue push, log sink, and file sink have current runtime coverage. Broader queue
-protocols and production delivery semantics, including backpressure, retry, and
-DLQ behavior, are tracked for v0.1.
+`Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push,
+NATS/HTTP queue push, log sink, and file sink have runtime coverage. Push and
+file sink terminals run as governed output tools and require matching
+permission policy when they perform side effects.
 
 ### SubAgents
 
@@ -380,17 +376,16 @@ OUVRIER_STATE_BACKEND=sqlite
 OUVRIER_STATE_PATH=.ouvrier/state.db
 ```
 
-Early admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
+Admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
 stream-only, and mixed runtimes. Set `PIP_ADMIN_TOKEN` outside local
-development when exposing a worker; the full v0.1 admin/status/trace viewer
-surface is still in progress.
+development when exposing a worker.
 
 ## Observability
 
 Ouvrier records structured events for pipeline, pipe, session, LLM, tool,
 permission, schema, budget, sink, and subagent task activity.
 
-Useful early endpoints in the current runtime:
+Runtime endpoints:
 
 ```txt
 GET  /admin/health
@@ -400,8 +395,8 @@ GET  /admin/traces/{exec-id}
 POST /admin/trigger
 ```
 
-Events are redacted before persistence or admin output. The current endpoints
-are diagnostics, not the complete v0.1 admin experience.
+Events are redacted before persistence or admin output. The dev trace viewer is
+available at `/dev` behind the same admin authorization behavior.
 
 ## CLI
 
@@ -411,16 +406,21 @@ Current commands:
 ouvrier version
 ouvrier new --yes --name NAME --trigger "POST /path" --model "provider/model"
 ouvrier new
+ouvrier add agent --name NAME --model "provider/model" [--goal TEXT]
+ouvrier add tool --name LoadTicket [--describe TEXT] [--readonly|--side-effecting|--idempotent KEY]
+ouvrier add skill --name ticket-triage [--description TEXT]
 ouvrier show [--dir .]
+ouvrier dev [--dir .] [--addr :8080]
 ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]
 ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
+ouvrier deploy ssh --host HOST [--dir .]
+ouvrier deploy docker [--dir .] [--image IMAGE] [--tag TAG] [--push]
 ```
 
-`ouvrier new --yes` currently supports HTTP trigger strings only, such as
-`"POST /tickets"`. The no-flag `ouvrier new` command opens a Bubble Tea v2
-preview, but it does not generate a project yet.
+`ouvrier new` opens the Bubble Tea v2 project wizard. The wizard and
+`ouvrier new --yes` support HTTP trigger strings such as `"POST /tickets"`.
 
 The introspection commands (`show`, `status`, `logs`, `trace`) read from the
 project filesystem (`pip.yaml`) or talk to a running worker through
@@ -430,8 +430,9 @@ compiles the worker; `--static` implies `CGO_ENABLED=0` with
 (`modernc.org/sqlite` is pure Go, so static cross-builds work without a C
 toolchain).
 
-The full v0.1 CLI backlog also includes interactive `new`, `add agent`,
-`add tool`, `add skill`, `dev`, and `deploy`.
+`ouvrier deploy ssh` ships a static binary, `.env`, and a systemd unit with
+health-check rollback. `ouvrier deploy docker` renders and builds a distroless
+container image.
 
 ## Reference Examples
 
@@ -496,14 +497,11 @@ Ouvrier assumes LLM output is untrusted:
 
 ## Documentation
 
-Primary implementation sources:
+User-facing documentation:
 
-- `specs.md`
-- `ouvrier-doc-v0.1.pdf`
-- GitHub milestone `v0.1`
-
-If the spec and documentation disagree, treat that as a product/spec bug to
-resolve explicitly. Do not silently shrink v0.1 scope.
+- [Handbook](docs/handbook.md)
+- [Public API Reference](docs/api.md)
+- [Observability Guide](docs/observability.md)
 
 ## License
 

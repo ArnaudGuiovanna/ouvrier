@@ -1,6 +1,6 @@
 // Package ovr_test contains a compile-time parity test that references every
-// documented v0.1 public symbol from specs.md so that any rename, removal, or
-// signature drift breaks `go build ./...` and the closing of v0.1 issue #22 is
+// documented v0.1 public symbol from docs/api.md so that any rename, removal,
+// or signature drift breaks `go build ./...` and public API drift is
 // observable from CI.
 //
 // The test does not exercise behavior — it only forces type-checking against
@@ -9,9 +9,9 @@
 // SPEC GAPS (none right now): every symbol enumerated in this file resolves
 // against the package as of the time of writing. When the spec describes a
 // public surface that is intentionally not implemented yet, the offending
-// reference should be replaced with a `t.Logf("spec gap: ...")` line and noted
+// reference should be replaced with a `t.Logf("api gap: ...")` line and noted
 // in this header block. As of 2026-05 every documented v0.1 primitive listed
-// in specs.md sections 3, 5, 7, 8, 10, 11 and 15 has a public counterpart.
+// in docs/api.md has a public counterpart.
 package ovr_test
 
 import (
@@ -38,7 +38,7 @@ func parityTool(_ context.Context) error { return nil }
 func TestPublicV01APIParityCompiles(t *testing.T) {
 	t.Helper()
 
-	// Trigger primitives (specs.md §3.1).
+	// Trigger primitives.
 	_ = ovr.From
 	_ = ovr.Cron("0 6 * * *")
 	_ = ovr.Webhook("github")
@@ -47,7 +47,7 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.VerifySignature("STRIPE_SIGNING_SECRET", "Stripe-Signature")
 	_ = ovr.WorkerPool(4)
 
-	// Pipe option surface (specs.md §3.2, §5.1).
+	// Pipe option surface.
 	_ = ovr.Pipe
 	_ = ovr.Model("anthropic/claude-sonnet-4-6")
 	_ = ovr.Timeout("30s")
@@ -71,7 +71,7 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.SubAgent
 	_ = ovr.Pipeline
 
-	// Output node primitives (specs.md §3.4, §5).
+	// Output node primitives.
 	_ = ovr.Reply
 	_ = ovr.Push
 	_ = ovr.Sink
@@ -82,12 +82,12 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.Log()
 	_ = ovr.File("./out/result.json")
 
-	// Composition (specs.md §4.2, §4.3).
+	// Composition.
 	_ = ovr.Parallel
 	_ = ovr.Map
 	_ = ovr.Concurrency(8)
 
-	// Capabilities and advanced surfaces (specs.md §3.2, §5.3, §5.4, §11.4).
+	// Capabilities and advanced surfaces.
 	_ = ovr.Bash(ovr.Sandbox("/tmp/ouvrier-parity-workspace"))
 	_ = ovr.BashTimeout("5s")
 	_ = ovr.BashMaxOutputBytes(64 * 1024)
@@ -97,7 +97,7 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.RequireEnv
 	_ = ovr.MCP("moodle-mcp")
 
-	// Runner and advanced configuration (specs.md §3.3, §2.1.2, §8).
+	// Runner and advanced configuration.
 	_ = ovr.NewRunner
 	_ = ovr.Run
 	_ = ovr.Validate
@@ -114,6 +114,7 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	// SandboxConfig, Tracer — remain reachable in this test.
 	runner := ovr.NewRunner(
 		ovr.WithPermissionPolicy(ovr.AllowSideEffects("email")),
+		ovr.WithPermissionPolicy(ovr.AllowSideEffectTargets("webhook", "https://example.com/result")),
 		ovr.WithSandbox(ovr.Sandbox(t.TempDir(), ovr.AllowEnv("PATH"))),
 		ovr.WithSchemaRepairAttempts(1),
 		ovr.WithTracer(ovr.NopTracer()),

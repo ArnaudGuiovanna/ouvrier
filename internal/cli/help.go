@@ -28,8 +28,8 @@ const newHelp = `Scaffold a new Ouvrier project.
 
 Usage: ouvrier new [flags]
 
-With no flags, ouvrier opens a Bubble Tea preview. Interactive generation is
-still a v0.1 backlog item; use --yes with flags to scaffold today.
+With no flags, ouvrier opens the Bubble Tea project wizard. Use --yes with
+flags for non-interactive scaffolding.
 
 Options:
       --name string      Project name

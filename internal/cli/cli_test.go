@@ -45,7 +45,7 @@ func TestRunNewHelpPrintsUsage(t *testing.T) {
 	for _, want := range []string{
 		"Usage: ouvrier new",
 		"Bubble Tea",
-		"preview",
+		"project wizard",
 		"HTTP trigger",
 		"--help",
 	} {
