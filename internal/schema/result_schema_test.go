@@ -41,9 +41,10 @@ type resultSchemaPayload struct {
 }
 
 type resultSchemaTaggedOutput struct {
-	PublicID  string                `json:"public_id"`
-	Count     int                   `json:",omitempty"`
-	Secret    string                `json:"-"`
+	PublicID string `json:"public_id"`
+	Count    int    `json:",omitempty"`
+	Secret   string `json:"-"`
+	//lint:ignore SA5008 "-," is the documented way to keep the literal field name "-" in encoding/json; the test asserts schema generation honours that.
 	DashItems []resultSchemaPayload `json:"-,"`
 }
 
