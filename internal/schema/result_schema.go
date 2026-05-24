@@ -19,7 +19,7 @@ func FromType(typ reflect.Type) (*runtimecore.ResultSchema, error) {
 		return nil, errors.New("result schema type is required")
 	}
 
-	generated, err := jsonschema.ForType(typ, nil)
+	generated, err := jsonschema.ForType(typ, resultSchemaForOptions())
 	if err != nil {
 		return nil, fmt.Errorf("generate result schema for %s: %w", typ, err)
 	}
@@ -38,6 +38,14 @@ func FromType(typ reflect.Type) (*runtimecore.ResultSchema, error) {
 		return nil, fmt.Errorf("resolve generated result schema for %s: %w", typ, err)
 	}
 	return contract, nil
+}
+
+func resultSchemaForOptions() *jsonschema.ForOptions {
+	return &jsonschema.ForOptions{
+		TypeSchemas: map[reflect.Type]*jsonschema.Schema{
+			reflect.TypeFor[json.Number](): {Type: "number"},
+		},
+	}
 }
 
 func ValidateJSON(contract *runtimecore.ResultSchema, data []byte) error {

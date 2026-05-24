@@ -62,6 +62,11 @@ type resultSchemaStampedReply struct {
 	History   []time.Time `json:"history"`
 }
 
+type resultSchemaNumberReply struct {
+	Amount json.Number  `json:"amount"`
+	Maybe  *json.Number `json:"maybe,omitempty"`
+}
+
 func TestFromTypeGeneratesStrictJSONSchema(t *testing.T) {
 	contract, err := schema.FromType(reflect.TypeFor[resultSchemaReply]())
 	if err != nil {
@@ -372,6 +377,36 @@ func TestFromTypeGeneratesScalarSchema(t *testing.T) {
 	}
 	if err := schema.ValidateJSON(contract, []byte(`{"status":"ok"}`)); err == nil {
 		t.Fatal("ValidateJSON returned nil for object against scalar schema")
+	}
+}
+
+func TestFromTypePreservesJSONNumberAsNumber(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaNumberReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	amount := generated.Properties["amount"]
+	if amount == nil || amount.Type != "number" {
+		t.Fatalf("amount schema = %+v, want JSON number schema for json.Number", amount)
+	}
+	maybe := generated.Properties["maybe"]
+	if maybe == nil || !slices.Contains(maybe.Types, "number") || !slices.Contains(maybe.Types, "null") {
+		t.Fatalf("maybe schema = %+v, want nullable JSON number schema for *json.Number", maybe)
+	}
+
+	if err := schema.ValidateJSON(contract, []byte(`{"amount":12.5,"maybe":null}`)); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid json.Number output: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"amount":"12.5","maybe":null}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for string in json.Number field")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"amount":12.5,"maybe":"12.5"}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for string in *json.Number field")
 	}
 }
 
