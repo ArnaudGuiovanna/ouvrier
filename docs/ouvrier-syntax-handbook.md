@@ -1494,7 +1494,32 @@ The backend may also be `memory` for lightweight development or tests.
 
 ## 20. Worked Examples From Simple To Complex
 
-### Example 1: Minimal OpenAI SSE Worker
+This section is a progression. Each example adds exactly one or two new ideas.
+Read the examples as architecture patterns, not as isolated snippets to copy
+blindly.
+
+The progression is:
+
+1. One trigger, one pipe, one reply.
+2. Add a typed JSON contract.
+3. Add a read-only tool and path parameters.
+4. Split a workflow into sequential agent steps.
+5. Process a batch with `Map`.
+6. Run independent reviewers with `Parallel`.
+7. Compose a governed incident-response orchestrator with tools, side effects,
+   a subagent, budgets, retries, and typed final output.
+
+### Example 1: One Trigger, One Pipe, One Reply
+
+This is the minimum useful HTTP worker. It has no typed output and no tools.
+The only Ouvrier structure is:
+
+```txt
+From -> Pipe -> Reply
+```
+
+Use this shape when you are still validating a route, a provider key, or a
+basic prompt.
 
 ```go
 package main
@@ -1528,7 +1553,18 @@ Test:
 curl -N -X POST http://localhost:8080/test -H 'Content-Type: application/json' -d '{"message":"user cannot sign in"}'
 ```
 
-### Example 2: Typed JSON Reply
+What this example teaches:
+
+- `From("POST /test")` creates an HTTP route.
+- `Pipe(...)` runs one model call.
+- `Reply(SSE())` sends the final result as server-sent events.
+- The model can only return text here. There is no schema contract yet.
+
+### Example 2: Typed JSON Contract
+
+The next step is to make the output shape explicit. `Output[T]()` tells the
+pipe to produce JSON matching a Go type. `Reply(JSON[T]())` tells the HTTP
+reply to use that same type.
 
 ```go
 package main
@@ -1561,144 +1597,28 @@ func main() {
 }
 ```
 
-### Example 3: Two Sequential Agent Steps
+What this example adds:
 
-```go
-type Haiku struct {
-	Text string `json:"text"`
-}
+- A Go struct becomes the public response contract.
+- JSON tags are part of the API. `json:"salutation"` is the field name the
+  caller sees.
+- The model is instructed and validated against the schema.
+- If the model returns prose instead of JSON, the pipeline fails unless schema
+  repair is enabled on the runner.
 
-type SavedPath struct {
-	Path string `json:"path"`
-}
+This is the default shape for a production HTTP endpoint:
 
-err := ovr.Run(":8080",
-	ovr.From("POST /haiku"),
-	ovr.Pipe("Write an eight-word haiku. Return JSON only.",
-		ovr.Model("openai/gpt-5.1"),
-		ovr.Output[Haiku](),
-	),
-	ovr.Pipe("Turn the haiku into a filesystem path suggestion. Return JSON only.",
-		ovr.Model("openai/gpt-5.1"),
-		ovr.Output[SavedPath](),
-	),
-	ovr.Reply(ovr.JSON[SavedPath]()),
-)
+```txt
+From -> Pipe(Output[T]) -> Reply(JSON[T])
 ```
 
-This returns a path suggestion. It does not write a real file. To write a real
-file, expose a Go tool or use `Sink(File(...))`.
+### Example 3: Read-Only Tool And Path Parameters
 
-### Example 4: File-Writing Tool
+A model does not automatically know your application data. Tools expose your
+domain functions to the agent. This example loads a support ticket by ID.
 
-```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-	"path/filepath"
-
-	ovr "github.com/ArnaudGuiovanna/ouvrier"
-)
-
-type Haiku struct {
-	Text string `json:"text"`
-}
-
-type SaveArgs struct {
-	Filename string `json:"filename"`
-	Body     string `json:"body"`
-}
-
-type SaveResult struct {
-	Path string `json:"path"`
-}
-
-func SaveMarkdown(ctx context.Context, args SaveArgs) (SaveResult, error) {
-	name := filepath.Base(args.Filename)
-	if name == "." || name == "" {
-		name = "haiku.md"
-	}
-	if filepath.Ext(name) != ".md" {
-		name += ".md"
-	}
-
-	dir := "out"
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return SaveResult{}, err
-	}
-
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(args.Body+"\n"), 0o600); err != nil {
-		return SaveResult{}, err
-	}
-	return SaveResult{Path: path}, nil
-}
-
-func main() {
-	if err := ovr.RequireEnv("OPENAI_API_KEY"); err != nil {
-		log.Fatal(err)
-	}
-
-	runner := ovr.NewRunner(
-		ovr.WithPermissionPolicy(ovr.AllowSideEffects("filesystem")),
-	)
-
-	if err := runner.Run(":8080",
-		ovr.From("POST /haiku"),
-		ovr.Pipe("Write an eight-word haiku. Return JSON only.",
-			ovr.Model("openai/gpt-5.1"),
-			ovr.Output[Haiku](),
-		),
-		ovr.Pipe("Save the previous haiku as Markdown using the tool. Return the tool result.",
-			ovr.Model("openai/gpt-5.1"),
-			ovr.Tool("save_markdown", SaveMarkdown,
-				ovr.SideEffecting("filesystem"),
-				ovr.Describe("Save Markdown content to a local file."),
-				ovr.Param("filename", "Markdown filename."),
-				ovr.Param("body", "Markdown body."),
-			),
-			ovr.Output[SaveResult](),
-		),
-		ovr.Reply(ovr.JSON[SaveResult]()),
-	); err != nil {
-		log.Fatal(err)
-	}
-}
-```
-
-### Example 5: Governed File Sink
-
-```go
-type Report struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
-}
-
-runner := ovr.NewRunner(
-	ovr.WithSandbox(ovr.Sandbox("./out")),
-	ovr.WithPermissionPolicy(
-		ovr.AllowSideEffectTargets("file", "report.json"),
-	),
-)
-
-err := runner.Run(":8080",
-	ovr.From("POST /reports"),
-	ovr.Pipe("Generate a JSON report.",
-		ovr.Model("openai/gpt-5.1"),
-		ovr.Output[Report](),
-	),
-	ovr.Sink(ovr.File("report.json")),
-)
-```
-
-### Example 6: Complex Agentic Middleware
-
-This example combines trigger control, typed outputs, read-only tools,
-sequential steps, map, parallel review, subagents, permissions, schema repair,
-and a final JSON reply.
+The route contains `{id}`. Ouvrier wraps path parameters into the first pipe
+input. The tool still receives structured arguments chosen by the model.
 
 ```go
 package main
@@ -1716,26 +1636,10 @@ type Ticket struct {
 	Body    string `json:"body"`
 }
 
-type TicketFacts struct {
-	ID       string   `json:"id"`
-	Topics   []string `json:"topics"`
-	Customer string   `json:"customer"`
-}
-
-type TopicScore struct {
-	Topic    string `json:"topic"`
+type TicketSummary struct {
+	ID       string `json:"id"`
 	Priority string `json:"priority"`
-}
-
-type Translation struct {
-	Text string `json:"text"`
-}
-
-type FinalReply struct {
-	TicketID   string       `json:"ticket_id"`
-	Summary    string       `json:"summary"`
-	Scores     []TopicScore `json:"scores"`
-	FrenchNote string       `json:"french_note"`
+	Summary  string `json:"summary"`
 }
 
 type LoadTicketArgs struct {
@@ -1755,74 +1659,497 @@ func main() {
 		log.Fatal(err)
 	}
 
-	translator := ovr.Pipeline(
-		ovr.Pipe("Translate the input text to French. Return JSON only.",
-			ovr.Model("openai/gpt-5.1"),
-			ovr.Output[Translation](),
-		),
-	)
-
-	runner := ovr.NewRunner(
-		ovr.WithSchemaRepairAttempts(1),
-	)
-
-	if err := runner.Run(":8080",
-		ovr.From("POST /tickets/{id}",
-			ovr.WorkerPool(20),
-			ovr.IdempotencyKey("Idempotency-Key"),
-		),
-		ovr.Pipe("Load the ticket, extract topics, and return facts.",
+	if err := ovr.Run(":8080",
+		ovr.From("POST /tickets/{id}"),
+		ovr.Pipe("Load the ticket by ID and summarize the support problem.",
 			ovr.Model("openai/gpt-5.1"),
 			ovr.Tool("load_ticket", LoadTicket,
 				ovr.ReadOnly(),
 				ovr.Describe("Load one support ticket by ID."),
-				ovr.Param("id", "Ticket ID from path_params."),
+				ovr.Param("id", "Ticket identifier from path_params.id."),
 			),
-			ovr.Output[TicketFacts](),
+			ovr.Output[TicketSummary](),
 		),
-		ovr.Pipe("Return the topics as a JSON array of strings.",
-			ovr.Model("openai/gpt-5.1"),
-			ovr.Output[[]string](),
-		),
-		ovr.Map(
-			ovr.Concurrency(4),
-			ovr.Pipe("Score one topic for support priority. Return JSON only.",
-				ovr.Model("openai/gpt-5.1"),
-				ovr.Output[TopicScore](),
-			),
-		),
-		ovr.Parallel(
-			ovr.Pipe("Check whether the scores are internally consistent.",
-				ovr.Model("openai/gpt-5.1"),
-			),
-			ovr.Pipe("Check whether the reply should mention account security.",
-				ovr.Model("openai/gpt-5.1"),
-			),
-			ovr.PartialOK(),
-		),
-		ovr.Pipe("Draft the final support reply. Use translate for the French note.",
-			ovr.Model("openai/gpt-5.1"),
-			ovr.SubAgent("translate", translator, ovr.MaxParallel(2)),
-			ovr.Output[FinalReply](),
-		),
-		ovr.Reply(ovr.JSON[FinalReply]()),
+		ovr.Reply(ovr.JSON[TicketSummary]()),
 	); err != nil {
 		log.Fatal(err)
 	}
 }
 ```
 
-Read this example as a chain:
+What this example adds:
+
+- `Tool(...)` registers a normal Go function.
+- `ReadOnly()` tells Ouvrier the tool has no side effects.
+- `Describe(...)` and `Param(...)` improve the tool schema shown to the model.
+- The model decides when to call `load_ticket`; Ouvrier governs the execution.
+
+### Example 4: Sequential Agent Middleware
+
+Use multiple pipes when each stage has a distinct contract. This is agentic
+middleware: one step normalizes data, the next step reasons over the normalized
+shape, and the final step writes the caller-facing result.
+
+```go
+type TicketFacts struct {
+	TicketID string   `json:"ticket_id"`
+	Customer string   `json:"customer"`
+	Topics   []string `json:"topics"`
+}
+
+type RiskProfile struct {
+	TicketID string `json:"ticket_id"`
+	Severity string `json:"severity"`
+	Reason   string `json:"reason"`
+}
+
+type SupportReply struct {
+	TicketID string `json:"ticket_id"`
+	Subject  string `json:"subject"`
+	Body     string `json:"body"`
+}
+
+err := ovr.Run(":8080",
+	ovr.From("POST /tickets/{id}"),
+	ovr.Pipe("Extract stable ticket facts. Return JSON only.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[TicketFacts](),
+	),
+	ovr.Pipe("Assess operational risk from the ticket facts. Return JSON only.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[RiskProfile](),
+	),
+	ovr.Pipe("Write the final support reply from the risk profile. Return JSON only.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[SupportReply](),
+	),
+	ovr.Reply(ovr.JSON[SupportReply]()),
+)
+```
+
+What this example adds:
+
+- Intermediate outputs are not sent to the caller.
+- Each pipe receives the previous pipe's output.
+- Different stages can use different types.
+- The final `Reply(JSON[SupportReply]())` sends only the last pipe result.
+
+Use this pattern when you want reliable boundaries between extraction,
+classification, enrichment, drafting, and final formatting.
+
+### Example 5: Batch Processing With `Map`
+
+Use `Map` when one pipe produces an array and the next operation should run for
+each item. This example extracts incoming tickets from one request, scores each
+ticket concurrently, and then wraps the ordered scores in a final reply.
+
+```go
+type IncomingTicket struct {
+	ID      string `json:"id"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+type TicketScore struct {
+	ID       string `json:"id"`
+	Priority string `json:"priority"`
+	Reason   string `json:"reason"`
+}
+
+type BatchScores struct {
+	Scores []TicketScore `json:"scores"`
+}
+
+err := ovr.Run(":8080",
+	ovr.From("POST /ticket-batches"),
+	ovr.Pipe("Extract the request body as a JSON array of tickets.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[[]IncomingTicket](),
+	),
+	ovr.Map(
+		ovr.Concurrency(4),
+		ovr.Pipe("Score one ticket for support priority. Return JSON only.",
+			ovr.Model("openai/gpt-5.1"),
+			ovr.Output[TicketScore](),
+		),
+	),
+	ovr.Pipe("Wrap the ordered ticket scores in the final response object.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[BatchScores](),
+	),
+	ovr.Reply(ovr.JSON[BatchScores]()),
+)
+```
+
+What this example adds:
+
+- `Output[[]IncomingTicket]()` creates the array required by `Map`.
+- `Map(...)` applies its pipe body once per array item.
+- `Concurrency(4)` limits parallel item processing.
+- Results remain ordered by input item.
+- A final pipe can reshape map output into a stable response contract.
+
+Use `PartialOK()` inside `Map` when a best-effort batch is better than failing
+the whole request:
+
+```go
+ovr.Map(
+	ovr.Concurrency(4),
+	ovr.PartialOK(),
+	ovr.Pipe("Score one ticket.", ovr.Model("openai/gpt-5.1")),
+)
+```
+
+### Example 6: Independent Review With `Parallel`
+
+Use `Parallel` when several independent branches should inspect the same
+input. This example drafts a response, then runs three independent reviewers:
+quality, policy, and customer-impact review.
+
+```go
+type DraftReply struct {
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+type ReviewSummary struct {
+	Approved bool     `json:"approved"`
+	Risks    []string `json:"risks"`
+	Revision string   `json:"revision"`
+}
+
+err := ovr.Run(":8080",
+	ovr.From("POST /tickets/{id}"),
+	ovr.Pipe("Draft a support reply from the request.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[DraftReply](),
+	),
+	ovr.Parallel(
+		ovr.Pipe("Review the draft for factual clarity.",
+			ovr.Model("openai/gpt-5.1"),
+		),
+		ovr.Pipe("Review the draft for policy and safety concerns.",
+			ovr.Model("openai/gpt-5.1"),
+		),
+		ovr.Pipe("Review the draft for likely customer impact.",
+			ovr.Model("openai/gpt-5.1"),
+		),
+		ovr.PartialOK(),
+	),
+	ovr.Pipe("Merge the ordered reviews and produce a final decision.",
+		ovr.Model("openai/gpt-5.1"),
+		ovr.Output[ReviewSummary](),
+	),
+	ovr.Reply(ovr.JSON[ReviewSummary]()),
+)
+```
+
+What this example adds:
+
+- `Parallel(...)` fans out the same draft to each branch.
+- Branches are declared as `Pipe` nodes.
+- Results are ordered exactly like the branch declarations.
+- `PartialOK()` means the merge pipe can still receive successful branch
+  results if one reviewer fails.
+- A merge pipe should explain how to interpret partial outcomes.
+
+Use `Parallel` for independent checks. Do not use it when branch B depends on
+branch A; that is a sequential pipe chain.
+
+### Example 7: Governed Incident Orchestrator
+
+This is a larger middleware. It is still just Ouvrier syntax, but it combines
+the major composition tools:
 
 ```txt
-HTTP request
--> load and extract facts
--> convert topics to an array
--> map each topic to a score
--> run two independent review branches
--> draft final reply with a translation subagent
--> return typed JSON
+HTTP trigger with concurrency and idempotency
+-> read-only domain loading
+-> parallel risk analysis
+-> action extraction
+-> map each action through runbook enrichment
+-> final coordinator with subagent, idempotent ticket creation, notification
+-> typed JSON reply
 ```
+
+The domain is incident response. The worker receives an incident ID, loads the
+current incident, runs independent analysis branches, enriches actions with
+runbook data, optionally creates an escalation ticket, optionally notifies the
+on-call channel, and returns the decision.
+
+The important syntax idea is that every risky capability is explicit:
+
+- `load_incident` and `search_runbook` are `ReadOnly()`.
+- `open_escalation` is `Idempotent("incident_id")`.
+- `notify_on_call` is `SideEffecting("pager")`.
+- The runner allows only the `pager` side-effect label.
+- The subagent is declared as a child `Pipeline` and exposed with `SubAgent`.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+
+	ovr "github.com/ArnaudGuiovanna/ouvrier"
+)
+
+type Incident struct {
+	ID          string   `json:"id"`
+	Service     string   `json:"service"`
+	Summary     string   `json:"summary"`
+	Signals     []string `json:"signals"`
+	CustomerIDs []string `json:"customer_ids"`
+}
+
+type IncidentContext struct {
+	IncidentID string   `json:"incident_id"`
+	Service    string   `json:"service"`
+	Summary    string   `json:"summary"`
+	Signals    []string `json:"signals"`
+}
+
+type RiskAssessment struct {
+	Severity string   `json:"severity"`
+	Risks    []string `json:"risks"`
+}
+
+type CustomerImpact struct {
+	ImpactedCustomers []string `json:"impacted_customers"`
+	ImpactSummary     string   `json:"impact_summary"`
+}
+
+type ActionDraft struct {
+	IncidentID string `json:"incident_id"`
+	Action     string `json:"action"`
+	Why        string `json:"why"`
+}
+
+type RunbookMatch struct {
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	Step  string `json:"step"`
+}
+
+type ActionPlan struct {
+	IncidentID string `json:"incident_id"`
+	Action     string `json:"action"`
+	RunbookURL string `json:"runbook_url"`
+	Owner      string `json:"owner"`
+	Rollback   string `json:"rollback"`
+}
+
+type RemediationDraft struct {
+	Steps []string `json:"steps"`
+	Risks []string `json:"risks"`
+}
+
+type RemediationPlan struct {
+	Steps        []string `json:"steps"`
+	RollbackPlan string   `json:"rollback_plan"`
+	Confidence   string   `json:"confidence"`
+}
+
+type EscalationTicket struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
+}
+
+type NotificationResult struct {
+	Channel string `json:"channel"`
+	Sent    bool   `json:"sent"`
+}
+
+type IncidentDecision struct {
+	IncidentID       string             `json:"incident_id"`
+	Severity         string             `json:"severity"`
+	Actions          []ActionPlan       `json:"actions"`
+	Remediation      RemediationPlan    `json:"remediation"`
+	EscalationTicket *EscalationTicket  `json:"escalation_ticket,omitempty"`
+	Notification     *NotificationResult `json:"notification,omitempty"`
+	OperatorSummary  string             `json:"operator_summary"`
+}
+
+type LoadIncidentArgs struct {
+	ID string `json:"id"`
+}
+
+func LoadIncident(ctx context.Context, args LoadIncidentArgs) (Incident, error) {
+	return Incident{
+		ID:      args.ID,
+		Service: "auth-api",
+		Summary: "Elevated login failures in one region.",
+		Signals: []string{
+			"5xx rate above baseline",
+			"password login failure spike",
+			"region=eu-west",
+		},
+		CustomerIDs: []string{"cust_123", "cust_456"},
+	}, nil
+}
+
+type SearchRunbookArgs struct {
+	Service string `json:"service"`
+	Query   string `json:"query"`
+}
+
+func SearchRunbook(ctx context.Context, args SearchRunbookArgs) (RunbookMatch, error) {
+	return RunbookMatch{
+		Title: "Auth API regional login incident",
+		URL:   "https://runbooks.example.com/auth-api/login-region",
+		Step:  "Check regional dependency health before rollback.",
+	}, nil
+}
+
+type OpenEscalationArgs struct {
+	IncidentID string `json:"incident_id"`
+	Severity   string `json:"severity"`
+	Summary    string `json:"summary"`
+}
+
+func OpenEscalation(ctx context.Context, args OpenEscalationArgs) (EscalationTicket, error) {
+	return EscalationTicket{
+		ID:  "ESC-" + args.IncidentID,
+		URL: "https://incidents.example.com/ESC-" + args.IncidentID,
+	}, nil
+}
+
+type NotifyOnCallArgs struct {
+	IncidentID string `json:"incident_id"`
+	Channel    string `json:"channel"`
+	Message    string `json:"message"`
+}
+
+func NotifyOnCall(ctx context.Context, args NotifyOnCallArgs) (NotificationResult, error) {
+	return NotificationResult{Channel: args.Channel, Sent: true}, nil
+}
+
+func main() {
+	if err := ovr.RequireEnv("OPENAI_API_KEY"); err != nil {
+		log.Fatal(err)
+	}
+
+	remediationPlanner := ovr.Pipeline(
+		ovr.Pipe("Draft a remediation plan from the incident context and actions.",
+			ovr.Model("openai/gpt-5.1"),
+			ovr.Output[RemediationDraft](),
+		),
+		ovr.Pipe("Critique the draft, add rollback steps, and return the final plan.",
+			ovr.Model("openai/gpt-5.1"),
+			ovr.Output[RemediationPlan](),
+		),
+	)
+
+	runner := ovr.NewRunner(
+		ovr.WithSchemaRepairAttempts(1),
+		ovr.WithPermissionPolicy(
+			ovr.AllowSideEffects("pager"),
+		),
+	)
+
+	if err := runner.Run(":8080",
+		ovr.From("POST /incidents/{id}",
+			ovr.WorkerPool(10),
+			ovr.IdempotencyKey("Idempotency-Key"),
+		),
+		ovr.Pipe("Load the incident by path_params.id and normalize its context.",
+			ovr.Model("openai/gpt-5.1"),
+			ovr.Tool("load_incident", LoadIncident,
+				ovr.ReadOnly(),
+				ovr.Describe("Load one incident by ID."),
+				ovr.Param("id", "Incident ID from path_params.id."),
+			),
+			ovr.Output[IncidentContext](),
+		),
+		ovr.Parallel(
+			ovr.Pipe("Assess operational risk. Return JSON only.",
+				ovr.Model("openai/gpt-5.1"),
+				ovr.Output[RiskAssessment](),
+			),
+			ovr.Pipe("Assess customer impact. Return JSON only.",
+				ovr.Model("openai/gpt-5.1"),
+				ovr.Output[CustomerImpact](),
+			),
+			ovr.PartialOK(),
+		),
+		ovr.Pipe("Merge the analyses into an ordered array of concrete actions.",
+			ovr.Model("openai/gpt-5.1"),
+			ovr.Output[[]ActionDraft](),
+		),
+		ovr.Map(
+			ovr.Concurrency(3),
+			ovr.Pipe("Attach owner, runbook evidence, and rollback notes to one action.",
+				ovr.Model("openai/gpt-5.1"),
+				ovr.Tool("search_runbook", SearchRunbook,
+					ovr.ReadOnly(),
+					ovr.Describe("Find a runbook entry for a service and query."),
+					ovr.Param("service", "Service name."),
+					ovr.Param("query", "Incident or action search query."),
+				),
+				ovr.Output[ActionPlan](),
+			),
+		),
+		ovr.Pipe("Coordinate the final incident decision. Use remediation_planner for the final plan. Open an escalation for high severity incidents. Notify on-call only for immediate action.",
+			ovr.Model("openai/gpt-5.1"),
+			ovr.SubAgent("remediation_planner", remediationPlanner,
+				ovr.MaxParallel(2),
+			),
+			ovr.Tool("open_escalation", OpenEscalation,
+				ovr.Idempotent("incident_id"),
+				ovr.Describe("Create or reuse one escalation ticket for an incident."),
+				ovr.Param("incident_id", "Incident identifier."),
+				ovr.Param("severity", "Incident severity."),
+				ovr.Param("summary", "Escalation summary."),
+			),
+			ovr.Tool("notify_on_call", NotifyOnCall,
+				ovr.SideEffecting("pager"),
+				ovr.Describe("Send a message to the on-call channel."),
+				ovr.Param("incident_id", "Incident identifier."),
+				ovr.Param("channel", "On-call channel name."),
+				ovr.Param("message", "Notification text."),
+			),
+			ovr.Timeout("45s"),
+			ovr.Retry(1, ovr.ExponentialBackoff()),
+			ovr.Output[IncidentDecision](),
+		),
+		ovr.Reply(ovr.JSON[IncidentDecision]()),
+	); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+Read the final example in layers:
+
+```txt
+Layer 1: From("POST /incidents/{id}") accepts incident work.
+Layer 2: load_incident gives the model trusted incident data.
+Layer 3: Parallel runs risk and customer-impact analysis at the same time.
+Layer 4: a merge pipe turns analysis results into []ActionDraft.
+Layer 5: Map enriches each action with runbook data under Concurrency(3).
+Layer 6: remediation_planner runs a child two-pipe planning workflow.
+Layer 7: open_escalation and notify_on_call are real side effects.
+Layer 8: IncidentDecision is the only HTTP response contract.
+```
+
+Why this is materially more complex:
+
+- There are multiple typed contracts, not one final schema.
+- The pipeline mixes sequential, parallel, and per-item execution.
+- It uses two different classes of tools: read-only data access and governed
+  side effects.
+- The idempotent tool can be retried safely by key; the pager notification
+  needs an explicit permission label.
+- A subagent encapsulates a reusable child workflow instead of hiding logic in
+  one large prompt.
+- `PartialOK()` makes the parallel analysis resilient while keeping result
+  order deterministic.
+- `Timeout`, `Retry`, and `WithSchemaRepairAttempts` make failure behavior
+  explicit.
+
+This pattern is appropriate when Ouvrier is acting as middleware between
+incoming operational events, internal data sources, action systems, and an HTTP
+client that needs a concise final decision.
 
 ## 21. Validation And Troubleshooting Checklist
 
@@ -1889,7 +2216,7 @@ Use this checklist when a declaration does not work.
 - `VerifySignature` names an env var and a header.
 - `IdempotencyKey` names a header.
 
-### Good Junior Defaults
+### Good Defaults
 
 - Start with one `From`, one `Pipe`, one `Reply(JSON[T]())`.
 - Add `Output[T]()` as soon as the response shape matters.
