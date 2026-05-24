@@ -139,30 +139,31 @@ backlog hygiene task rather than running two separate backlogs.
 
 ### Current Implementation Snapshot
 
-Status date: 2026-05-18.
+Status date: 2026-05-24.
 
-Estimated v0.1 completion: **38%**.
+Estimated v0.1 completion: **78%**.
 
-This is a pragmatic estimate, not a release metric. The core runtime/harness
-foundation is now usable for narrow HTTP + LLM + Go/MCP tool slices, but v0.1
-is not yet production-complete because schema enforcement, retries,
-observability/admin, SubAgent/Task, deployment, streams, and full CLI workflows
-are still incomplete.
+This is a pragmatic estimate, not a release metric. Public API, harness,
+schema, retries, observability, composition, outputs, and most CLI/build
+workflows are in place. Remaining v0.1 gaps: interactive `ouvrier new`,
+`ouvrier dev` (hot reload is explicitly v0.2), production stream
+backpressure/DLQ behavior beyond the existing receivers, PDF corrections,
+and final release polish.
 
 | Area | Estimate | Current state |
 | --- | ---: | --- |
-| M0 Product/API groundwork | 70% | Public primitives and harness direction are mostly settled; `Parallel`, `Map`, `SubAgent`, final module path, and retry semantics still need final API hardening. |
-| M1 Runtime core | 60% | Compiled plans, validation, HTTP routes, graceful shutdown, async accepted replies, and worker pools exist. Cron runtime, path-param extraction, timeouts, and non-HTTP transports remain. |
-| M2 SOTA agent harness | 45% | Session, EventStream package, StateStore memory/SQLite, PermissionPolicy, Sandbox, ToolExecutor, providers, and basic tool loop exist. HookBus, strict ResultSchema validation/repair, full budget accounting, retry/backoff, and SubAgent/Task remain. |
-| M3 Capabilities | 55% | Go tools, permission metadata, skill declaration, and official MCP SDK integration exist. Skill loading/runtime prompt injection and Bash sandbox remain incomplete. |
-| M4 Composition/concurrency | 15% | Trigger `WorkerPool` exists. `Parallel`, `Map`, `PartialOK`, `SubAgent`, and `MaxParallel` remain. |
-| M5 Outputs | 30% | `Reply(JSON[T]())`, `Reply(Accepted())`, `Push`, and `Sink` compile. SSE and real outbound push/queue/file/log sinks remain. |
-| M6 Observability/admin | 10% | Event and state foundations exist. Admin endpoints, trace viewer, spans, redaction, metrics, and OTel export remain. |
-| M7 CLI/TUI | 15% | Minimal CLI/TUI/scaffold exists with Bubble Tea. Most `add`, `show`, `dev`, `build`, `status`, `logs`, and `trace` workflows remain. |
-| M8 Deployment | 8% | Scaffold contains deploy config shape. Real static build, SSH deploy, Docker deploy, rollback, and health checks remain. |
-| M9 Streams/webhooks | 8% | Webhook/stream declarations exist. HMAC verification, runtime stream consumers, idempotent trigger handling, backpressure, DLQ, Kafka/NATS/Redis remain. |
-| M10 Examples/docs | 10% | Specs/backlog are maintained. Reference examples, README, API reference, and PDF corrections remain. |
-| M11 Quality gates | 35% | Unit tests are broad and `go test ./...` / `go vet ./...` pass. Race tests, staticcheck, security tests, golden tests, and integration/dev/deploy tests remain. |
+| M0 Product/API groundwork | 95% | Final module path adopted (`github.com/ArnaudGuiovanna/ouvrier`). All v0.1 public primitives covered by a compile-time parity test. |
+| M1 Runtime core | 85% | Compiled plans, validation, HTTP routes, graceful shutdown, async accepted replies, worker pools, cron runtime, webhook runtime, stream receivers, and mixed runtime plumbing exist. Production stream ack/DLQ semantics remain partial. |
+| M2 SOTA agent harness | 90% | Session, EventStream + HookBus wired through the harness, StateStore memory/SQLite, PermissionPolicy, Sandbox, ToolExecutor, providers, real tool loop with budgets, retries, idempotency keys, and governed SubAgent/Task all wired. OTel-compatible Tracer hook exposed via `WithTracer`. |
+| M3 Capabilities | 80% | Go tools, permission metadata, skill loading, Bash sandbox with workspace/env allowlist/timeout/output-bounds/process-cleanup, MCP through the official Go SDK. Skill embedding in generated scaffolds remains a follow-up. |
+| M4 Composition/concurrency | 100% | `Parallel`, `Map`, `Concurrency`, `PartialOK`, `SubAgent`, `MaxParallel`, and trigger `WorkerPool` ship and are tested. |
+| M5 Outputs | 95% | `Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push, NATS/HTTP queue push, log sink, file sink. Broader queue protocols and full DLQ remain partial. |
+| M6 Observability/admin | 75% | Admin endpoints (`/admin/health`, `/admin/status`, `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`), dev `/dev` trace viewer, OTel-compatible spans, and metrics derived from EventStream + StateStore all ship. Full metrics catalog and per-provider rate-limit dashboards remain. |
+| M7 CLI/TUI | 75% | `version`, `new --yes`, `show`, `status`, `logs`, `trace`, `build` with `--static`/`--target`. `add agent/tool/skill`, `dev`, and interactive `new` remain. |
+| M8 Deployment | 60% | Static build with `CGO_ENABLED=0` and cross-compile; `pip.yaml`/`.env`/`.env.example`/`.gitignore` generation. `deploy ssh` and `deploy docker` track separately. |
+| M9 Streams/webhooks | 50% | HMAC verification, idempotency key handling, NATS/Redis/Kafka receivers, signed webhook routes ship. Production DLQ semantics, backpressure tuning, and per-broker ack policies remain. |
+| M10 Examples/docs | 70% | `examples/ticket-triage` and `examples/moodle-fsrs` reference workers ship with a repo-level build drift test. `docs/api.md` API reference ships. Junior-friendly README updated. PDF corrections remain. |
+| M11 Quality gates | 80% | CI workflow (`.github/workflows/ci.yml`) runs gofmt/vet/staticcheck/`go test`. Race tests cover runtime, state, events, tools, harness. Sandbox escape, admin auth, HMAC, redaction tests ship. CLI golden integration tests cover scaffold/build/status/trace/logs/show. |
 
 Recommended next strict order:
 
