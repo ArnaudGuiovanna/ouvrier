@@ -2,8 +2,6 @@
 
 Version: v0.1
 
-Audience: junior Go developers who want to write Ouvrier workers manually.
-
 Scope: this handbook is exclusively about Ouvrier syntax and composition. It
 explains how to read and write Ouvrier declarations, from a single HTTP agent
 to complex agentic middleware with tools, policies, parallel work, maps,
