@@ -13,19 +13,21 @@ import (
 
 // Runner owns advanced runtime configuration for Ouvrier pipelines.
 type Runner struct {
-	permissionPolicy PermissionPolicy
-	stateStore       StateStore
-	hooks            *Hooks
-	sandbox          SandboxConfig
-	err              error
+	permissionPolicy     PermissionPolicy
+	stateStore           StateStore
+	hooks                *Hooks
+	sandbox              SandboxConfig
+	schemaRepairAttempts int
+	err                  error
 }
 
 type runnerConfig struct {
-	permissionPolicy PermissionPolicy
-	stateStore       StateStore
-	hooks            *Hooks
-	sandbox          SandboxConfig
-	err              error
+	permissionPolicy     PermissionPolicy
+	stateStore           StateStore
+	hooks                *Hooks
+	sandbox              SandboxConfig
+	schemaRepairAttempts int
+	err                  error
 }
 
 // SandboxConfig describes an explicit filesystem workspace boundary.
@@ -74,11 +76,12 @@ func NewRunner(options ...RunnerOption) *Runner {
 		option(&cfg)
 	}
 	return &Runner{
-		permissionPolicy: cfg.permissionPolicy,
-		stateStore:       cfg.stateStore,
-		hooks:            cfg.hooks,
-		sandbox:          cfg.sandbox,
-		err:              cfg.err,
+		permissionPolicy:     cfg.permissionPolicy,
+		stateStore:           cfg.stateStore,
+		hooks:                cfg.hooks,
+		sandbox:              cfg.sandbox,
+		schemaRepairAttempts: cfg.schemaRepairAttempts,
+		err:                  cfg.err,
 	}
 }
 
@@ -123,6 +126,17 @@ func WithSandbox(sandbox SandboxConfig) RunnerOption {
 			return
 		}
 		cfg.sandbox = sandbox
+	}
+}
+
+// WithSchemaRepairAttempts enables bounded ResultSchema repair attempts for runtime Pipe outputs.
+func WithSchemaRepairAttempts(max int) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if max < 0 {
+			cfg.setErr(errors.New("schema repair attempts must be greater than or equal to zero"))
+			return
+		}
+		cfg.schemaRepairAttempts = max
 	}
 }
 
@@ -250,6 +264,7 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 		}
 		rt.sandbox = sandbox
 	}
+	rt.schemaRepairAttempts = r.schemaRepairAttempts
 	return nil
 }
 

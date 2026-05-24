@@ -274,6 +274,119 @@ func TestNewHTTPHandlerAllowsExplicitWebhookPushPolicy(t *testing.T) {
 	assertOutputPermissionDecision(t, stream, "push_webhook", true)
 }
 
+func TestNewHTTPHandlerEmitsWebhookOutputToolEventsThroughHookBusAndStateStore(t *testing.T) {
+	webhook, posts := newWebhookPostRecorder(t)
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	store := state.NewMemoryStore()
+	hooks := events.NewHookBus()
+	if err := hooks.Register(events.EventToolCallStarted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["hooked"] = "started"
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register started hook returned error: %v", err)
+	}
+	if err := hooks.Register(events.EventToolCallCompleted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		event.Payload["hooked"] = "completed"
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register completed hook returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{
+		provider:     scripted,
+		stateStore:   store,
+		eventStream:  stream,
+		hookBus:      hooks,
+		toolExecutor: outputAllowedExecutor("webhook"),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	assertWebhookPost(t, posts, `{"status":"classified"}`)
+	recorded := stream.List()
+	started := assertOutputToolCallEvent(t, recorded, events.EventToolCallStarted, "ouvrier_push_webhook")
+	completed := assertOutputToolCallEvent(t, recorded, events.EventToolCallCompleted, "ouvrier_push_webhook")
+	if started.ID == 0 || completed.ID <= started.ID {
+		t.Fatalf("started/completed events out of order: started=%+v completed=%+v", started, completed)
+	}
+	if started.ExecID == "" || started.SessionID == "" || started.TraceID == "" {
+		t.Fatalf("started event = %+v, want session identifiers", started)
+	}
+	if started.Payload["hooked"] != "started" || completed.Payload["hooked"] != "completed" {
+		t.Fatalf("tool events = %+v, want hook-enriched payloads", recorded)
+	}
+	persisted, err := store.Events(context.Background(), started.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	assertOutputToolCallEvent(t, persisted, events.EventToolCallStarted, "ouvrier_push_webhook")
+	assertOutputToolCallEvent(t, persisted, events.EventToolCallCompleted, "ouvrier_push_webhook")
+}
+
+func TestNewHTTPHandlerEmitsWebhookOutputToolFailedOnDefaultPolicyDeny(t *testing.T) {
+	called := false
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		called = true
+	}))
+	t.Cleanup(webhook.Close)
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{
+		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Push(Webhook(webhook.URL)),
+	}, httpRuntime{provider: scripted, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if called {
+		t.Fatal("webhook was called despite default output policy denial")
+	}
+	recorded := stream.List()
+	started := assertOutputToolCallEvent(t, recorded, events.EventToolCallStarted, "ouvrier_push_webhook")
+	failed := assertOutputToolCallEvent(t, recorded, events.EventToolCallFailed, "ouvrier_push_webhook")
+	if started.ID == 0 || failed.ID <= started.ID {
+		t.Fatalf("started/failed events out of order: started=%+v failed=%+v", started, failed)
+	}
+	if strings.TrimSpace(fmt.Sprint(failed.Payload["error"])) == "" {
+		t.Fatalf("failed event payload = %+v, want error", failed.Payload)
+	}
+	if _, ok := findRuntimeHTTPEvent(recorded, events.EventToolCallCompleted); ok {
+		t.Fatalf("events = %+v, want no completed output tool event after deny", recorded)
+	}
+	assertOutputPermissionDecision(t, stream, "push_webhook", false)
+}
+
 func TestNewHTTPHandlerRoutesWebhookPushThroughOutputToolPolicy(t *testing.T) {
 	webhook, posts := newWebhookPostRecorder(t)
 	stream, err := events.NewEventStream()
@@ -693,4 +806,28 @@ func assertOutputPermissionDecision(t *testing.T, stream *events.EventStream, ac
 		}
 	}
 	t.Fatalf("events = %+v, want permission decision action=%s allowed=%v", stream.List(), action, allowed)
+}
+
+func assertOutputToolCallEvent(t *testing.T, recorded []events.Event, kind events.EventKind, tool string) events.Event {
+	t.Helper()
+	for _, event := range recorded {
+		if event.Kind != kind {
+			continue
+		}
+		if event.Payload["tool"] != tool || event.Payload["tool_call_id"] != tool {
+			t.Fatalf("%s payload = %+v, want output tool %s", kind, event.Payload, tool)
+		}
+		if event.Payload["output_action"] != true {
+			t.Fatalf("%s payload = %+v, want output_action=true", kind, event.Payload)
+		}
+		if _, leaked := event.Payload["arguments"]; leaked {
+			t.Fatalf("%s payload leaked arguments: %+v", kind, event.Payload)
+		}
+		if _, leaked := event.Payload["output"]; leaked {
+			t.Fatalf("%s payload leaked output: %+v", kind, event.Payload)
+		}
+		return event
+	}
+	t.Fatalf("events = %+v, want %s for output tool %s", recorded, kind, tool)
+	return events.Event{}
 }

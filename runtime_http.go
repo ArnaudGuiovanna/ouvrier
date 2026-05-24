@@ -870,21 +870,52 @@ func (rt httpRuntime) executeOutputTool(ctx context.Context, result planRunResul
 	if err != nil {
 		return err
 	}
-	toolCtx := tools.ContextWithPermissionDecisionObserver(ctx, func(ctx context.Context, audit tools.PermissionDecisionAudit) error {
-		return rt.emitOutputToolPermissionDecision(ctx, result, audit)
-	})
-	toolResult, err := scoped.Execute(toolCtx, provider.ToolCall{
+	call := provider.ToolCall{
 		ID:        name,
 		Name:      name,
 		Arguments: args,
-	})
-	if err != nil {
+	}
+	if err := rt.emitOutputToolCallEvent(ctx, result, events.EventToolCallStarted, call, metadata, nil); err != nil {
 		return err
 	}
+	toolCtx := tools.ContextWithPermissionDecisionObserver(ctx, func(ctx context.Context, audit tools.PermissionDecisionAudit) error {
+		return rt.emitOutputToolPermissionDecision(ctx, result, audit)
+	})
+	toolResult, err := scoped.Execute(toolCtx, call)
+	if err != nil {
+		emitErr := rt.emitOutputToolCallEvent(ctx, result, events.EventToolCallFailed, call, metadata, err)
+		return errors.Join(err, emitErr)
+	}
 	if toolResult.IsError {
-		return fmt.Errorf("output tool %s failed: %s", name, outputToolErrorText(toolResult.Content))
+		toolErr := fmt.Errorf("output tool %s failed: %s", name, outputToolErrorText(toolResult.Content))
+		emitErr := rt.emitOutputToolCallEvent(ctx, result, events.EventToolCallFailed, call, metadata, toolErr)
+		return errors.Join(toolErr, emitErr)
+	}
+	if err := rt.emitOutputToolCallEvent(ctx, result, events.EventToolCallCompleted, call, metadata, nil); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (rt httpRuntime) emitOutputToolCallEvent(ctx context.Context, result planRunResult, kind events.EventKind, call provider.ToolCall, metadata tools.Metadata, eventErr error) error {
+	payload := map[string]any{
+		"tool":          call.Name,
+		"tool_call_id":  call.ID,
+		"output_action": true,
+	}
+	if metadata.ActionKind != "" {
+		payload["action"] = string(metadata.ActionKind)
+	}
+	if metadata.Kind != "" {
+		payload["tool_kind"] = string(metadata.Kind)
+	}
+	if metadata.Effect != "" {
+		payload["effect"] = string(metadata.Effect)
+	}
+	if eventErr != nil {
+		payload["error"] = eventErr.Error()
+	}
+	return rt.emitRuntimeEvent(ctx, result, kind, payload)
 }
 
 func (rt httpRuntime) emitOutputToolPermissionDecision(ctx context.Context, result planRunResult, audit tools.PermissionDecisionAudit) error {

@@ -105,6 +105,34 @@ func TestRunnerHooksConfigureHTTPRuntime(t *testing.T) {
 	}
 }
 
+func TestRunnerSchemaRepairAttemptsRejectsNegativeValue(t *testing.T) {
+	runner := NewRunner(WithSchemaRepairAttempts(-1))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "schema repair attempts must be greater than or equal to zero") {
+		t.Fatalf("Run error = %v, want schema repair attempts context", err)
+	}
+}
+
+func TestRunnerSchemaRepairAttemptsConfiguresHTTPRuntime(t *testing.T) {
+	runner := NewRunner(WithSchemaRepairAttempts(2))
+	rt := defaultHTTPRuntime()
+
+	if err := runner.configureHTTPRuntime(&rt); err != nil {
+		t.Fatalf("configureHTTPRuntime returned error: %v", err)
+	}
+	if rt.schemaRepairAttempts != 2 {
+		t.Fatalf("schemaRepairAttempts = %d, want 2", rt.schemaRepairAttempts)
+	}
+}
+
 type recordingStateStore struct {
 	executions  map[string]Execution
 	sessions    map[string]Session

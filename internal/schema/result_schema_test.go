@@ -33,6 +33,10 @@ type resultSchemaStatus struct {
 	State string `json:"state"`
 }
 
+type resultSchemaPayload struct {
+	Status string `json:"status"`
+}
+
 func TestFromTypeGeneratesStrictJSONSchema(t *testing.T) {
 	contract, err := schema.FromType(reflect.TypeFor[resultSchemaReply]())
 	if err != nil {
@@ -133,5 +137,108 @@ func TestFromTypeGeneratesStrictRepresentativeJSONSchema(t *testing.T) {
 	}
 	if err := schema.ValidateJSON(contract, []byte(`{"items":[],"labels":{}}`)); err == nil {
 		t.Fatal("ValidateJSON returned nil for missing required field")
+	}
+}
+
+func TestFromTypeGeneratesStrictTopLevelSliceSchema(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[[]resultSchemaPayload]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	if generated.Type != "array" || slices.Contains(generated.Types, "null") {
+		t.Fatalf("schema = %+v, want non-null top-level array", generated)
+	}
+
+	if err := schema.ValidateJSON(contract, []byte(`[{"status":"ok"}]`)); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid slice: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`null`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for null top-level slice")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`[{"status":"ok","extra":true}]`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for extra nested slice field")
+	}
+}
+
+func TestFromTypeGeneratesStrictTopLevelMapSchema(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[map[string]resultSchemaPayload]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	if generated.Type != "object" || slices.Contains(generated.Types, "null") {
+		t.Fatalf("schema = %+v, want non-null top-level object map", generated)
+	}
+
+	if err := schema.ValidateJSON(contract, []byte(`{"ticket":{"status":"ok"}}`)); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid map: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`null`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for null top-level map")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"ticket":{"status":"ok","extra":true}}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for extra nested map value field")
+	}
+}
+
+func TestFromTypeAllowsNullableTopLevelPointerSchema(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[*resultSchemaPayload]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	if !slices.Contains(generated.Types, "null") || !slices.Contains(generated.Types, "object") {
+		t.Fatalf("schema = %+v, want nullable top-level object pointer", generated)
+	}
+
+	if err := schema.ValidateJSON(contract, []byte(`null`)); err != nil {
+		t.Fatalf("ValidateJSON returned error for null pointer output: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"status":"ok"}`)); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid pointer output: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"status":"ok","extra":true}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for extra pointer field")
+	}
+}
+
+func TestFromTypeGeneratesScalarSchema(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[string]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	if err := schema.ValidateJSON(contract, []byte(`"ok"`)); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid scalar: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"status":"ok"}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for object against scalar schema")
+	}
+}
+
+func TestFromTypeRejectsUnsupportedTypes(t *testing.T) {
+	for _, typ := range []reflect.Type{
+		reflect.TypeFor[func()](),
+		reflect.TypeFor[chan string](),
+		reflect.TypeFor[map[int]string](),
+	} {
+		t.Run(typ.String(), func(t *testing.T) {
+			if _, err := schema.FromType(typ); err == nil {
+				t.Fatal("FromType returned nil error for unsupported type")
+			}
+		})
 	}
 }

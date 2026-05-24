@@ -29,11 +29,15 @@ func FromType(typ reflect.Type) (*runtimecore.ResultSchema, error) {
 		return nil, fmt.Errorf("marshal result schema for %s: %w", typ, err)
 	}
 
-	return &runtimecore.ResultSchema{
+	contract := &runtimecore.ResultSchema{
 		Name:       typ.String(),
 		Type:       typ,
 		JSONSchema: raw,
-	}, nil
+	}
+	if _, err := resolve(contract); err != nil {
+		return nil, fmt.Errorf("resolve generated result schema for %s: %w", typ, err)
+	}
+	return contract, nil
 }
 
 func ValidateJSON(contract *runtimecore.ResultSchema, data []byte) error {
