@@ -358,6 +358,10 @@ func (h *Harness) startExecution(ctx context.Context, session runtimecore.Sessio
 }
 
 func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Session, status Status, eventErr ...error) error {
+	finishCtx := ctx
+	if isCancellationError(errors.Join(eventErr...)) {
+		finishCtx = context.WithoutCancel(ctx)
+	}
 	pipeKind := events.EventPipeFailed
 	if status == StatusCompleted {
 		pipeKind = events.EventPipeCompleted
@@ -369,20 +373,31 @@ func (h *Harness) finishExecution(ctx context.Context, session runtimecore.Sessi
 	if len(eventErr) > 0 && eventErr[0] != nil {
 		payload["error"] = eventErr[0].Error()
 	}
-	emitErr := h.emit(ctx, session, pipeKind, payload)
-	emitErr = errors.Join(emitErr, h.emit(ctx, session, events.EventSessionEnd, map[string]any{
+	var emitErr error
+	if isCancellationError(errors.Join(eventErr...)) {
+		emitErr = errors.Join(emitErr, h.emit(finishCtx, session, events.EventSessionCancelled, map[string]any{
+			"status": string(status),
+			"error":  errors.Join(eventErr...).Error(),
+		}))
+	}
+	emitErr = errors.Join(emitErr, h.emit(finishCtx, session, pipeKind, payload))
+	emitErr = errors.Join(emitErr, h.emit(finishCtx, session, events.EventSessionEnd, map[string]any{
 		"status": string(status),
 	}))
 	if h.stateStore == nil || h.parentSession != nil {
 		return emitErr
 	}
-	return errors.Join(emitErr, h.stateStore.SaveExecution(ctx, state.Execution{
+	return errors.Join(emitErr, h.stateStore.SaveExecution(finishCtx, state.Execution{
 		ExecID:      session.ExecID,
 		TraceID:     session.TraceID,
 		Status:      executionStatus(status),
 		StartedAt:   session.StartedAt,
 		CompletedAt: time.Now().UTC(),
 	}))
+}
+
+func isCancellationError(err error) bool {
+	return errors.Is(err, context.Canceled)
 }
 
 func executionStatus(status Status) state.ExecutionStatus {

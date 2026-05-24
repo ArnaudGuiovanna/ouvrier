@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,8 +80,21 @@ func TestNewHTTPHandlerValidatesDirectReplySchema(t *testing.T) {
 	if len(violations) != 1 || violations[0].SchemaName != "ovr.httpDirectMismatchReply" {
 		t.Fatalf("violations = %+v, want direct reply schema violation", violations)
 	}
+	if violations[0].ExecID == "" || violations[0].SessionID == "" {
+		t.Fatalf("violation = %+v, want terminal-only execution identifiers", violations[0])
+	}
 	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventSchemaValidationFailed); !ok {
 		t.Fatalf("events = %+v, want schema validation failed event", stream.List())
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineFailed); !ok {
+		t.Fatalf("events = %+v, want terminal-only pipeline failed event", stream.List())
+	}
+	executions, err := store.Executions(context.Background())
+	if err != nil {
+		t.Fatalf("Executions returned error: %v", err)
+	}
+	if len(executions) != 1 || executions[0].Status != state.ExecutionFailed {
+		t.Fatalf("executions = %+v, want failed terminal-only execution", executions)
 	}
 }
 
@@ -160,6 +174,7 @@ func TestNewHTTPHandlerServesDirectSinkAsAccepted(t *testing.T) {
 }
 
 func TestNewHTTPHandlerLogsDirectSinkInputToEventStream(t *testing.T) {
+	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {
 		t.Fatalf("NewEventStream returned error: %v", err)
@@ -167,7 +182,7 @@ func TestNewHTTPHandlerLogsDirectSinkInputToEventStream(t *testing.T) {
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /events"),
 		Sink(Log()),
-	}, httpRuntime{eventStream: stream})
+	}, httpRuntime{stateStore: store, eventStream: stream})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -179,7 +194,30 @@ func TestNewHTTPHandlerLogsDirectSinkInputToEventStream(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
 	}
-	assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
+	event := assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
+	if event.ExecID == "" || event.SessionID == "" || event.TraceID == "" {
+		t.Fatalf("sink_logged event = %+v, want terminal-only execution identifiers", event)
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineStarted); !ok {
+		t.Fatalf("events = %+v, want terminal-only pipeline started event", stream.List())
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineCompleted); !ok {
+		t.Fatalf("events = %+v, want terminal-only pipeline completed event", stream.List())
+	}
+	executions, err := store.Executions(context.Background())
+	if err != nil {
+		t.Fatalf("Executions returned error: %v", err)
+	}
+	if len(executions) != 1 || executions[0].Status != state.ExecutionCompleted {
+		t.Fatalf("executions = %+v, want completed terminal-only execution", executions)
+	}
+	sessions, err := store.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions returned error: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].SessionID != event.SessionID {
+		t.Fatalf("sessions = %+v, want terminal-only session %q", sessions, event.SessionID)
+	}
 }
 
 func TestNewHTTPHandlerPassesLogSinkEventThroughHookBus(t *testing.T) {
@@ -213,6 +251,63 @@ func TestNewHTTPHandlerPassesLogSinkEventThroughHookBus(t *testing.T) {
 	if event.Payload["checked"] != true {
 		t.Fatalf("sink_logged payload = %+v, want hook enrichment", event.Payload)
 	}
+}
+
+func TestNewHTTPHandlerAppliesWorkerPoolToDirectSink(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	if err := hooks.Register(events.EventPipelineStarted, func(ctx context.Context, event events.Event) (events.Event, error) {
+		once.Do(func() {
+			close(started)
+			<-release
+		})
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /events", WorkerPool(1)),
+		Sink(Log()),
+	}, httpRuntime{eventStream: stream, hookBus: hooks})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"event":"first"}`)))
+		firstDone <- rec
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first direct sink request did not start")
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/events", strings.NewReader(`{"event":"second"}`)))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want %d; body=%s", second.Code, http.StatusTooManyRequests, second.Body.String())
+	}
+
+	close(release)
+	select {
+	case first := <-firstDone:
+		if first.Code != http.StatusAccepted {
+			t.Fatalf("first status = %d, want %d; body=%s", first.Code, http.StatusAccepted, first.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first direct sink request did not finish")
+	}
+	assertSinkLoggedEvent(t, stream, "input", `{"event":"first"}`)
 }
 
 func TestNewHTTPHandlerWritesPipelineOutputToFileSink(t *testing.T) {

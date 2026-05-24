@@ -464,6 +464,48 @@ func TestNewHTTPHandlerEmitsPipelineFailedOnProviderError(t *testing.T) {
 	}
 }
 
+func TestNewHTTPHandlerEmitsSessionCancelledOnProviderCancellation(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	scripted := &httpScriptedProvider{err: context.Canceled}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted, stateStore: store, eventStream: stream})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	cancelled, ok := findRuntimeHTTPEvent(stream.List(), events.EventSessionCancelled)
+	if !ok {
+		t.Fatalf("events = %+v, want session cancelled event", stream.List())
+	}
+	if cancelled.ExecID == "" || cancelled.SessionID == "" || cancelled.TraceID == "" {
+		t.Fatalf("session cancelled event = %+v, want session identifiers", cancelled)
+	}
+	if cancelled.Payload["status"] != "failed" || cancelled.Payload["error"] == "" {
+		t.Fatalf("session cancelled payload = %+v, want failed status and error", cancelled.Payload)
+	}
+	persisted, err := store.Events(context.Background(), cancelled.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findRuntimeHTTPEvent(persisted, events.EventSessionCancelled); !ok {
+		t.Fatalf("persisted events = %+v, want session cancelled event", persisted)
+	}
+}
+
 func TestNewHTTPHandlerRecordsOutputSchemaViolation(t *testing.T) {
 	store := state.NewMemoryStore()
 	scripted := &httpScriptedProvider{

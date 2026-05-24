@@ -176,14 +176,35 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
+	if !r.tryAcquireWorker() {
+		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+		return
+	}
+	defer r.releaseWorker()
+
+	result, err := r.runtime.startDirectPlanExecution(req.Context(), r.plan, input, session)
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		return
+	}
 
 	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
 		if r.plan.Terminal.Async {
+			if err := r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, nil); err != nil {
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
 			writeJSONStatus(w, http.StatusAccepted, "accepted")
 			return
 		}
-		if err := r.runtime.validateDirectTerminalReplyOutput(req.Context(), r.plan); err != nil {
+		result.Output = directReplyOKOutput
+		if err := r.runtime.validateObservedTerminalReplyOutput(req.Context(), r.plan, result); err != nil {
+			_ = r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, err)
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
+		}
+		if err := r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, nil); err != nil {
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 			return
 		}
@@ -194,23 +215,57 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		writeJSONStatus(w, http.StatusOK, "ok")
 	case runtimeplan.TerminalPush:
 		if r.plan.Terminal.PushWebhookURL != "" || r.plan.Terminal.PushQueueURI != "" {
-			if err := r.runtime.applyPushTerminal(req.Context(), r.plan.Terminal, planRunResultFromInput(input, session), input); err != nil {
+			if err := r.runtime.applyPushTerminal(req.Context(), r.plan.Terminal, result, input); err != nil {
+				_ = r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, err)
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
+		}
+		if err := r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, nil); err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
 		}
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	case runtimeplan.TerminalSink:
 		if r.plan.Terminal.SinkFilePath != "" || r.plan.Terminal.SinkLog {
-			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, planRunResultFromInput(input, session), "input"); err != nil {
+			if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, result, "input"); err != nil {
+				_ = r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, err)
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
 		}
+		if err := r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, nil); err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
+		}
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	default:
+		_ = r.runtime.finishDirectPlanExecution(req.Context(), r.plan, result, errors.New("terminal missing"))
 		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
 	}
+}
+
+func (rt httpRuntime) startDirectPlanExecution(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session) (planRunResult, error) {
+	pipelineSession, err := pipelineSessionForPlan(plan, session)
+	if err != nil {
+		return planRunResult{Output: input}, err
+	}
+	result := planRunResult{Output: input, Session: pipelineSession, HasSession: true}
+	if err := rt.startPipelineExecution(ctx, pipelineSession, plan); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (rt httpRuntime) finishDirectPlanExecution(ctx context.Context, plan runtimeplan.Plan, result planRunResult, terminalErr error) error {
+	if !result.HasSession {
+		return nil
+	}
+	status := "completed"
+	if terminalErr != nil {
+		status = "failed"
+	}
+	return rt.finishPipelineExecution(ctx, result.Session, plan, status, terminalErr)
 }
 
 func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
@@ -438,10 +493,6 @@ func (rt httpRuntime) reserveTriggerIdempotency(w http.ResponseWriter, req *http
 		writeJSONStatus(w, http.StatusInternalServerError, "idempotency_error")
 		return nil, false, false
 	}
-	if err := rt.stateStore.SaveSession(req.Context(), session); err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
-		return nil, false, false
-	}
 
 	key := triggerIdempotencyReservationKey(plan, headerName, value)
 	existingExecID, reserved, err := rt.stateStore.ReserveIdempotency(req.Context(), key, session.ExecID)
@@ -465,7 +516,7 @@ func (rt httpRuntime) reserveTriggerIdempotency(w http.ResponseWriter, req *http
 	}
 	payload["decision"] = "duplicate"
 	payload["existing_exec_id"] = existingExecID
-	if err := rt.emitSessionEvent(req.Context(), session, events.EventIdempotencyDecision, payload); err != nil {
+	if err := rt.emitRuntimeEvent(req.Context(), planRunResult{}, events.EventIdempotencyDecision, payload); err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
 		return nil, false, false
 	}

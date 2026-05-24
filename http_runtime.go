@@ -127,11 +127,11 @@ func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtime
 	}
 
 	result, err := rt.runStepsResult(ctx, plan.Steps, input, planRunScope{parentSession: &pipelineSession})
+	if !result.HasSession {
+		result.Session = pipelineSession
+		result.HasSession = true
+	}
 	if err != nil {
-		if !result.HasSession {
-			result.Session = pipelineSession
-			result.HasSession = true
-		}
 		emitErr := rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err)
 		return result, errors.Join(err, emitErr)
 	}
@@ -187,23 +187,38 @@ func (rt httpRuntime) startPipelineExecution(ctx context.Context, session runtim
 }
 
 func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runtimeplan.Session, plan runtimeplan.Plan, status string, eventErr error) error {
+	finishCtx := ctx
+	if runtimeCancellationError(eventErr) {
+		finishCtx = context.WithoutCancel(ctx)
+	}
 	kind := events.EventPipelineCompleted
 	stateStatus := state.ExecutionCompleted
 	if status != "completed" {
 		kind = events.EventPipelineFailed
 		stateStatus = state.ExecutionFailed
 	}
-	emitErr := rt.emitPipelineEvent(ctx, planRunResult{Session: session, HasSession: true}, plan, kind, status, eventErr)
+	var emitErr error
+	if runtimeCancellationError(eventErr) {
+		emitErr = errors.Join(emitErr, rt.emitSessionEvent(finishCtx, session, events.EventSessionCancelled, map[string]any{
+			"status": status,
+			"error":  eventErr.Error(),
+		}))
+	}
+	emitErr = errors.Join(emitErr, rt.emitPipelineEvent(finishCtx, planRunResult{Session: session, HasSession: true}, plan, kind, status, eventErr))
 	if rt.stateStore == nil {
 		return emitErr
 	}
-	return errors.Join(emitErr, rt.stateStore.SaveExecution(ctx, state.Execution{
+	return errors.Join(emitErr, rt.stateStore.SaveExecution(finishCtx, state.Execution{
 		ExecID:      session.ExecID,
 		TraceID:     session.TraceID,
 		Status:      stateStatus,
 		StartedAt:   session.StartedAt,
 		CompletedAt: time.Now().UTC(),
 	}))
+}
+
+func runtimeCancellationError(err error) bool {
+	return errors.Is(err, context.Canceled)
 }
 
 type planRunScope struct {

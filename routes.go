@@ -692,30 +692,62 @@ func singleHTTPPathParamName(segment string) (string, bool) {
 
 func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.Request, route httpRoute, input string) {
 	if len(route.plan.Steps) == 0 {
+		if !route.tryAcquireWorker() {
+			writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
+			return
+		}
+		defer route.releaseWorker()
+
+		result, err := rt.startDirectPlanExecution(req.Context(), route.plan, input, nil)
+		if err != nil {
+			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			return
+		}
 		switch route.plan.Terminal.Kind {
 		case runtimeplan.TerminalReply:
 			if route.plan.Terminal.Async {
+				if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
+					writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+					return
+				}
 				writeJSONStatus(w, http.StatusAccepted, "accepted")
 				return
 			}
-			if err := rt.validateDirectTerminalReplyOutput(req.Context(), route.plan); err != nil {
+			result.Output = directReplyOKOutput
+			if err := rt.validateObservedTerminalReplyOutput(req.Context(), route.plan, result); err != nil {
+				_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, err)
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
+			if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
 			writeJSONStatus(w, http.StatusOK, "ok")
 		case runtimeplan.TerminalPush:
-			if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, planRunResult{Output: input}, input); err != nil {
+			if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, result, input); err != nil {
+				_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, err)
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
+			if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
 			writeJSONStatus(w, http.StatusAccepted, "accepted")
 		case runtimeplan.TerminalSink:
-			if err := rt.applySinkTerminal(req.Context(), route.plan.Terminal, planRunResult{Output: input}, "input"); err != nil {
+			if err := rt.applySinkTerminal(req.Context(), route.plan.Terminal, result, "input"); err != nil {
+				_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, err)
+				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				return
+			}
+			if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
 				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 				return
 			}
 			writeJSONStatus(w, http.StatusAccepted, "accepted")
 		default:
+			_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, errors.New("terminal missing"))
 			writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
 		}
 		return

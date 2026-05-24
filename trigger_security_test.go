@@ -181,6 +181,20 @@ func TestNewHTTPHandlerDoesNotDuplicateIdempotentTriggerSideEffects(t *testing.T
 	if idempotencyEvents != 2 || duplicateDecisions != 1 {
 		t.Fatalf("idempotency events=%d duplicate=%d, want reserved and duplicate decisions", idempotencyEvents, duplicateDecisions)
 	}
+	sessions, err := store.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("Sessions returned error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %+v, want only the reserved delivery session", sessions)
+	}
+	executions, err := store.Executions(context.Background())
+	if err != nil {
+		t.Fatalf("Executions returned error: %v", err)
+	}
+	if len(executions) != 1 || executions[0].ExecID != sessions[0].ExecID {
+		t.Fatalf("executions = %+v sessions = %+v, want one execution for the reserved session", executions, sessions)
+	}
 }
 
 func TestNewHTTPHandlerReturnsFailureWhenTriggerIdempotencyStoreFails(t *testing.T) {

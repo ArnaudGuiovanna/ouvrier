@@ -158,15 +158,20 @@ func tightenStructProperties(generated *jsonschema.Schema, typ reflect.Type) {
 }
 
 func jsonFieldName(field reflect.StructField) (string, bool) {
-	tag := field.Tag.Get("json")
-	name, _, _ := strings.Cut(tag, ",")
-	if name == "-" {
+	if !field.IsExported() {
 		return "", false
 	}
-	if name != "" {
-		return name, true
+	name := field.Name
+	if tag, ok := field.Tag.Lookup("json"); ok {
+		tagName, _, hasOptions := strings.Cut(tag, ",")
+		if tagName == "-" && !hasOptions {
+			return "", false
+		}
+		if tagName != "" {
+			name = tagName
+		}
 	}
-	return field.Name, true
+	return name, true
 }
 
 func setSingleSchemaType(generated *jsonschema.Schema, typ string) {

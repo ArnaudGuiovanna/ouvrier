@@ -37,6 +37,25 @@ type resultSchemaPayload struct {
 	Status string `json:"status"`
 }
 
+type resultSchemaTaggedOutput struct {
+	PublicID  string                `json:"public_id"`
+	Count     int                   `json:",omitempty"`
+	Secret    string                `json:"-"`
+	DashItems []resultSchemaPayload `json:"-,"`
+}
+
+type resultSchemaNullability struct {
+	Name        string               `json:"name"`
+	Count       int                  `json:"count,omitempty"`
+	Active      bool                 `json:"active"`
+	Tags        []string             `json:"tags"`
+	Detail      resultSchemaPayload  `json:"detail"`
+	MaybeName   *string              `json:"maybe_name,omitempty"`
+	MaybeCount  *int                 `json:"maybe_count,omitempty"`
+	MaybeTags   *[]string            `json:"maybe_tags,omitempty"`
+	MaybeDetail *resultSchemaPayload `json:"maybe_detail,omitempty"`
+}
+
 func TestFromTypeGeneratesStrictJSONSchema(t *testing.T) {
 	contract, err := schema.FromType(reflect.TypeFor[resultSchemaReply]())
 	if err != nil {
@@ -82,6 +101,95 @@ func TestValidateJSONEnforcesGeneratedSchema(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "additional properties") {
 		t.Fatalf("ValidateJSON error = %v, want additional properties context", err)
+	}
+}
+
+func TestValidateJSONRespectsJSONTagsStrictly(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaTaggedOutput]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	if generated.Properties["public_id"] == nil {
+		t.Fatalf("schema properties = %+v, want json tag name public_id", generated.Properties)
+	}
+	if generated.Properties["PublicID"] != nil || generated.Properties["Secret"] != nil {
+		t.Fatalf("schema properties = %+v, want Go names and ignored fields omitted", generated.Properties)
+	}
+	dashItems := generated.Properties["-"]
+	if dashItems == nil || dashItems.Type != "array" || slices.Contains(dashItems.Types, "null") {
+		t.Fatalf("dash property schema = %+v, want non-null array for json:\"-,\" field", dashItems)
+	}
+
+	valid := []byte(`{"public_id":"pub_1","-":[{"status":"ok"}]}`)
+	if err := schema.ValidateJSON(contract, valid); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid tagged output: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"PublicID":"pub_1","-":[{"status":"ok"}]}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for Go field name instead of json tag")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"public_id":"pub_1","Secret":"leak","-":[{"status":"ok"}]}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for ignored json field")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"public_id":"pub_1","-":null}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for null non-pointer slice with json dash tag")
+	}
+}
+
+func TestValidateJSONAllowsNullOnlyForPointerFields(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaNullability]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	valid := []byte(`{
+		"name":"ok",
+		"active":true,
+		"tags":["a"],
+		"detail":{"status":"ok"},
+		"maybe_name":null,
+		"maybe_count":null,
+		"maybe_tags":null,
+		"maybe_detail":null
+	}`)
+	if err := schema.ValidateJSON(contract, valid); err != nil {
+		t.Fatalf("ValidateJSON returned error for null pointer fields: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{
+			name: "string",
+			data: `{"name":null,"active":true,"tags":[],"detail":{"status":"ok"}}`,
+		},
+		{
+			name: "omitempty integer",
+			data: `{"name":"ok","count":null,"active":true,"tags":[],"detail":{"status":"ok"}}`,
+		},
+		{
+			name: "boolean",
+			data: `{"name":"ok","active":null,"tags":[],"detail":{"status":"ok"}}`,
+		},
+		{
+			name: "slice",
+			data: `{"name":"ok","active":true,"tags":null,"detail":{"status":"ok"}}`,
+		},
+		{
+			name: "struct",
+			data: `{"name":"ok","active":true,"tags":[],"detail":null}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := schema.ValidateJSON(contract, []byte(tc.data)); err == nil {
+				t.Fatal("ValidateJSON returned nil for null non-pointer field")
+			}
+		})
 	}
 }
 

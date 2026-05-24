@@ -1290,6 +1290,74 @@ func TestRunAppendsCoreEventsAndRunsHooks(t *testing.T) {
 	}
 }
 
+func TestRunPersistsHookModifiedEventToStreamAndStateStore(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	observed := false
+	if err := hooks.Register(events.EventBeforeLLM, func(ctx context.Context, event events.Event) (events.Event, error) {
+		observed = true
+		if event.ExecID == "" || event.SessionID == "" || event.TraceID == "" {
+			t.Fatalf("hook event = %+v, want session identifiers before persistence", event)
+		}
+		event.Payload["hooked"] = "before-persistence"
+		return event, nil
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Status != harness.StatusCompleted {
+		t.Fatalf("Status = %q, want completed", out.Status)
+	}
+	if !observed {
+		t.Fatal("before-LLM hook was not called")
+	}
+
+	streamEvent, ok := findEvent(stream.List(), events.EventBeforeLLM)
+	if !ok {
+		t.Fatalf("stream events = %+v, want before-LLM event", stream.List())
+	}
+	persisted, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	storeEvent, ok := findEvent(persisted, events.EventBeforeLLM)
+	if !ok {
+		t.Fatalf("persisted events = %+v, want before-LLM event", persisted)
+	}
+	if streamEvent.Payload["hooked"] != "before-persistence" {
+		t.Fatalf("stream event payload = %+v, want hook enrichment", streamEvent.Payload)
+	}
+	if storeEvent.Payload["hooked"] != "before-persistence" {
+		t.Fatalf("persisted event payload = %+v, want hook enrichment", storeEvent.Payload)
+	}
+	if streamEvent.ID == 0 || storeEvent.ID != streamEvent.ID {
+		t.Fatalf("stream event ID = %d, persisted event ID = %d, want state store to receive appended event", streamEvent.ID, storeEvent.ID)
+	}
+}
+
 func TestRunEmitsProviderResponseMetadataAfterLLM(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -1437,6 +1505,62 @@ func TestRunBlocksProviderCallWhenBeforeLLMHookFails(t *testing.T) {
 	}
 }
 
+func TestRunReturnsHookErrorBeforePersistingBlockedEvent(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	hooks := events.NewHookBus()
+	blocked := errors.New("audit hook denied")
+	if err := hooks.Register(events.EventAfterLLM, func(ctx context.Context, event events.Event) (events.Event, error) {
+		return event, blocked
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+		harness.WithEventStream(stream),
+		harness.WithHookBus(hooks),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, blocked) {
+		t.Fatalf("Run error = %v, want blocking hook error", err)
+	}
+	if out.Status != harness.StatusFailed {
+		t.Fatalf("Status = %q, want failed", out.Status)
+	}
+	if len(p.requests) != 1 {
+		t.Fatalf("provider calls = %d, want one call before after-LLM hook blocks", len(p.requests))
+	}
+	if _, ok := findEvent(stream.List(), events.EventAfterLLM); ok {
+		t.Fatalf("stream events = %+v, blocked after-LLM event must not be appended", stream.List())
+	}
+	persisted, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findEvent(persisted, events.EventAfterLLM); ok {
+		t.Fatalf("persisted events = %+v, blocked after-LLM event must not be stored", persisted)
+	}
+	failed, ok := findEvent(stream.List(), events.EventPipeFailed)
+	errorText, _ := failed.Payload["error"].(string)
+	if !ok || !strings.Contains(errorText, "audit hook denied") {
+		t.Fatalf("stream events = %+v, want pipe failed event with hook error", stream.List())
+	}
+}
+
 func TestRunEmitsPipeFailedOnProviderError(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -1473,6 +1597,45 @@ func TestRunEmitsPipeFailedOnProviderError(t *testing.T) {
 	}
 	if event.Payload["status"] != string(harness.StatusFailed) || event.Payload["observed"] != true {
 		t.Fatalf("event payload = %+v, want failed status and hook enrichment", event.Payload)
+	}
+}
+
+func TestRunEmitsSessionCancelledOnProviderCancellation(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	p := &scriptedProvider{err: context.Canceled}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithStateStore(store),
+		harness.WithEventStream(stream),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+	event, ok := findEvent(stream.List(), events.EventSessionCancelled)
+	if !ok {
+		t.Fatalf("events = %+v, want session cancelled event", stream.List())
+	}
+	if event.ExecID != out.Session.ExecID || event.SessionID != out.Session.SessionID || event.TraceID != out.Session.TraceID {
+		t.Fatalf("event = %+v, want session identifiers", event)
+	}
+	if event.Payload["status"] != string(harness.StatusFailed) || event.Payload["error"] == "" {
+		t.Fatalf("event payload = %+v, want failed status and error", event.Payload)
+	}
+	persisted, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findEvent(persisted, events.EventSessionCancelled); !ok {
+		t.Fatalf("persisted events = %+v, want session cancelled event", persisted)
 	}
 }
 

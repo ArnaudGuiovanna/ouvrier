@@ -13,6 +13,7 @@ import (
 
 	"ouvrier/internal/events"
 	"ouvrier/internal/provider"
+	"ouvrier/internal/state"
 )
 
 func TestHTTPAdminTriggerRequiresBearerTokenWhenConfigured(t *testing.T) {
@@ -223,6 +224,7 @@ func TestHTTPAdminTriggerWritesDirectInputToFileSink(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerLogsDirectSinkInputToEventStream(t *testing.T) {
+	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {
 		t.Fatalf("NewEventStream returned error: %v", err)
@@ -230,7 +232,7 @@ func TestHTTPAdminTriggerLogsDirectSinkInputToEventStream(t *testing.T) {
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /events"),
 		Sink(Log()),
-	}, httpRuntime{adminToken: "secret-admin-token", eventStream: stream})
+	}, httpRuntime{adminToken: "secret-admin-token", stateStore: store, eventStream: stream})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
 	}
@@ -241,7 +243,23 @@ func TestHTTPAdminTriggerLogsDirectSinkInputToEventStream(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
+	event := assertSinkLoggedEvent(t, stream, "input", `{"event":"created"}`)
+	if event.ExecID == "" || event.SessionID == "" || event.TraceID == "" {
+		t.Fatalf("sink_logged event = %+v, want admin terminal-only execution identifiers", event)
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineStarted); !ok {
+		t.Fatalf("events = %+v, want admin terminal-only pipeline started event", stream.List())
+	}
+	if _, ok := findRuntimeHTTPEvent(stream.List(), events.EventPipelineCompleted); !ok {
+		t.Fatalf("events = %+v, want admin terminal-only pipeline completed event", stream.List())
+	}
+	executions, err := store.Executions(context.Background())
+	if err != nil {
+		t.Fatalf("Executions returned error: %v", err)
+	}
+	if len(executions) != 1 || executions[0].Status != state.ExecutionCompleted {
+		t.Fatalf("executions = %+v, want completed admin terminal-only execution", executions)
+	}
 }
 
 func TestHTTPAdminTriggerRunsParameterizedHTTPRouteThroughHarness(t *testing.T) {
