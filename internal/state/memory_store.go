@@ -199,6 +199,7 @@ func (s *MemoryStore) AddSchemaViolation(ctx context.Context, violation SchemaVi
 	if err := checkContext(ctx); err != nil {
 		return SchemaViolation{}, err
 	}
+	violation.Error = events.RedactText(violation.Error)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

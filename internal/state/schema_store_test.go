@@ -28,6 +28,15 @@ func TestSQLiteStoreSchemaViolationPersistenceAssertionsAcrossReopen(t *testing.
 	assertSchemaViolationList(t, reopened, "exec_1", wantExec)
 }
 
+func TestMemoryStoreRedactsSchemaViolationErrorsBeforePersistence(t *testing.T) {
+	assertSchemaViolationErrorRedaction(t, NewMemoryStore())
+}
+
+func TestSQLiteStoreRedactsSchemaViolationErrorsBeforePersistence(t *testing.T) {
+	store := newTestSQLiteStore(t, filepath.Join(t.TempDir(), "state.db"))
+	assertSchemaViolationErrorRedaction(t, store)
+}
+
 func addSchemaViolationFixtures(t *testing.T, store Store) ([]SchemaViolation, []SchemaViolation) {
 	t.Helper()
 
@@ -88,6 +97,36 @@ func addSchemaViolationFixtures(t *testing.T, store Store) ([]SchemaViolation, [
 	}
 
 	return added, []SchemaViolation{added[0], added[2], added[3]}
+}
+
+func assertSchemaViolationErrorRedaction(t *testing.T, store Store) {
+	t.Helper()
+
+	ctx := context.Background()
+	added, err := store.AddSchemaViolation(ctx, SchemaViolation{
+		ExecID:     "exec_secret",
+		SessionID:  "sess_secret",
+		SchemaName: "SecretReply",
+		Error:      "schema failed token=raw-token api_key=raw-key Authorization: Bearer raw-bearer",
+	})
+	if err != nil {
+		t.Fatalf("AddSchemaViolation returned error: %v", err)
+	}
+	wantError := "schema failed token=[REDACTED] api_key=[REDACTED] Authorization: [REDACTED]"
+	if added.Error != wantError {
+		t.Fatalf("added violation error = %q, want %q", added.Error, wantError)
+	}
+
+	violations, err := store.SchemaViolations(ctx, "exec_secret")
+	if err != nil {
+		t.Fatalf("SchemaViolations returned error: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("violations = %d, want 1: %+v", len(violations), violations)
+	}
+	if violations[0].Error != wantError {
+		t.Fatalf("persisted violation error = %q, want %q", violations[0].Error, wantError)
+	}
 }
 
 func assertSchemaViolationList(t *testing.T, store Store, execID string, want []SchemaViolation) {

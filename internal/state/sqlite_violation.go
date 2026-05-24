@@ -3,6 +3,8 @@ package state
 import (
 	"context"
 	"time"
+
+	"ouvrier/internal/events"
 )
 
 func (s *SQLiteStore) AddSchemaViolation(ctx context.Context, violation SchemaViolation) (SchemaViolation, error) {
@@ -13,6 +15,7 @@ func (s *SQLiteStore) AddSchemaViolation(ctx context.Context, violation SchemaVi
 	if violation.At.IsZero() {
 		violation.At = time.Now().UTC()
 	}
+	violation.Error = events.RedactText(violation.Error)
 
 	result, err := s.db.ExecContext(ctx, `INSERT INTO ouvrier_schema_violations (
 		at, exec_id, session_id, schema_name, error
