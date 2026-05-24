@@ -314,6 +314,34 @@ func TestNewHTTPHandlerEmitsPipelineEventsThroughHookBus(t *testing.T) {
 	if _, ok := completed.Payload["output"]; ok {
 		t.Fatalf("pipeline completed payload = %+v, must not include raw output", completed.Payload)
 	}
+	recorded := stream.List()
+	wantOrder := []events.EventKind{
+		events.EventSessionStarted,
+		events.EventPipelineStarted,
+		events.EventPipelineCompleted,
+		events.EventSessionSaved,
+	}
+	assertRuntimeHTTPEventOrder(t, recorded, wantOrder)
+	sessionStarted, ok := findRuntimeHTTPEvent(recorded, events.EventSessionStarted)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline session started event", recorded)
+	}
+	if sessionStarted.ExecID != started.ExecID || sessionStarted.SessionID != started.SessionID || sessionStarted.TraceID != started.TraceID {
+		t.Fatalf("session started = %+v, pipeline started = %+v, want same identifiers", sessionStarted, started)
+	}
+	if sessionStarted.Payload["model"] != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("session started payload = %+v, want pipeline model", sessionStarted.Payload)
+	}
+	sessionSaved, ok := findRuntimeHTTPEventForSession(recorded, events.EventSessionSaved, completed.SessionID)
+	if !ok {
+		t.Fatalf("events = %+v, want pipeline session saved event", recorded)
+	}
+	if sessionSaved.ExecID != completed.ExecID || sessionSaved.SessionID != completed.SessionID || sessionSaved.TraceID != completed.TraceID {
+		t.Fatalf("session saved = %+v, pipeline completed = %+v, want same identifiers", sessionSaved, completed)
+	}
+	if sessionSaved.Payload["status"] != "completed" {
+		t.Fatalf("session saved payload = %+v, want completed status", sessionSaved.Payload)
+	}
 }
 
 func TestNewHTTPHandlerUsesStablePipelineTraceAcrossMultiplePipes(t *testing.T) {
@@ -984,6 +1012,32 @@ func findRuntimeHTTPEvent(recorded []events.Event, kind events.EventKind) (event
 		}
 	}
 	return events.Event{}, false
+}
+
+func findRuntimeHTTPEventForSession(recorded []events.Event, kind events.EventKind, sessionID string) (events.Event, bool) {
+	for _, event := range recorded {
+		if event.Kind == kind && event.SessionID == sessionID {
+			return event, true
+		}
+	}
+	return events.Event{}, false
+}
+
+func assertRuntimeHTTPEventOrder(t *testing.T, recorded []events.Event, want []events.EventKind) {
+	t.Helper()
+	next := 0
+	for _, event := range recorded {
+		if next < len(want) && event.Kind == want[next] {
+			next++
+		}
+	}
+	if next != len(want) {
+		kinds := make([]events.EventKind, 0, len(recorded))
+		for _, event := range recorded {
+			kinds = append(kinds, event.Kind)
+		}
+		t.Fatalf("event order = %+v, want subsequence %+v", kinds, want)
+	}
 }
 
 func assertAdminTraceHasSchemaEvent(t *testing.T, recorded []struct {

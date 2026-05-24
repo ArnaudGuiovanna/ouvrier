@@ -180,6 +180,11 @@ func (rt httpRuntime) startPipelineExecution(ctx context.Context, session runtim
 			return err
 		}
 	}
+	if err := rt.emitSessionEvent(ctx, session, events.EventSessionStarted, map[string]any{
+		"model": session.Model,
+	}); err != nil {
+		return errors.Join(err, rt.finishPipelineExecution(ctx, session, plan, "failed", err))
+	}
 	if err := rt.emitPipelineEvent(ctx, planRunResult{Session: session, HasSession: true}, plan, events.EventPipelineStarted, "started", nil); err != nil {
 		return errors.Join(err, rt.finishPipelineExecution(ctx, session, plan, "failed", err))
 	}
@@ -205,6 +210,9 @@ func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runti
 		}))
 	}
 	emitErr = errors.Join(emitErr, rt.emitPipelineEvent(finishCtx, planRunResult{Session: session, HasSession: true}, plan, kind, status, eventErr))
+	emitErr = errors.Join(emitErr, rt.emitSessionEvent(finishCtx, session, events.EventSessionSaved, map[string]any{
+		"status": status,
+	}))
 	if rt.stateStore == nil {
 		return emitErr
 	}
