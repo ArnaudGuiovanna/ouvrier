@@ -110,27 +110,45 @@ func splitTarget(target string) (string, string, error) {
 }
 
 func runBuild(ctx context.Context, cfg BuildConfig, out, errOut io.Writer, runner goRunner) error {
+	_, err := runBuildResolved(ctx, cfg, out, errOut, runner)
+	return err
+}
+
+// buildResult describes the artifacts produced by a successful go build run
+// so callers (notably `ouvrier deploy`) can reuse the resolved project name
+// and binary path without re-parsing pip.yaml.
+type buildResult struct {
+	Dir         string // absolute project directory
+	ProjectName string // value of `name:` in pip.yaml
+	Output      string // absolute path to the produced binary
+}
+
+// runBuildResolved performs the same work as runBuild but also returns the
+// resolved project metadata to callers. Keeping a single implementation in one
+// place avoids drift between `ouvrier build` and the static build path used by
+// `ouvrier deploy`.
+func runBuildResolved(ctx context.Context, cfg BuildConfig, out, errOut io.Writer, runner goRunner) (buildResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	dir, err := filepath.Abs(cfg.Dir)
 	if err != nil {
-		return fmt.Errorf("%w: resolve project directory: %w", ErrBuild, err)
+		return buildResult{}, fmt.Errorf("%w: resolve project directory: %w", ErrBuild, err)
 	}
 
 	pipPath := filepath.Join(dir, "pip.yaml")
 	pipData, err := os.ReadFile(pipPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: %s not found; run this command from an Ouvrier project (created by `ouvrier new`)", ErrBuild, pipPath)
+			return buildResult{}, fmt.Errorf("%w: %s not found; run this command from an Ouvrier project (created by `ouvrier new`)", ErrBuild, pipPath)
 		}
-		return fmt.Errorf("%w: read pip.yaml: %w", ErrBuild, err)
+		return buildResult{}, fmt.Errorf("%w: read pip.yaml: %w", ErrBuild, err)
 	}
 
 	projectName, err := parsePipName(pipData)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrBuild, err)
+		return buildResult{}, fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
 	if _, statErr := os.Stat(filepath.Join(dir, ".env")); statErr == nil {
@@ -144,7 +162,7 @@ func runBuild(ctx context.Context, cfg BuildConfig, out, errOut io.Writer, runne
 		output = filepath.Join(dir, output)
 	}
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		return fmt.Errorf("%w: create output directory: %w", ErrBuild, err)
+		return buildResult{}, fmt.Errorf("%w: create output directory: %w", ErrBuild, err)
 	}
 
 	env := buildEnv(cfg)
@@ -161,11 +179,23 @@ func runBuild(ctx context.Context, cfg BuildConfig, out, errOut io.Writer, runne
 	fmt.Fprintf(out, "building %s -> %s\n", projectName, output)
 
 	if err := runner(ctx, dir, env, args, out, errOut); err != nil {
-		return fmt.Errorf("%w: go build failed: %w", ErrBuild, err)
+		return buildResult{}, fmt.Errorf("%w: go build failed: %w", ErrBuild, err)
 	}
 
 	fmt.Fprintf(out, "built %s\n", output)
-	return nil
+	return buildResult{Dir: dir, ProjectName: projectName, Output: output}, nil
+}
+
+// staticBuildForDeploy compiles a CGO-disabled, linux/amd64 binary for the
+// project under dir. The returned buildResult carries the absolute output
+// path so the caller (deploy) can scp the artifact without re-resolving paths.
+func staticBuildForDeploy(ctx context.Context, dir string, out, errOut io.Writer, runner goRunner) (buildResult, error) {
+	cfg := BuildConfig{
+		Dir:    dir,
+		Static: true,
+		Target: "linux/amd64",
+	}
+	return runBuildResolved(ctx, cfg, out, errOut, runner)
 }
 
 func buildEnv(cfg BuildConfig) []string {

@@ -398,13 +398,58 @@ Current commands:
 ouvrier version
 ouvrier new --yes --name NAME --trigger "POST /path" --model "provider/model"
 ouvrier new
+ouvrier show [--dir .]
+ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
+ouvrier logs   [--url URL] [--token TOKEN] [--last N]
+ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
+ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
 ```
 
 `ouvrier new --yes` currently supports HTTP trigger strings only, such as
 `"POST /tickets"`. The no-flag `ouvrier new` command opens a Bubble Tea v2
-preview, but it does not generate a project yet. The full v0.1 CLI backlog
-includes interactive `new`, `add agent`, `add tool`, `add skill`, `show`, `dev`,
-`build`, `deploy`, `status`, `logs`, and `trace`.
+preview, but it does not generate a project yet.
+
+The introspection commands (`show`, `status`, `logs`, `trace`) read from the
+project filesystem (`pip.yaml`) or talk to a running worker through
+`/admin/*` using `PIP_ADMIN_TOKEN` for bearer auth. `ouvrier build`
+compiles the worker; `--static` implies `CGO_ENABLED=0` with
+`-ldflags="-s -w"` and supports `--target os/arch` for cross-compilation
+(`modernc.org/sqlite` is pure Go, so static cross-builds work without a C
+toolchain).
+
+The full v0.1 CLI backlog also includes interactive `new`, `add agent`,
+`add tool`, `add skill`, `dev`, and `deploy`.
+
+## Reference Examples
+
+Two reference workers live under `examples/`:
+
+- `examples/ticket-triage` — the canonical README example with a typed
+  `Triage{Priority, Summary, Tags}` reply, an in-memory `load_ticket` Go
+  tool, and a `ticket-triage` skill.
+- `examples/moodle-fsrs` — a `POST /reviews` worker with a stub
+  `compute_fsrs` tool and a typed `Decision{NextDue, Stability, Difficulty,
+  Lapses}` reply.
+
+Each example has its own `go.mod` with a local `replace` directive back to
+this checkout, and is exercised by the repo-level `TestExamplesBuild` golden
+build test to keep them from drifting away from the public API.
+
+## OpenTelemetry / Tracing
+
+Ouvrier emits one span per pipeline, pipe, session, LLM call, tool call,
+schema validation, and subagent task through an OTel-compatible `Tracer`
+hook:
+
+```go
+runner := ovr.NewRunner(ovr.WithTracer(myTracer))
+```
+
+`myTracer` implements `ovr.Tracer` (a `StartSpan(ctx, name, attrs)` factory
+that returns a `ovr.Span` with `End`, `SetAttribute`, and `RecordError`). Use
+`ovr.NopTracer()` to disable tracing or in tests. The harness pairs
+`*_started` events with their `*_completed` / `*_failed` counterparts
+internally, so callers see one span per logical operation.
 
 ## Development
 

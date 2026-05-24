@@ -86,6 +86,10 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runVersion(args[1:])
 	case "new":
 		return app.runNewCommand(ctx, args[1:])
+	case "add":
+		return app.runAddCommand(ctx, args[1:])
+	case "dev":
+		return app.runDevCommand(ctx, args[1:])
 	case "build":
 		return app.runBuildCommand(ctx, args[1:])
 	case "show":
@@ -96,6 +100,8 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runLogsCommand(ctx, args[1:])
 	case "trace":
 		return app.runTraceCommand(ctx, args[1:])
+	case "deploy":
+		return app.runDeployCommand(ctx, args[1:])
 	default:
 		return fmt.Errorf("%w %q", ErrUnknownCommand, args[0])
 	}
