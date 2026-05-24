@@ -301,6 +301,10 @@ func (rt httpRuntime) serveAdminTrace(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		response.SchemaViolations = len(violations)
+		response.SchemaViolationDetails = make([]adminSchemaViolationResponse, 0, len(violations))
+		for _, violation := range violations {
+			response.SchemaViolationDetails = append(response.SchemaViolationDetails, adminSchemaViolationResponseFromState(violation))
+		}
 		if response.SchemaViolations > 0 {
 			knownTrace = true
 		}
@@ -966,31 +970,58 @@ type adminTracesResponse struct {
 }
 
 type adminTraceSummary struct {
-	TraceKey     string    `json:"trace_key"`
-	ExecID       string    `json:"exec_id,omitempty"`
-	TraceID      string    `json:"trace_id,omitempty"`
-	SessionID    string    `json:"session_id,omitempty"`
-	Events       int       `json:"events"`
-	LLMCalls     int       `json:"llm_calls"`
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	CostUSD      float64   `json:"cost_usd"`
-	LatencyMS    float64   `json:"average_latency_ms"`
-	FirstEventID uint64    `json:"first_event_id"`
-	LastEventID  uint64    `json:"last_event_id"`
-	LastKind     string    `json:"last_kind,omitempty"`
-	LastAt       time.Time `json:"last_at,omitempty"`
-	llmUsage     adminLLMUsageSummary
+	TraceKey             string    `json:"trace_key"`
+	ExecID               string    `json:"exec_id,omitempty"`
+	TraceID              string    `json:"trace_id,omitempty"`
+	SessionID            string    `json:"session_id,omitempty"`
+	Events               int       `json:"events"`
+	LLMCalls             int       `json:"llm_calls"`
+	ToolCalls            int       `json:"tool_calls"`
+	ToolFailures         int       `json:"tool_failures"`
+	InputTokens          int       `json:"input_tokens"`
+	OutputTokens         int       `json:"output_tokens"`
+	CostUSD              float64   `json:"cost_usd"`
+	LatencyMS            float64   `json:"average_latency_ms"`
+	SchemaViolations     int       `json:"schema_violations"`
+	SchemaRepairs        int       `json:"schema_repairs"`
+	SchemaRepairFailures int       `json:"schema_repair_failures"`
+	BudgetExceeded       int       `json:"budget_exceeded"`
+	FirstEventID         uint64    `json:"first_event_id"`
+	LastEventID          uint64    `json:"last_event_id"`
+	LastKind             string    `json:"last_kind,omitempty"`
+	LastAt               time.Time `json:"last_at,omitempty"`
+	llmUsage             adminLLMUsageSummary
+}
+
+func (s *adminTraceSummary) AddEvent(event events.Event) {
+	if s == nil {
+		return
+	}
+	switch events.CanonicalKind(event.Kind) {
+	case events.EventToolCallStarted:
+		s.ToolCalls++
+	case events.EventToolCallFailed:
+		s.ToolFailures++
+	case events.EventSchemaValidationFailed:
+		s.SchemaViolations++
+	case events.EventSchemaRepairCompleted:
+		s.SchemaRepairs++
+	case events.EventSchemaRepairFailed:
+		s.SchemaRepairFailures++
+	case events.EventBudgetExceeded:
+		s.BudgetExceeded++
+	}
 }
 
 type adminTraceResponse struct {
-	Status           string                  `json:"status"`
-	Execution        *adminExecutionResponse `json:"execution,omitempty"`
-	Events           []adminEventResponse    `json:"events"`
-	Sessions         int                     `json:"sessions"`
-	SessionDetails   []adminSessionResponse  `json:"session_details,omitempty"`
-	SchemaViolations int                     `json:"schema_violations"`
-	LastEventID      uint64                  `json:"last_event_id"`
+	Status                 string                         `json:"status"`
+	Execution              *adminExecutionResponse        `json:"execution,omitempty"`
+	Events                 []adminEventResponse           `json:"events"`
+	Sessions               int                            `json:"sessions"`
+	SessionDetails         []adminSessionResponse         `json:"session_details,omitempty"`
+	SchemaViolations       int                            `json:"schema_violations"`
+	SchemaViolationDetails []adminSchemaViolationResponse `json:"schema_violation_details,omitempty"`
+	LastEventID            uint64                         `json:"last_event_id"`
 }
 
 type adminTriggerRequest struct {
@@ -1100,6 +1131,15 @@ type adminSessionResponse struct {
 	MaxWallClockMS  int64     `json:"max_wallclock_ms,omitempty"`
 }
 
+type adminSchemaViolationResponse struct {
+	ID         uint64    `json:"id"`
+	At         time.Time `json:"at"`
+	ExecID     string    `json:"exec_id,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	SchemaName string    `json:"schema_name,omitempty"`
+	Error      string    `json:"error,omitempty"`
+}
+
 type adminEventResponse struct {
 	ID        uint64         `json:"id"`
 	At        time.Time      `json:"at"`
@@ -1157,6 +1197,7 @@ func summarizeAdminTraces(recorded []events.Event, limit int) []adminTraceSummar
 		summary.LastEventID = event.ID
 		summary.LastKind = string(event.Kind)
 		summary.LastAt = event.At
+		summary.AddEvent(event)
 		summary.llmUsage.AddEvent(event)
 		summary.LLMCalls = summary.llmUsage.Calls
 		summary.InputTokens = summary.llmUsage.InputTokens
@@ -1222,6 +1263,17 @@ func adminSessionResponseFromRuntime(session runtimeplan.Session) adminSessionRe
 		MaxTokens:       session.Budget.MaxTokens,
 		MaxCostUSD:      session.Budget.MaxCostUSD,
 		MaxWallClockMS:  session.Budget.MaxWallClock.Milliseconds(),
+	}
+}
+
+func adminSchemaViolationResponseFromState(violation state.SchemaViolation) adminSchemaViolationResponse {
+	return adminSchemaViolationResponse{
+		ID:         violation.ID,
+		At:         violation.At,
+		ExecID:     violation.ExecID,
+		SessionID:  violation.SessionID,
+		SchemaName: violation.SchemaName,
+		Error:      events.RedactText(violation.Error),
 	}
 }
 

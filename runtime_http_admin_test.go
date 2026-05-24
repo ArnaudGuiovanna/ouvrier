@@ -343,6 +343,10 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 			"latency_ms":    41,
 		},
 	})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventToolCallStarted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaValidationFailed, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaRepairCompleted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
 	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
 
 	rec := httptest.NewRecorder()
@@ -358,6 +362,10 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 			TraceID          string  `json:"trace_id"`
 			Events           int     `json:"events"`
 			LLMCalls         int     `json:"llm_calls"`
+			ToolCalls        int     `json:"tool_calls"`
+			SchemaViolations int     `json:"schema_violations"`
+			SchemaRepairs    int     `json:"schema_repairs"`
+			BudgetExceeded   int     `json:"budget_exceeded"`
 			InputTokens      int     `json:"input_tokens"`
 			OutputTokens     int     `json:"output_tokens"`
 			CostUSD          float64 `json:"cost_usd"`
@@ -370,15 +378,19 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	if body.Status != "ok" || len(body.Traces) != 1 {
 		t.Fatalf("body = %+v, want one trace", body)
 	}
-	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 2 {
+	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 6 {
 		t.Fatalf("trace = %+v, want exec_2 summary", body.Traces[0])
 	}
-	if body.Traces[0].LastEventID != 3 || body.Traces[0].LastKind != string(events.EventLLMCallCompleted) {
-		t.Fatalf("trace last event = %+v, want event 3 llm completion", body.Traces[0])
+	if body.Traces[0].LastEventID != 7 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
+		t.Fatalf("trace last event = %+v, want event 7 budget exceeded", body.Traces[0])
 	}
 	if body.Traces[0].LLMCalls != 1 || body.Traces[0].InputTokens != 13 || body.Traces[0].OutputTokens != 8 ||
 		body.Traces[0].CostUSD < 0.0209 || body.Traces[0].CostUSD > 0.0211 || body.Traces[0].AverageLatencyMS != 41 {
 		t.Fatalf("trace LLM usage = %+v, want completed LLM metrics", body.Traces[0])
+	}
+	if body.Traces[0].ToolCalls != 1 || body.Traces[0].SchemaViolations != 1 ||
+		body.Traces[0].SchemaRepairs != 1 || body.Traces[0].BudgetExceeded != 1 {
+		t.Fatalf("trace event counts = %+v, want tool/schema/budget counters", body.Traces[0])
 	}
 }
 
@@ -755,10 +767,11 @@ func TestHTTPAdminTraceByExecutionIncludesPersistentSchemaConformance(t *testing
 		StartedAt: now,
 	})
 	addAdminSchemaViolation(t, store, state.SchemaViolation{
+		At:         now.Add(250 * time.Millisecond),
 		ExecID:     "exec_1",
 		SessionID:  "sess_1",
 		SchemaName: "ovr.httpTestReply",
-		Error:      "status must be string",
+		Error:      "status must be string token=super-secret",
 	})
 	addAdminStoreEvent(t, store, events.Event{
 		Kind:      events.EventSchemaValidationFailed,
@@ -790,7 +803,15 @@ func TestHTTPAdminTraceByExecutionIncludesPersistentSchemaConformance(t *testing
 	var body struct {
 		Status           string `json:"status"`
 		SchemaViolations int    `json:"schema_violations"`
-		Events           []struct {
+		ViolationDetails []struct {
+			ID         uint64    `json:"id"`
+			At         time.Time `json:"at"`
+			ExecID     string    `json:"exec_id"`
+			SessionID  string    `json:"session_id"`
+			SchemaName string    `json:"schema_name"`
+			Error      string    `json:"error"`
+		} `json:"schema_violation_details"`
+		Events []struct {
 			Kind    string         `json:"kind"`
 			Payload map[string]any `json:"payload"`
 		} `json:"events"`
@@ -798,6 +819,17 @@ func TestHTTPAdminTraceByExecutionIncludesPersistentSchemaConformance(t *testing
 	decodeAdminJSON(t, rec, &body)
 	if body.Status != "ok" || body.SchemaViolations != 1 {
 		t.Fatalf("body = %+v, want ok with one schema violation", body)
+	}
+	if len(body.ViolationDetails) != 1 {
+		t.Fatalf("schema violation details = %+v, want one detail", body.ViolationDetails)
+	}
+	violation := body.ViolationDetails[0]
+	if violation.ID == 0 || violation.At.IsZero() || violation.ExecID != "exec_1" ||
+		violation.SessionID != "sess_1" || violation.SchemaName != "ovr.httpTestReply" {
+		t.Fatalf("schema violation detail = %+v, want stored violation metadata", violation)
+	}
+	if violation.Error != "status must be string token=[REDACTED]" {
+		t.Fatalf("schema violation error = %q, want redacted token", violation.Error)
 	}
 	if len(body.Events) != 2 {
 		t.Fatalf("events = %d, want schema validation and repair events", len(body.Events))
