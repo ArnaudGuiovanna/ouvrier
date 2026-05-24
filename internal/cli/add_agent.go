@@ -92,15 +92,16 @@ func runAddAgent(cfg AddAgentConfig, out io.Writer) error {
 }
 
 // insertAgent inserts a new ovr.Pipe(...) declaration into src. It prefers to
-// place the new block immediately after the last existing ovr.Pipe(...) line.
-// Falling back, it inserts the block immediately before the first
-// ovr.Reply/Push/Sink terminal. If neither anchor is present, it refuses to
-// edit the file so we never silently corrupt main.go.
+// place the new block immediately after the closing parenthesis of the last
+// existing ovr.Pipe(...) block. Falling back, it inserts the block
+// immediately before the first ovr.Reply/Push/Sink terminal. If neither
+// anchor is present, it refuses to edit the file so we never silently
+// corrupt main.go.
 func insertAgent(src, name, model, goal string) (string, error) {
 	block := renderPipeBlock(name, model, goal)
 
-	if anchor, ok := lastPipeLine(src); ok {
-		updated, ok := insertAfterLine(src, anchor, block)
+	if endLine, ok := lastPipeCloseLine(src); ok {
+		updated, ok := insertAfterLine(src, endLine, block)
 		if ok {
 			return updated, nil
 		}
@@ -114,26 +115,64 @@ func insertAgent(src, name, model, goal string) (string, error) {
 	return "", fmt.Errorf("%w: could not find an existing ovr.Pipe(...) or terminal node (ovr.Reply/Push/Sink) in main.go", ErrMainEdit)
 }
 
-// lastPipeLine returns the line containing the last ovr.Pipe( occurrence so
-// the new Pipe is appended after the previous one rather than at the very
-// first Pipe (which is typically the entry agent).
-func lastPipeLine(src string) (string, bool) {
+// lastPipeCloseLine returns the unique line text containing the closing
+// parenthesis (and trailing comma, if any) of the last top-level ovr.Pipe(
+// block in src. The returned anchor is unique enough for insertAfterLine to
+// place the new Pipe immediately after the previous one.
+func lastPipeCloseLine(src string) (string, bool) {
 	const needle = "ovr.Pipe("
 	idx := strings.LastIndex(src, needle)
 	if idx < 0 {
 		return "", false
 	}
-	lineStart := strings.LastIndexByte(src[:idx], '\n')
-	if lineStart < 0 {
-		lineStart = 0
-	} else {
-		lineStart++
+	openParen := idx + len(needle) - 1
+	depth := 0
+	i := openParen
+	inString := false
+	var stringQuote byte
+	for i < len(src) {
+		c := src[i]
+		if inString {
+			switch c {
+			case '\\':
+				if i+1 < len(src) {
+					i += 2
+					continue
+				}
+			case stringQuote:
+				inString = false
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '"', '`':
+			inString = true
+			stringQuote = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				// Return the full line that contains this closing paren,
+				// including a potential trailing comma. That is unique
+				// enough to anchor insertAfterLine.
+				lineStart := strings.LastIndexByte(src[:i], '\n')
+				if lineStart < 0 {
+					lineStart = 0
+				} else {
+					lineStart++
+				}
+				lineEnd := strings.IndexByte(src[i:], '\n')
+				if lineEnd < 0 {
+					return src[lineStart:], true
+				}
+				return src[lineStart : i+lineEnd], true
+			}
+		}
+		i++
 	}
-	lineEnd := strings.IndexByte(src[idx:], '\n')
-	if lineEnd < 0 {
-		return src[lineStart:], true
-	}
-	return src[lineStart : idx+lineEnd], true
+	return "", false
 }
 
 // renderPipeBlock builds a Pipe declaration with two-tab indentation; gofmt
