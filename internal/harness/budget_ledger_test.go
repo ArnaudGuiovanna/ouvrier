@@ -5,10 +5,10 @@ import (
 	"sync"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/harness"
-	"ouvrier/internal/provider"
-	runtimecore "ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func TestSharedBudgetLedgerCountsUsageAcrossHarnesses(t *testing.T) {

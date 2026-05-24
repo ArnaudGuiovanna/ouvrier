@@ -3,7 +3,7 @@ package harness
 import (
 	"context"
 
-	runtimecore "ouvrier/internal/runtime"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type sessionContextKey struct{}

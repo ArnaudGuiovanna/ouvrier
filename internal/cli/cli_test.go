@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/scaffold"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
 )
 
 func TestRunVersionPrintsConfiguredVersion(t *testing.T) {

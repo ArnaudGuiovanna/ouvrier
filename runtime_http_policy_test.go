@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	internalsandbox "ouvrier/internal/sandbox"
-	"ouvrier/internal/state"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 func TestNewHTTPHandlerAppliesDefaultPolicyToTools(t *testing.T) {

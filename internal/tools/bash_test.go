@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/provider"
-	"ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 )
 
 func TestBashHandlerRunsInWorkspaceWithAllowlistedEnv(t *testing.T) {

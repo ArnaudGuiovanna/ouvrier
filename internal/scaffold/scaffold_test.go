@@ -51,8 +51,8 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	})
 	assertFileContains(t, filepath.Join(project.Dir, "go.mod"), []string{
 		"module demo",
-		"require ouvrier v0.0.0",
-		"replace ouvrier => " + root,
+		"require github.com/ArnaudGuiovanna/ouvrier v0.0.0",
+		"replace github.com/ArnaudGuiovanna/ouvrier => " + root,
 	})
 	assertFileContains(t, filepath.Join(project.Dir, "pip.yaml"), []string{
 		"name: demo",

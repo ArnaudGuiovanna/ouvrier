@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"sync"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	runtimecore "ouvrier/internal/runtime"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 type toolCallOutcome struct {

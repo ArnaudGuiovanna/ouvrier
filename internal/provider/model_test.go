@@ -3,7 +3,7 @@ package provider_test
 import (
 	"testing"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func TestParseModelIDRequiresProviderPrefix(t *testing.T) {

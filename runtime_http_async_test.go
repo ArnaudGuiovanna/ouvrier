@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type blockingProvider struct {

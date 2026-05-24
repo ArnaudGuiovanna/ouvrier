@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
-	"ouvrier/internal/events"
-	runtimeplan "ouvrier/internal/runtime"
-	"ouvrier/internal/sandbox"
-	"ouvrier/internal/skills"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/skills"
 )
 
 func (rt httpRuntime) systemPromptForStep(ctx context.Context, step runtimeplan.Step, scope planRunScope) (string, error) {

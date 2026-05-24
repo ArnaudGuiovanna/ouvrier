@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/harness"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	runtimecore "ouvrier/internal/runtime"
-	"ouvrier/internal/schema"
-	"ouvrier/internal/state"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/schema"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 type scriptedProvider struct {

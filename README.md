@@ -56,15 +56,16 @@ func main() {
 ## Status
 
 Ouvrier v0.1 is under active implementation. The runtime and harness foundations
-are in place, but the release is not complete yet. The current module path is
-local development only:
+are in place, but the release is not complete yet. The public Go module path is:
 
 ```txt
-module ouvrier
+module github.com/ArnaudGuiovanna/ouvrier
 ```
 
-The final public module path will be decided before v0.1. Do not publish
-generated projects that depend on a placeholder module path.
+Generated projects import the framework under that path. During local
+development before the repository is published, scaffolded projects add a
+`replace github.com/ArnaudGuiovanna/ouvrier => <local-checkout>` directive so
+they keep building against the working tree.
 
 Current working foundations include:
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 // ToolOption configures a Go tool registered on a Pipe.

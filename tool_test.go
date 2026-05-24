@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 type toolReply struct {

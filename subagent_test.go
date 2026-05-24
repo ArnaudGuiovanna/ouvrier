@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type subAgentTranslation struct {

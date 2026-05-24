@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 )
 
 func (s *SQLiteStore) AddSchemaViolation(ctx context.Context, violation SchemaViolation) (SchemaViolation, error) {

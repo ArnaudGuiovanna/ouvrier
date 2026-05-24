@@ -10,9 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 var ErrInvalidServer = errors.New("invalid MCP server")

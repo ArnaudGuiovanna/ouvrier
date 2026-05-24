@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type PermissionDecisionAudit struct {

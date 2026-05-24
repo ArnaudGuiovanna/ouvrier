@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/events"
-	runtimecore "ouvrier/internal/runtime"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {

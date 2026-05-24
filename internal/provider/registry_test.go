@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type registryProvider struct {

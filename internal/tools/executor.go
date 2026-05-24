@@ -14,8 +14,8 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 var (

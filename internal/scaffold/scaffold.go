@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"strings"
 
-	ovr "ouvrier"
-	"ouvrier/internal/provider"
+	ovr "github.com/ArnaudGuiovanna/ouvrier"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 var (
@@ -125,7 +125,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 	}
 	module := strings.TrimSpace(cfg.FrameworkModule)
 	if module == "" {
-		module = "ouvrier"
+		module = "github.com/ArnaudGuiovanna/ouvrier"
 	}
 	frameworkDir := strings.TrimSpace(cfg.FrameworkDir)
 	if frameworkDir == "" {
@@ -243,7 +243,7 @@ func detectFrameworkDir() string {
 	for {
 		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 		text := string(data)
-		if err == nil && (strings.HasPrefix(text, "module ouvrier\n") || strings.Contains(text, "\nmodule ouvrier\n")) {
+		if err == nil && (strings.HasPrefix(text, "module github.com/ArnaudGuiovanna/ouvrier\n") || strings.Contains(text, "\nmodule github.com/ArnaudGuiovanna/ouvrier\n")) {
 			return dir
 		}
 		next := filepath.Dir(dir)

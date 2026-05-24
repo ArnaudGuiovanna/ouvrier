@@ -1,6 +1,6 @@
 package ovr
 
-import runtimeplan "ouvrier/internal/runtime"
+import runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 
 func compileTrigger(source triggerSource) (runtimeplan.Trigger, error) {
 	switch trigger := source.(type) {

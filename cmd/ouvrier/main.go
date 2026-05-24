@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"ouvrier/internal/cli"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/cli"
 )
 
 var version = "dev"

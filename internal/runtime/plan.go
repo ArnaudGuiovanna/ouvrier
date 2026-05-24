@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"time"
 
-	"ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 type TriggerKind string

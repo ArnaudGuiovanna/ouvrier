@@ -4,7 +4,7 @@ import (
 	"os"
 	"strings"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func providerRegistryFromEnv() (*provider.Registry, error) {

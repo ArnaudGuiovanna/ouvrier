@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"ouvrier/internal/policy"
-	runtimeplan "ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type planReply struct {

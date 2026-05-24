@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/provider"
-	internalsandbox "ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 )
 
 func TestNewHTTPHandlerInjectsSkillPromptFromSandbox(t *testing.T) {

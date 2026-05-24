@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func TestNewHTTPHandlerServesDirectSSEReply(t *testing.T) {

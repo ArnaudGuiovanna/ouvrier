@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type cronSchedule interface {

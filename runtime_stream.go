@@ -12,7 +12,7 @@ import (
 	"sync"
 	"syscall"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type streamMessage struct {

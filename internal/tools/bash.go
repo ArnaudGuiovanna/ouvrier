@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"ouvrier/internal/provider"
-	"ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 )
 
 const DefaultBashMaxOutputBytes = 64 * 1024

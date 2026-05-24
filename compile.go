@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func compilePlans(nodes []Node) ([]runtimeplan.Plan, error) {

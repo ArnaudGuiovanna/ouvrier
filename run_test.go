@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier"
+	"github.com/ArnaudGuiovanna/ouvrier"
 )
 
 func TestRunValidatesPipelineBeforeStartingRuntime(t *testing.T) {

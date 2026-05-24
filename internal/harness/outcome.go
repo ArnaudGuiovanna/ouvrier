@@ -1,8 +1,8 @@
 package harness
 
 import (
-	"ouvrier/internal/provider"
-	runtimecore "ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type Status string

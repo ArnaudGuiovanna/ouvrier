@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 type ToolKind string

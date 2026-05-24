@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func TestCompilePlansCompilesPipeBudgetAndExecutionOptions(t *testing.T) {

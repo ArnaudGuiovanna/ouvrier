@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"ouvrier/internal/events"
-	runtimeplan "ouvrier/internal/runtime"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 const defaultAdminTraceLimit = 20

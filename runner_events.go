@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	internalevents "ouvrier/internal/events"
+	internalevents "github.com/ArnaudGuiovanna/ouvrier/internal/events"
 )
 
 // EventKind identifies a runner lifecycle event that hooks can observe.

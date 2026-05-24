@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"ouvrier"
+	"github.com/ArnaudGuiovanna/ouvrier"
 )
 
 type testReply struct {

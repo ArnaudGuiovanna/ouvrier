@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type compatProvider interface {
