@@ -727,6 +727,54 @@ func TestHTTPAdminTracesListsPersistentTraceSummariesFromStateStore(t *testing.T
 	}
 }
 
+func TestHTTPAdminTracesSummarizesSchemaEventCounters(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaValidationFailed, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaRepairStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaRepairFailed, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaRepairStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaRepairCompleted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventSchemaValidationPassed, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/traces", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status string `json:"status"`
+		Traces []struct {
+			SchemaViolations       int `json:"schema_violations"`
+			SchemaValidationPassed int `json:"schema_validation_passed"`
+			SchemaValidationFailed int `json:"schema_validation_failed"`
+			SchemaRepairsStarted   int `json:"schema_repairs_started"`
+			SchemaRepairsCompleted int `json:"schema_repairs_completed"`
+			SchemaRepairsFailed    int `json:"schema_repairs_failed"`
+			SchemaRepairs          int `json:"schema_repairs"`
+			SchemaRepairFailures   int `json:"schema_repair_failures"`
+		} `json:"traces"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Traces) != 1 {
+		t.Fatalf("body = %+v, want one trace", body)
+	}
+	trace := body.Traces[0]
+	if trace.SchemaValidationPassed != 1 || trace.SchemaValidationFailed != 1 {
+		t.Fatalf("schema validation counters = %+v, want passed/failed 1/1", trace)
+	}
+	if trace.SchemaRepairsStarted != 2 || trace.SchemaRepairsCompleted != 1 || trace.SchemaRepairsFailed != 1 {
+		t.Fatalf("schema repair counters = %+v, want started/completed/failed 2/1/1", trace)
+	}
+	if trace.SchemaViolations != 1 || trace.SchemaRepairs != 1 || trace.SchemaRepairFailures != 1 {
+		t.Fatalf("schema compatibility counters = %+v, want violations/repairs/failures 1/1/1", trace)
+	}
+}
+
 func TestHTTPAdminTracesSummarizesPermissionDecisions(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

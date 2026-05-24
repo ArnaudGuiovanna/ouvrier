@@ -1230,6 +1230,11 @@ type adminTraceSummary struct {
 	CostUSD                float64   `json:"cost_usd"`
 	LatencyMS              float64   `json:"average_latency_ms"`
 	SchemaViolations       int       `json:"schema_violations"`
+	SchemaValidationPassed int       `json:"schema_validation_passed"`
+	SchemaValidationFailed int       `json:"schema_validation_failed"`
+	SchemaRepairsStarted   int       `json:"schema_repairs_started"`
+	SchemaRepairsCompleted int       `json:"schema_repairs_completed"`
+	SchemaRepairsFailed    int       `json:"schema_repairs_failed"`
 	SchemaRepairs          int       `json:"schema_repairs"`
 	SchemaRepairFailures   int       `json:"schema_repair_failures"`
 	BudgetExceeded         int       `json:"budget_exceeded"`
@@ -1284,11 +1289,18 @@ func (s *adminTraceSummary) AddEvent(event events.Event) {
 		s.IdempotencyReserved = s.decisionMetrics.IdempotencyReserved
 		s.IdempotencyDuplicate = s.decisionMetrics.IdempotencyDuplicate
 		s.IdempotencyRetry = s.decisionMetrics.IdempotencyRetry
+	case events.EventSchemaValidationPassed:
+		s.SchemaValidationPassed++
 	case events.EventSchemaValidationFailed:
+		s.SchemaValidationFailed++
 		s.SchemaViolations++
+	case events.EventSchemaRepairStarted:
+		s.SchemaRepairsStarted++
 	case events.EventSchemaRepairCompleted:
+		s.SchemaRepairsCompleted++
 		s.SchemaRepairs++
 	case events.EventSchemaRepairFailed:
+		s.SchemaRepairsFailed++
 		s.SchemaRepairFailures++
 	case events.EventBudgetExceeded:
 		s.BudgetExceeded++
