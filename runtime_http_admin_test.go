@@ -324,6 +324,84 @@ func TestHTTPAdminStatusIncludesLLMUsageFromEvents(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminStatusIncludesHarnessMetricsFromEvents(t *testing.T) {
+	store := state.NewMemoryStore()
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventSessionSaved, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"status": "completed",
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventSessionCancelled, ExecID: "exec_2", SessionID: "sess_2"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventToolCallStarted, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventToolCallCompleted, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventToolCallFailed, ExecID: "exec_1", SessionID: "sess_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPermissionDecision, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"allowed": true,
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPermissionDecision, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"allowed": false,
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"budget": "tokens",
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"budget": "cost_usd",
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"budget": "wallclock",
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventBudgetExceeded, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"budget": "iterations",
+	}})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPipeFailed, ExecID: "exec_1", SessionID: "sess_1", Payload: map[string]any{
+		"error": "hook llm_call_completed blocked event: audit denied",
+	}})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/status", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status                 string `json:"status"`
+		SessionsStarted        int    `json:"sessions_started"`
+		SessionsCompleted      int    `json:"sessions_completed"`
+		SessionsCancelled      int    `json:"sessions_cancelled"`
+		ToolCalls              int    `json:"tool_calls"`
+		ToolCallsCompleted     int    `json:"tool_calls_completed"`
+		ToolFailures           int    `json:"tool_failures"`
+		PermissionAllowed      int    `json:"permission_allowed"`
+		PermissionDenied       int    `json:"permission_denied"`
+		BudgetExceeded         int    `json:"budget_exceeded"`
+		BudgetExceededTokens   int    `json:"budget_exceeded_tokens"`
+		BudgetExceededCostUSD  int    `json:"budget_exceeded_cost_usd"`
+		BudgetExceededWalltime int    `json:"budget_exceeded_wallclock"`
+		BudgetExceededIter     int    `json:"budget_exceeded_iterations"`
+		HookFailures           int    `json:"hook_failures"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" {
+		t.Fatalf("status body = %q, want ok", body.Status)
+	}
+	if body.SessionsStarted != 1 || body.SessionsCompleted != 1 || body.SessionsCancelled != 1 {
+		t.Fatalf("session metrics = %+v, want started/completed/cancelled counts", body)
+	}
+	if body.ToolCalls != 1 || body.ToolCallsCompleted != 1 || body.ToolFailures != 1 {
+		t.Fatalf("tool metrics = %+v, want started/completed/failed counts", body)
+	}
+	if body.PermissionAllowed != 1 || body.PermissionDenied != 1 {
+		t.Fatalf("permission metrics = %+v, want allowed and denied counts", body)
+	}
+	if body.BudgetExceeded != 4 || body.BudgetExceededTokens != 1 || body.BudgetExceededCostUSD != 1 ||
+		body.BudgetExceededWalltime != 1 || body.BudgetExceededIter != 1 {
+		t.Fatalf("budget metrics = %+v, want per-budget exceeded counts", body)
+	}
+	if body.HookFailures != 1 {
+		t.Fatalf("hook_failures = %d, want 1", body.HookFailures)
+	}
+}
+
 func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	stream, err := events.NewEventStream()
 	if err != nil {

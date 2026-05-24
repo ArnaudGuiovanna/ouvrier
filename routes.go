@@ -190,6 +190,21 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	response.OutputTokens = llm.OutputTokens
 	response.CostUSD = llm.CostUSD
 	response.AverageLatencyMS = llm.AverageLatencyMS()
+	harnessMetrics := summarizeAdminHarnessMetrics(recorded)
+	response.SessionsStarted = harnessMetrics.SessionsStarted
+	response.SessionsCompleted = harnessMetrics.SessionsCompleted
+	response.SessionsCancelled = harnessMetrics.SessionsCancelled
+	response.ToolCalls = harnessMetrics.ToolCalls
+	response.ToolCallsCompleted = harnessMetrics.ToolCallsCompleted
+	response.ToolFailures = harnessMetrics.ToolFailures
+	response.PermissionAllowed = harnessMetrics.PermissionAllowed
+	response.PermissionDenied = harnessMetrics.PermissionDenied
+	response.BudgetExceeded = harnessMetrics.BudgetExceeded
+	response.BudgetExceededTokens = harnessMetrics.BudgetExceededTokens
+	response.BudgetExceededCostUSD = harnessMetrics.BudgetExceededCostUSD
+	response.BudgetExceededWallClock = harnessMetrics.BudgetExceededWallClock
+	response.BudgetExceededIterations = harnessMetrics.BudgetExceededIterations
+	response.HookFailures = harnessMetrics.HookFailures
 	if rt.stateStore == nil {
 		writeJSON(w, http.StatusOK, response)
 		return
@@ -481,6 +496,80 @@ func summarizeAdminLLMUsage(recorded []events.Event) adminLLMUsageSummary {
 	return summary
 }
 
+type adminHarnessMetricsSummary struct {
+	SessionsStarted          int
+	SessionsCompleted        int
+	SessionsCancelled        int
+	ToolCalls                int
+	ToolCallsCompleted       int
+	ToolFailures             int
+	PermissionAllowed        int
+	PermissionDenied         int
+	BudgetExceeded           int
+	BudgetExceededTokens     int
+	BudgetExceededCostUSD    int
+	BudgetExceededWallClock  int
+	BudgetExceededIterations int
+	HookFailures             int
+}
+
+func summarizeAdminHarnessMetrics(recorded []events.Event) adminHarnessMetricsSummary {
+	var summary adminHarnessMetricsSummary
+	for _, event := range recorded {
+		summary.AddEvent(event)
+	}
+	return summary
+}
+
+func (s *adminHarnessMetricsSummary) AddEvent(event events.Event) {
+	if s == nil {
+		return
+	}
+	switch events.CanonicalKind(event.Kind) {
+	case events.EventSessionStarted:
+		s.SessionsStarted++
+	case events.EventSessionSaved:
+		if adminStringPayload(event.Payload, "status") == "completed" {
+			s.SessionsCompleted++
+		}
+	case events.EventSessionCancelled:
+		s.SessionsCancelled++
+	case events.EventToolCallStarted:
+		s.ToolCalls++
+	case events.EventToolCallCompleted:
+		s.ToolCallsCompleted++
+	case events.EventToolCallFailed:
+		s.ToolFailures++
+	case events.EventPermissionDecision:
+		if adminBoolPayload(event.Payload, "allowed") {
+			s.PermissionAllowed++
+		} else {
+			s.PermissionDenied++
+		}
+	case events.EventBudgetExceeded:
+		s.BudgetExceeded++
+		switch adminStringPayload(event.Payload, "budget") {
+		case "tokens":
+			s.BudgetExceededTokens++
+		case "cost_usd":
+			s.BudgetExceededCostUSD++
+		case "wallclock":
+			s.BudgetExceededWallClock++
+		case "iterations":
+			s.BudgetExceededIterations++
+		}
+	case events.EventPipeFailed, events.EventPipelineFailed:
+		if adminHookFailureEvent(event) {
+			s.HookFailures++
+		}
+	}
+}
+
+func adminHookFailureEvent(event events.Event) bool {
+	errText := adminStringPayload(event.Payload, "error")
+	return strings.Contains(errText, "hook ") && strings.Contains(errText, "blocked event")
+}
+
 func adminNumericPayload(payload map[string]any, key string) float64 {
 	if payload == nil {
 		return 0
@@ -513,6 +602,25 @@ func adminNumericPayload(payload map[string]any, key string) float64 {
 	default:
 		return 0
 	}
+}
+
+func adminBoolPayload(payload map[string]any, key string) bool {
+	if payload == nil {
+		return false
+	}
+	value, ok := payload[key].(bool)
+	return ok && value
+}
+
+func adminStringPayload(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, ok := payload[key].(string)
+	if !ok {
+		return ""
+	}
+	return value
 }
 
 func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request) {
@@ -916,21 +1024,35 @@ type adminHealthResponse struct {
 }
 
 type adminStatusResponse struct {
-	Status                 string         `json:"status"`
-	Sessions               int            `json:"sessions"`
-	Executions             int            `json:"executions"`
-	ByStatus               map[string]int `json:"by_status"`
-	Events                 int            `json:"events"`
-	LLMCalls               int            `json:"llm_calls"`
-	InputTokens            int            `json:"input_tokens"`
-	OutputTokens           int            `json:"output_tokens"`
-	CostUSD                float64        `json:"cost_usd"`
-	AverageLatencyMS       float64        `json:"average_latency_ms"`
-	SchemaViolations       int            `json:"schema_violations"`
-	SchemaValidationPassed int            `json:"schema_validation_passed"`
-	SchemaValidationFailed int            `json:"schema_validation_failed"`
-	SchemaRepairsStarted   int            `json:"schema_repairs_started"`
-	SchemaRepairsCompleted int            `json:"schema_repairs_completed"`
+	Status                   string         `json:"status"`
+	Sessions                 int            `json:"sessions"`
+	Executions               int            `json:"executions"`
+	ByStatus                 map[string]int `json:"by_status"`
+	Events                   int            `json:"events"`
+	SessionsStarted          int            `json:"sessions_started"`
+	SessionsCompleted        int            `json:"sessions_completed"`
+	SessionsCancelled        int            `json:"sessions_cancelled"`
+	LLMCalls                 int            `json:"llm_calls"`
+	InputTokens              int            `json:"input_tokens"`
+	OutputTokens             int            `json:"output_tokens"`
+	CostUSD                  float64        `json:"cost_usd"`
+	AverageLatencyMS         float64        `json:"average_latency_ms"`
+	ToolCalls                int            `json:"tool_calls"`
+	ToolCallsCompleted       int            `json:"tool_calls_completed"`
+	ToolFailures             int            `json:"tool_failures"`
+	PermissionAllowed        int            `json:"permission_allowed"`
+	PermissionDenied         int            `json:"permission_denied"`
+	SchemaViolations         int            `json:"schema_violations"`
+	SchemaValidationPassed   int            `json:"schema_validation_passed"`
+	SchemaValidationFailed   int            `json:"schema_validation_failed"`
+	SchemaRepairsStarted     int            `json:"schema_repairs_started"`
+	SchemaRepairsCompleted   int            `json:"schema_repairs_completed"`
+	BudgetExceeded           int            `json:"budget_exceeded"`
+	BudgetExceededTokens     int            `json:"budget_exceeded_tokens"`
+	BudgetExceededCostUSD    int            `json:"budget_exceeded_cost_usd"`
+	BudgetExceededWallClock  int            `json:"budget_exceeded_wallclock"`
+	BudgetExceededIterations int            `json:"budget_exceeded_iterations"`
+	HookFailures             int            `json:"hook_failures"`
 }
 
 type adminLLMUsageSummary struct {
