@@ -209,6 +209,74 @@ func TestEventStreamAppendRedactsNamedStringSliceMaps(t *testing.T) {
 	}
 }
 
+func TestEventStreamAppendRedactsAndCopiesTypedSlicePayloadValues(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	labels := []map[string]string{{
+		"token": "slice-token",
+		"safe":  "visible",
+	}}
+	scores := []int{1, 2}
+
+	appended, err := stream.Append(context.Background(), Event{
+		Kind: EventToolCallCompleted,
+		Payload: map[string]any{
+			"labels": labels,
+			"scores": scores,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+	labels[0]["safe"] = "mutated"
+	scores[0] = 99
+
+	appendedLabels, ok := appended.Payload["labels"].([]any)
+	if !ok || len(appendedLabels) != 1 {
+		t.Fatalf("labels payload = %T %+v, want copied []any", appended.Payload["labels"], appended.Payload["labels"])
+	}
+	label, ok := appendedLabels[0].(map[string]string)
+	if !ok {
+		t.Fatalf("label payload = %T %+v, want sanitized string map", appendedLabels[0], appendedLabels[0])
+	}
+	if label["token"] != "[REDACTED]" || label["safe"] != "visible" {
+		t.Fatalf("label payload = %+v, want redacted token and original safe value", label)
+	}
+	appendedScores, ok := appended.Payload["scores"].([]any)
+	if !ok || !reflect.DeepEqual(appendedScores, []any{1, 2}) {
+		t.Fatalf("scores payload = %T %+v, want copied typed slice values", appended.Payload["scores"], appended.Payload["scores"])
+	}
+}
+
+func TestEventStreamListAndSinceReturnDefensiveCopiesOfTypedSlicePayloadValues(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	_, err = stream.Append(context.Background(), Event{
+		Kind: EventToolCallCompleted,
+		Payload: map[string]any{
+			"labels": []map[string]string{{"safe": "visible"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+
+	listedLabels := stream.List()[0].Payload["labels"].([]any)
+	listedLabels[0].(map[string]string)["safe"] = "mutated-list"
+	sinceLabels := stream.Since(0)[0].Payload["labels"].([]any)
+	sinceLabels[0].(map[string]string)["safe"] = "mutated-since"
+
+	againLabels := stream.List()[0].Payload["labels"].([]any)
+	label := againLabels[0].(map[string]string)
+	if label["safe"] != "visible" {
+		t.Fatalf("stored typed slice payload = %+v, want defensive copy", againLabels)
+	}
+}
+
 func TestEventStreamListReturnsDeepCopiesOfNestedPayloadValues(t *testing.T) {
 	stream, err := NewEventStream()
 	if err != nil {

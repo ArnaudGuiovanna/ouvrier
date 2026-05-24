@@ -198,7 +198,21 @@ func sanitizePayloadValue(key string, value any) any {
 
 func sanitizeReflectPayloadValue(value any) (any, bool) {
 	rv := reflect.ValueOf(value)
-	if !rv.IsValid() || rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+	if !rv.IsValid() {
+		return nil, false
+	}
+	switch rv.Kind() {
+	case reflect.Map:
+		return sanitizeReflectMapPayloadValue(rv)
+	case reflect.Slice, reflect.Array:
+		return sanitizeReflectSlicePayloadValue(rv), true
+	default:
+		return nil, false
+	}
+}
+
+func sanitizeReflectMapPayloadValue(rv reflect.Value) (any, bool) {
+	if rv.Type().Key().Kind() != reflect.String {
 		return nil, false
 	}
 	switch rv.Type().Elem().Kind() {
@@ -243,6 +257,17 @@ func sanitizeReflectPayloadValue(value any) (any, bool) {
 		clone[childKey] = sanitizePayloadValue(childKey, rv.MapIndex(key).Interface())
 	}
 	return clone, true
+}
+
+func sanitizeReflectSlicePayloadValue(rv reflect.Value) []any {
+	clone := make([]any, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		item := rv.Index(i)
+		if item.CanInterface() {
+			clone[i] = sanitizePayloadValue("", item.Interface())
+		}
+	}
+	return clone
 }
 
 func isSensitivePayloadKey(key string) bool {
