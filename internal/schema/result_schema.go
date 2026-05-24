@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"reflect"
 	"strings"
 
@@ -45,6 +47,8 @@ func resultSchemaForOptions() *jsonschema.ForOptions {
 		TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 			reflect.TypeFor[json.Number]():     {Type: "number"},
 			reflect.TypeFor[json.RawMessage](): {Types: []string{"null", "boolean", "number", "string", "array", "object"}},
+			reflect.TypeFor[net.IP]():          {Type: "string"},
+			reflect.TypeFor[netip.Addr]():      {Type: "string"},
 		},
 	}
 }
@@ -104,7 +108,7 @@ func tightenSchemaForType(generated *jsonschema.Schema, typ reflect.Type) {
 	if generated == nil || typ == nil {
 		return
 	}
-	if typ == reflect.TypeFor[json.RawMessage]() {
+	if typ == reflect.TypeFor[json.RawMessage]() || typ == reflect.TypeFor[net.IP]() {
 		return
 	}
 	if typ.Kind() == reflect.Pointer {

@@ -2,6 +2,8 @@ package schema_test
 
 import (
 	"encoding/json"
+	"net"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strings"
@@ -70,6 +72,12 @@ type resultSchemaNumberReply struct {
 type resultSchemaRawMessageReply struct {
 	Payload json.RawMessage  `json:"payload"`
 	Maybe   *json.RawMessage `json:"maybe,omitempty"`
+}
+
+type resultSchemaAddressReply struct {
+	IP    net.IP     `json:"ip"`
+	Addr  netip.Addr `json:"addr"`
+	Maybe *net.IP    `json:"maybe,omitempty"`
 }
 
 func TestFromTypeGeneratesStrictJSONSchema(t *testing.T) {
@@ -447,6 +455,39 @@ func TestFromTypePreservesRawMessageAsAnyJSON(t *testing.T) {
 		if err := schema.ValidateJSON(contract, data); err != nil {
 			t.Fatalf("ValidateJSON returned error for valid raw message output %s: %v", data, err)
 		}
+	}
+}
+
+func TestFromTypePreservesTextMarshalerAddressesAsStrings(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaAddressReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+	if ip := generated.Properties["ip"]; ip == nil || ip.Type != "string" {
+		t.Fatalf("ip schema = %+v, want JSON string schema for net.IP", ip)
+	}
+	if addr := generated.Properties["addr"]; addr == nil || addr.Type != "string" {
+		t.Fatalf("addr schema = %+v, want JSON string schema for netip.Addr", addr)
+	}
+	maybe := generated.Properties["maybe"]
+	if maybe == nil || !slices.Contains(maybe.Types, "null") || !slices.Contains(maybe.Types, "string") {
+		t.Fatalf("maybe schema = %+v, want nullable JSON string schema for *net.IP", maybe)
+	}
+
+	valid := []byte(`{"ip":"192.0.2.1","addr":"2001:db8::1","maybe":null}`)
+	if err := schema.ValidateJSON(contract, valid); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid address output: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"ip":[192,0,2,1],"addr":"2001:db8::1","maybe":null}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for array in net.IP field")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"ip":"192.0.2.1","addr":{},"maybe":null}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for object in netip.Addr field")
 	}
 }
 
