@@ -40,6 +40,57 @@ func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminHealthIncludesRecentExecutionsFromStateStore(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	store := state.NewMemoryStore()
+	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC)
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:      "exec_1",
+		TraceID:     "trace_1",
+		Status:      state.ExecutionCompleted,
+		StartedAt:   now.Add(-3 * time.Minute),
+		CompletedAt: now.Add(-2 * time.Minute),
+	})
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:    "exec_2",
+		TraceID:   "trace_2",
+		Status:    state.ExecutionRunning,
+		StartedAt: now.Add(-2 * time.Minute),
+	})
+	saveAdminExecution(t, store, state.Execution{
+		ExecID:      "exec_3",
+		TraceID:     "trace_3",
+		Status:      state.ExecutionFailed,
+		StartedAt:   now.Add(-1 * time.Minute),
+		CompletedAt: now,
+	})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/health?last=2", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		Status           string `json:"status"`
+		Executions       int    `json:"executions"`
+		RecentExecutions []struct {
+			ExecID  string `json:"exec_id"`
+			TraceID string `json:"trace_id"`
+			Status  string `json:"status"`
+		} `json:"recent_executions"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || body.Executions != 3 || len(body.RecentExecutions) != 2 {
+		t.Fatalf("body = %+v, want two of three recent executions", body)
+	}
+	if body.RecentExecutions[0].ExecID != "exec_3" || body.RecentExecutions[0].Status != "failed" ||
+		body.RecentExecutions[1].ExecID != "exec_2" || body.RecentExecutions[1].Status != "running" {
+		t.Fatalf("recent executions = %+v, want newest executions first", body.RecentExecutions)
+	}
+}
+
 func TestHTTPAdminRejectsMissingTokenOutsideDevMode(t *testing.T) {
 	t.Setenv("PIP_ENV", "production")
 	t.Setenv("PIP_ADMIN_TOKEN", "")

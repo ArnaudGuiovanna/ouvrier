@@ -157,11 +157,21 @@ func (rt httpRuntime) serveAdminHealth(w http.ResponseWriter, req *http.Request)
 	if !rt.authorizeAdmin(w, req) {
 		return
 	}
-	writeJSON(w, http.StatusOK, adminHealthResponse{
+	response := adminHealthResponse{
 		Status:      "ok",
 		StateStore:  rt.stateStore != nil,
 		EventStream: rt.eventStream != nil,
-	})
+	}
+	if rt.stateStore != nil {
+		executions, err := rt.stateStore.Executions(req.Context())
+		if err != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+			return
+		}
+		response.Executions = len(executions)
+		response.RecentExecutions = recentAdminExecutions(executions, parseAdminTraceLimit(req.URL.Query().Get("last")))
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request) {
@@ -1018,9 +1028,11 @@ func adminDevModeEnabled() bool {
 }
 
 type adminHealthResponse struct {
-	Status      string `json:"status"`
-	StateStore  bool   `json:"state_store"`
-	EventStream bool   `json:"event_stream"`
+	Status           string                   `json:"status"`
+	StateStore       bool                     `json:"state_store"`
+	EventStream      bool                     `json:"event_stream"`
+	Executions       int                      `json:"executions,omitempty"`
+	RecentExecutions []adminExecutionResponse `json:"recent_executions,omitempty"`
 }
 
 type adminStatusResponse struct {
@@ -1371,6 +1383,27 @@ func adminExecutionResponseFromState(execution state.Execution) *adminExecutionR
 		StartedAt:   execution.StartedAt,
 		CompletedAt: execution.CompletedAt,
 	}
+}
+
+func recentAdminExecutions(executions []state.Execution, limit int) []adminExecutionResponse {
+	if limit <= 0 || len(executions) == 0 {
+		return nil
+	}
+	sorted := append([]state.Execution(nil), executions...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if !sorted[i].StartedAt.Equal(sorted[j].StartedAt) {
+			return sorted[i].StartedAt.After(sorted[j].StartedAt)
+		}
+		return sorted[i].ExecID > sorted[j].ExecID
+	})
+	if len(sorted) > limit {
+		sorted = sorted[:limit]
+	}
+	recent := make([]adminExecutionResponse, 0, len(sorted))
+	for _, execution := range sorted {
+		recent = append(recent, *adminExecutionResponseFromState(execution))
+	}
+	return recent
 }
 
 func adminSessionResponseFromRuntime(session runtimeplan.Session) adminSessionResponse {
