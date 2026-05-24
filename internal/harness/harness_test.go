@@ -1010,6 +1010,9 @@ func TestRunRepairsInvalidResultSchemaWithinBound(t *testing.T) {
 			llmStarted++
 		case events.EventLLMCallCompleted:
 			llmCompleted++
+			if event.Payload["model"] != "anthropic/claude-sonnet-4-6" {
+				t.Fatalf("LLM completed payload = %+v, want requested model", event.Payload)
+			}
 			if event.Payload["repair"] == true && event.Payload["attempt"] == 1 {
 				repairLLMCompleted = true
 			}
@@ -1395,6 +1398,7 @@ func TestRunEmitsProviderResponseMetadataAfterLLM(t *testing.T) {
 		t.Fatal("EventAfterLLM not emitted")
 	}
 	if event.Payload["provider"] != "scripted" ||
+		event.Payload["model"] != "anthropic/claude-sonnet-4-6" ||
 		event.Payload["provider_model"] != "anthropic/claude-sonnet-4-6" ||
 		event.Payload["latency_ms"] != int64(12) {
 		t.Fatalf("after LLM payload = %+v, want provider metadata", event.Payload)

@@ -135,6 +135,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		out.Usage.Add(resp.Usage)
 		afterLLM := map[string]any{
 			"iteration":     out.Iterations,
+			"model":         h.model,
 			"stop_reason":   string(resp.StopReason),
 			"tool_calls":    len(resp.ToolCalls),
 			"input_tokens":  resp.Usage.InputTokens,
@@ -499,6 +500,7 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 		usage.Add(resp.Usage)
 		afterLLM := map[string]any{
 			"iteration":     iteration,
+			"model":         h.model,
 			"stop_reason":   string(resp.StopReason),
 			"tool_calls":    len(resp.ToolCalls),
 			"input_tokens":  resp.Usage.InputTokens,
