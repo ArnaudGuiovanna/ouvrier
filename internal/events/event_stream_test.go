@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -162,6 +163,49 @@ func TestEventStreamAppendRedactsSensitivePayloadStrings(t *testing.T) {
 		if !strings.Contains(text, "[REDACTED]") {
 			t.Fatalf("%s payload = %q, want redacted value", key, text)
 		}
+	}
+}
+
+func TestEventStreamAppendRedactsNamedStringSliceMaps(t *testing.T) {
+	stream, err := NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	headers := http.Header{
+		"Authorization": {"Bearer root-token"},
+		"X-Api-Key":     {"root-api-key"},
+		"X-Safe":        {"visible"},
+	}
+
+	appended, err := stream.Append(context.Background(), Event{
+		Kind: EventSignatureDecision,
+		Payload: map[string]any{
+			"headers": headers,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Append returned error: %v", err)
+	}
+	headers.Set("X-Safe", "mutated")
+
+	payloadHeaders, ok := appended.Payload["headers"].(map[string][]string)
+	if !ok {
+		t.Fatalf("headers payload = %T %+v, want sanitized string slice map", appended.Payload["headers"], appended.Payload["headers"])
+	}
+	if !reflect.DeepEqual(payloadHeaders["Authorization"], []string{"[REDACTED]"}) ||
+		!reflect.DeepEqual(payloadHeaders["X-Api-Key"], []string{"[REDACTED]"}) {
+		t.Fatalf("headers payload = %+v, want sensitive header values redacted", payloadHeaders)
+	}
+	if !reflect.DeepEqual(payloadHeaders["X-Safe"], []string{"visible"}) {
+		t.Fatalf("headers payload = %+v, want safe header preserved", payloadHeaders)
+	}
+
+	storedHeaders, ok := stream.List()[0].Payload["headers"].(map[string][]string)
+	if !ok {
+		t.Fatalf("stored headers payload = %T, want sanitized string slice map", stream.List()[0].Payload["headers"])
+	}
+	if !reflect.DeepEqual(storedHeaders["X-Safe"], []string{"visible"}) {
+		t.Fatalf("stored headers payload = %+v, want defensive copy of original safe header", storedHeaders)
 	}
 }
 

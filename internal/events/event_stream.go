@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -188,8 +189,60 @@ func sanitizePayloadValue(key string, value any) any {
 	case string:
 		return RedactJSONText(typed)
 	default:
+		if sanitized, ok := sanitizeReflectPayloadValue(typed); ok {
+			return sanitized
+		}
 		return value
 	}
+}
+
+func sanitizeReflectPayloadValue(value any) (any, bool) {
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() || rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	switch rv.Type().Elem().Kind() {
+	case reflect.String:
+		clone := make(map[string]string, rv.Len())
+		for _, key := range rv.MapKeys() {
+			childKey := key.String()
+			if isSensitivePayloadKey(childKey) {
+				clone[childKey] = redactedPayloadValue
+				continue
+			}
+			clone[childKey] = RedactJSONText(rv.MapIndex(key).String())
+		}
+		return clone, true
+	case reflect.Slice:
+		if rv.Type().Elem().Elem().Kind() == reflect.String {
+			clone := make(map[string][]string, rv.Len())
+			for _, key := range rv.MapKeys() {
+				childKey := key.String()
+				if isSensitivePayloadKey(childKey) {
+					clone[childKey] = []string{redactedPayloadValue}
+					continue
+				}
+				childValues := rv.MapIndex(key)
+				cloneValues := make([]string, childValues.Len())
+				for i := 0; i < childValues.Len(); i++ {
+					cloneValues[i] = RedactJSONText(childValues.Index(i).String())
+				}
+				clone[childKey] = cloneValues
+			}
+			return clone, true
+		}
+	}
+
+	clone := make(map[string]any, rv.Len())
+	for _, key := range rv.MapKeys() {
+		childKey := key.String()
+		if isSensitivePayloadKey(childKey) {
+			clone[childKey] = redactedPayloadValue
+			continue
+		}
+		clone[childKey] = sanitizePayloadValue(childKey, rv.MapIndex(key).Interface())
+	}
+	return clone, true
 }
 
 func isSensitivePayloadKey(key string) bool {
