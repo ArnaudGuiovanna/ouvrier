@@ -13,7 +13,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
-	runtimecore "ouvrier/internal/runtime"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func FromType(typ reflect.Type) (*runtimecore.ResultSchema, error) {

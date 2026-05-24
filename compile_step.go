@@ -3,7 +3,7 @@ package ovr
 import (
 	"fmt"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func compileRuntimeStep(node Node) (runtimeplan.Step, error) {

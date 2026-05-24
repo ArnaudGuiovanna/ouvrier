@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/harness"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	"ouvrier/internal/state"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 type harnessLookupArgs struct {

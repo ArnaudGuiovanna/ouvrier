@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/harness"
-	"ouvrier/internal/provider"
-	runtimeplan "ouvrier/internal/runtime"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 func TestHTTPRuntimeSubAgentChildUsageExceedsLowParentTokenBudget(t *testing.T) {

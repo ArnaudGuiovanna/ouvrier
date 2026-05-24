@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/provider"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 func TestNewWebhookHandlerServesDirectSink(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier"
+	"github.com/ArnaudGuiovanna/ouvrier"
 )
 
 func TestAllowSideEffectsPublicPolicyAllowsExplicitLabel(t *testing.T) {

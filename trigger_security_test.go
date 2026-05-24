@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 func TestCompilePlansCompilesIdempotencyKeyOption(t *testing.T) {

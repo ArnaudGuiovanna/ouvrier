@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	runtimecore "ouvrier/internal/runtime"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func (s *SQLiteStore) SaveSession(ctx context.Context, session runtimecore.Session) error {

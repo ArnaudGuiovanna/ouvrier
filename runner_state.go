@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	internalevents "ouvrier/internal/events"
-	runtimecore "ouvrier/internal/runtime"
-	internalstate "ouvrier/internal/state"
+	internalevents "github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	internalstate "github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 // Budget captures execution limits recorded with public sessions.

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func TestCompilePlansCompilesParallelStep(t *testing.T) {

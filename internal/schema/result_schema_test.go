@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
-	"ouvrier/internal/schema"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/schema"
 )
 
 type resultSchemaReply struct {

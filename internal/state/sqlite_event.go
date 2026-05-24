@@ -7,7 +7,7 @@ import (
 	"errors"
 	"time"
 
-	"ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 )
 
 func (s *SQLiteStore) AddEvent(ctx context.Context, event events.Event) (events.Event, error) {

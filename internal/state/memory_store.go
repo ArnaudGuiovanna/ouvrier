@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"ouvrier/internal/events"
-	runtimecore "ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type MemoryStore struct {

@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	runtimeplan "ouvrier/internal/runtime"
-	internalsandbox "ouvrier/internal/sandbox"
-	"ouvrier/internal/tools"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 // Runner owns advanced runtime configuration for Ouvrier pipelines.

@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/provider"
-	runtimecore "ouvrier/internal/runtime"
-	"ouvrier/internal/schema"
-	"ouvrier/internal/state"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/schema"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 type Harness struct {

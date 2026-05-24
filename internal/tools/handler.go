@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type Handler interface {

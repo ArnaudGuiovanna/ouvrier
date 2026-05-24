@@ -15,8 +15,9 @@ Proceed incrementally, but do not remove scope from v0.1.
 - Language: Go.
 - Runtime package: `ovr`.
 - CLI binary: `ouvrier`.
-- Final module path is still to be decided. Do not ship with
-  `github.com/yourorg/ouvrier`.
+- Public Go module path is `github.com/ArnaudGuiovanna/ouvrier`. Scaffolded
+  projects, examples, and documentation must import the framework under that
+  path. A local `replace` directive is used during pre-publish development.
 
 ## Primary Sources
 
@@ -212,7 +213,7 @@ passing before commit.
 ### M0 - Product And API Groundwork
 
 - Fix contradictions between `specs.md` and the PDF.
-- Decide final Go module path.
+- Done: final Go module path is `github.com/ArnaudGuiovanna/ouvrier`.
 - Define public contracts for `Node`, `From`, `Pipe`, `Run`, `Reply`, `Push`,
   `Sink`, `Parallel`, `Map`, and `SubAgent`.
 - Define the SOTA harness contracts and internal package boundaries:

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func plansRunnableTogether(plans []runtimeplan.Plan) bool {

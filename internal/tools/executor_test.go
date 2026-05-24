@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 type lookupArgs struct {

@@ -1,4 +1,4 @@
-module ouvrier
+module github.com/ArnaudGuiovanna/ouvrier
 
 go 1.25.0
 

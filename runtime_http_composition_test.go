@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type compositionReply struct {

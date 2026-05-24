@@ -3,7 +3,7 @@ package ovr
 import (
 	"context"
 
-	internalpolicy "ouvrier/internal/policy"
+	internalpolicy "github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 // PermissionActionKind identifies an action that a runner policy can authorize.

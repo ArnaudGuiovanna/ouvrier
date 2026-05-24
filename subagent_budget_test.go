@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 type subAgentBudgetProvider struct {

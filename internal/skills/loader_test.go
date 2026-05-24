@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 )
 
 func TestLoadSkillReadsFrontmatterAndBody(t *testing.T) {

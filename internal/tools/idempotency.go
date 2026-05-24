@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 type idempotencyStore interface {

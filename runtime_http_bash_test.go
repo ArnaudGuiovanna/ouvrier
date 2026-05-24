@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 func TestNewHTTPHandlerRunsBashThroughToolExecutorSandbox(t *testing.T) {

@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"strings"
 
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	runtimeplan "ouvrier/internal/runtime"
-	internalsandbox "ouvrier/internal/sandbox"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 func registerRuntimeBash(executor *tools.Executor, bashes []runtimeplan.BashTool) ([]provider.ToolSpec, error) {

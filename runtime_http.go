@@ -18,13 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	runtimeplan "ouvrier/internal/runtime"
-	"ouvrier/internal/schema"
-	"ouvrier/internal/state"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/schema"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 const shutdownTimeout = 5 * time.Second

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 )
 
 type retryContext struct {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"reflect"
 
-	runtimeplan "ouvrier/internal/runtime"
-	"ouvrier/internal/schema"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/schema"
 )
 
 type resultSchemaCarrier interface {

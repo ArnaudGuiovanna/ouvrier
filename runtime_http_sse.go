@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"ouvrier/internal/events"
-	runtimeplan "ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type ssePipelineResult struct {

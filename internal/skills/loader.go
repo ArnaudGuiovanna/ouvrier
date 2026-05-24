@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ouvrier/internal/sandbox"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"ouvrier/internal/events"
-	runtimecore "ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	runtimecore "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 func TestSQLiteStorePersistsExecutionAndSessionAcrossReopen(t *testing.T) {

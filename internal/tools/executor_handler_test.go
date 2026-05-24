@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	"ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 type handlerFunc func(context.Context, provider.ToolCall) (provider.ToolResult, error)

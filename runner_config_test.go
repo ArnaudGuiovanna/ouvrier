@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func TestRunnerStateStoreConfiguresHTTPRuntime(t *testing.T) {

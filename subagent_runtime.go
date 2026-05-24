@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 
-	"ouvrier/internal/events"
-	"ouvrier/internal/harness"
-	"ouvrier/internal/policy"
-	"ouvrier/internal/provider"
-	runtimeplan "ouvrier/internal/runtime"
-	"ouvrier/internal/tools"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
 )
 
 var subAgentInputSchema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"additionalProperties":true}`)

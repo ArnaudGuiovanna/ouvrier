@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func TestNewHTTPHandlerRoutesStepsByModelProvider(t *testing.T) {

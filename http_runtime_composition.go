@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"sync"
 
-	runtimeplan "ouvrier/internal/runtime"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 )
 
 type compositionRun struct {

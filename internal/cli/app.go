@@ -8,8 +8,8 @@ import (
 	"io"
 	"os"
 
-	"ouvrier/internal/scaffold"
-	"ouvrier/internal/tui"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
 
 var (
