@@ -126,6 +126,9 @@ func tightenNonNullableSchemaForType(generated *jsonschema.Schema, typ reflect.T
 	}
 	switch typ.Kind() {
 	case reflect.Struct:
+		if schemaHasConcreteNonObjectType(generated) {
+			return
+		}
 		setSingleSchemaType(generated, "object")
 		tightenStructProperties(generated, typ)
 	case reflect.Slice, reflect.Array:
@@ -177,4 +180,22 @@ func jsonFieldName(field reflect.StructField) (string, bool) {
 func setSingleSchemaType(generated *jsonschema.Schema, typ string) {
 	generated.Type = typ
 	generated.Types = nil
+}
+
+func schemaHasConcreteNonObjectType(generated *jsonschema.Schema) bool {
+	if generated == nil {
+		return false
+	}
+	if generated.Type != "" {
+		return generated.Type != "object"
+	}
+	if len(generated.Types) == 0 {
+		return false
+	}
+	for _, typ := range generated.Types {
+		if typ == "object" {
+			return false
+		}
+	}
+	return true
 }

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -54,6 +55,11 @@ type resultSchemaNullability struct {
 	MaybeCount  *int                 `json:"maybe_count,omitempty"`
 	MaybeTags   *[]string            `json:"maybe_tags,omitempty"`
 	MaybeDetail *resultSchemaPayload `json:"maybe_detail,omitempty"`
+}
+
+type resultSchemaStampedReply struct {
+	CreatedAt time.Time   `json:"created_at"`
+	History   []time.Time `json:"history"`
 }
 
 func TestFromTypeGeneratesStrictJSONSchema(t *testing.T) {
@@ -190,6 +196,38 @@ func TestValidateJSONAllowsNullOnlyForPointerFields(t *testing.T) {
 				t.Fatal("ValidateJSON returned nil for null non-pointer field")
 			}
 		})
+	}
+}
+
+func TestFromTypePreservesTimeSchemasAsJSONStrings(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaStampedReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	var generated jsonschema.Schema
+	if err := json.Unmarshal(contract.JSONSchema, &generated); err != nil {
+		t.Fatalf("JSONSchema is not JSON Schema: %v", err)
+	}
+
+	createdAt := generated.Properties["created_at"]
+	if createdAt == nil || createdAt.Type != "string" {
+		t.Fatalf("created_at schema = %+v, want JSON string schema for time.Time", createdAt)
+	}
+	history := generated.Properties["history"]
+	if history == nil || history.Type != "array" || history.Items == nil || history.Items.Type != "string" {
+		t.Fatalf("history schema = %+v, want array of JSON string schemas for []time.Time", history)
+	}
+
+	valid := []byte(`{"created_at":"2026-05-24T12:00:00Z","history":["2026-05-24T12:00:00Z"]}`)
+	if err := schema.ValidateJSON(contract, valid); err != nil {
+		t.Fatalf("ValidateJSON returned error for valid time output: %v", err)
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"created_at":{},"history":[]}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for object in time.Time field")
+	}
+	if err := schema.ValidateJSON(contract, []byte(`{"created_at":"2026-05-24T12:00:00Z","history":[{}]}`)); err == nil {
+		t.Fatal("ValidateJSON returned nil for object in []time.Time item")
 	}
 }
 
