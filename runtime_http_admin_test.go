@@ -400,6 +400,20 @@ func TestHTTPAdminStatusIncludesLLMUsageFromEvents(t *testing.T) {
 			"cost_usd":     9.9,
 		},
 	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:   events.EventLLMCallFailed,
+		ExecID: "exec_4",
+		Payload: map[string]any{
+			"retrying": true,
+		},
+	})
+	addAdminStoreEvent(t, store, events.Event{
+		Kind:   events.EventLLMCallFailed,
+		ExecID: "exec_5",
+		Payload: map[string]any{
+			"retrying": false,
+		},
+	})
 	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
 
 	rec := httptest.NewRecorder()
@@ -411,6 +425,9 @@ func TestHTTPAdminStatusIncludesLLMUsageFromEvents(t *testing.T) {
 	var body struct {
 		Status           string  `json:"status"`
 		LLMCalls         int     `json:"llm_calls"`
+		LLMFailures      int     `json:"llm_failures"`
+		LLMRetries       int     `json:"llm_retries"`
+		LLMFinalFailures int     `json:"llm_final_failures"`
 		InputTokens      int     `json:"input_tokens"`
 		OutputTokens     int     `json:"output_tokens"`
 		CostUSD          float64 `json:"cost_usd"`
@@ -422,6 +439,9 @@ func TestHTTPAdminStatusIncludesLLMUsageFromEvents(t *testing.T) {
 	}
 	if body.LLMCalls != 2 || body.InputTokens != 16 || body.OutputTokens != 10 {
 		t.Fatalf("usage body = %+v, want two completed LLM calls with 16/10 tokens", body)
+	}
+	if body.LLMFailures != 2 || body.LLMRetries != 1 || body.LLMFinalFailures != 1 {
+		t.Fatalf("LLM failure metrics = %+v, want failures/retries/final failures", body)
 	}
 	if body.CostUSD < 0.0199 || body.CostUSD > 0.0201 {
 		t.Fatalf("cost_usd = %v, want 0.02", body.CostUSD)
@@ -516,6 +536,9 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	}
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventSessionStarted, ExecID: "exec_1", SessionID: "sess_1", TraceID: "trace_1"})
 	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallStarted, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2"})
+	appendAdminEvent(t, stream, events.Event{Kind: events.EventLLMCallFailed, ExecID: "exec_2", SessionID: "sess_2", TraceID: "trace_2", Payload: map[string]any{
+		"retrying": true,
+	}})
 	appendAdminEvent(t, stream, events.Event{
 		Kind:      events.EventLLMCallCompleted,
 		ExecID:    "exec_2",
@@ -547,6 +570,9 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 			TraceID          string  `json:"trace_id"`
 			Events           int     `json:"events"`
 			LLMCalls         int     `json:"llm_calls"`
+			LLMFailures      int     `json:"llm_failures"`
+			LLMRetries       int     `json:"llm_retries"`
+			LLMFinalFailures int     `json:"llm_final_failures"`
 			ToolCalls        int     `json:"tool_calls"`
 			SchemaViolations int     `json:"schema_violations"`
 			SchemaRepairs    int     `json:"schema_repairs"`
@@ -563,15 +589,18 @@ func TestHTTPAdminTracesListsRecentTraceSummariesFromEventStream(t *testing.T) {
 	if body.Status != "ok" || len(body.Traces) != 1 {
 		t.Fatalf("body = %+v, want one trace", body)
 	}
-	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 6 {
+	if body.Traces[0].ExecID != "exec_2" || body.Traces[0].TraceID != "trace_2" || body.Traces[0].Events != 7 {
 		t.Fatalf("trace = %+v, want exec_2 summary", body.Traces[0])
 	}
-	if body.Traces[0].LastEventID != 7 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
-		t.Fatalf("trace last event = %+v, want event 7 budget exceeded", body.Traces[0])
+	if body.Traces[0].LastEventID != 8 || body.Traces[0].LastKind != string(events.EventBudgetExceeded) {
+		t.Fatalf("trace last event = %+v, want event 8 budget exceeded", body.Traces[0])
 	}
 	if body.Traces[0].LLMCalls != 1 || body.Traces[0].InputTokens != 13 || body.Traces[0].OutputTokens != 8 ||
 		body.Traces[0].CostUSD < 0.0209 || body.Traces[0].CostUSD > 0.0211 || body.Traces[0].AverageLatencyMS != 41 {
 		t.Fatalf("trace LLM usage = %+v, want completed LLM metrics", body.Traces[0])
+	}
+	if body.Traces[0].LLMFailures != 1 || body.Traces[0].LLMRetries != 1 || body.Traces[0].LLMFinalFailures != 0 {
+		t.Fatalf("trace LLM failure metrics = %+v, want retrying failure count", body.Traces[0])
 	}
 	if body.Traces[0].ToolCalls != 1 || body.Traces[0].SchemaViolations != 1 ||
 		body.Traces[0].SchemaRepairs != 1 || body.Traces[0].BudgetExceeded != 1 {

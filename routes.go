@@ -196,6 +196,9 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	response.SchemaViolations = response.SchemaValidationFailed
 	llm := summarizeAdminLLMUsage(recorded)
 	response.LLMCalls = llm.Calls
+	response.LLMFailures = llm.Failures
+	response.LLMRetries = llm.Retries
+	response.LLMFinalFailures = llm.FinalFailures
 	response.InputTokens = llm.InputTokens
 	response.OutputTokens = llm.OutputTokens
 	response.CostUSD = llm.CostUSD
@@ -1046,6 +1049,9 @@ type adminStatusResponse struct {
 	SessionsCompleted        int                            `json:"sessions_completed"`
 	SessionsCancelled        int                            `json:"sessions_cancelled"`
 	LLMCalls                 int                            `json:"llm_calls"`
+	LLMFailures              int                            `json:"llm_failures"`
+	LLMRetries               int                            `json:"llm_retries"`
+	LLMFinalFailures         int                            `json:"llm_final_failures"`
 	InputTokens              int                            `json:"input_tokens"`
 	OutputTokens             int                            `json:"output_tokens"`
 	CostUSD                  float64                        `json:"cost_usd"`
@@ -1071,6 +1077,9 @@ type adminStatusResponse struct {
 
 type adminLLMUsageSummary struct {
 	Calls          int
+	Failures       int
+	Retries        int
+	FinalFailures  int
 	InputTokens    int
 	OutputTokens   int
 	CostUSD        float64
@@ -1079,7 +1088,20 @@ type adminLLMUsageSummary struct {
 }
 
 func (s *adminLLMUsageSummary) AddEvent(event events.Event) {
-	if s == nil || events.CanonicalKind(event.Kind) != events.EventLLMCallCompleted {
+	if s == nil {
+		return
+	}
+	switch events.CanonicalKind(event.Kind) {
+	case events.EventLLMCallCompleted:
+	case events.EventLLMCallFailed:
+		s.Failures++
+		if adminBoolPayload(event.Payload, "retrying") {
+			s.Retries++
+		} else {
+			s.FinalFailures++
+		}
+		return
+	default:
 		return
 	}
 	s.Calls++
@@ -1112,6 +1134,9 @@ type adminTraceSummary struct {
 	SessionID            string    `json:"session_id,omitempty"`
 	Events               int       `json:"events"`
 	LLMCalls             int       `json:"llm_calls"`
+	LLMFailures          int       `json:"llm_failures"`
+	LLMRetries           int       `json:"llm_retries"`
+	LLMFinalFailures     int       `json:"llm_final_failures"`
 	ToolCalls            int       `json:"tool_calls"`
 	ToolFailures         int       `json:"tool_failures"`
 	InputTokens          int       `json:"input_tokens"`
@@ -1336,6 +1361,9 @@ func summarizeAdminTraces(recorded []events.Event, limit int) []adminTraceSummar
 		summary.AddEvent(event)
 		summary.llmUsage.AddEvent(event)
 		summary.LLMCalls = summary.llmUsage.Calls
+		summary.LLMFailures = summary.llmUsage.Failures
+		summary.LLMRetries = summary.llmUsage.Retries
+		summary.LLMFinalFailures = summary.llmUsage.FinalFailures
 		summary.InputTokens = summary.llmUsage.InputTokens
 		summary.OutputTokens = summary.llmUsage.OutputTokens
 		summary.CostUSD = summary.llmUsage.CostUSD
