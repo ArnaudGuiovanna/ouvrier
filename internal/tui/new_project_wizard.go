@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -465,6 +464,3 @@ func RunNewProject(in io.Reader, out io.Writer, opts NewProjectWizardOptions) (*
 	}
 	return m.project, nil
 }
-
-// ensure unused dependency is referenced for go vet during tests.
-var _ = fmt.Sprintf
