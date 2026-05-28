@@ -191,6 +191,7 @@ type recordingStateStore struct {
 	events      []Event
 	nextEventID uint64
 	violations  []SchemaViolation
+	memory      map[string]map[string]MemoryRecord
 }
 
 func newRecordingStateStore() *recordingStateStore {
@@ -198,6 +199,7 @@ func newRecordingStateStore() *recordingStateStore {
 		executions:  map[string]Execution{},
 		sessions:    map[string]Session{},
 		idempotency: map[string]string{},
+		memory:      map[string]map[string]MemoryRecord{},
 	}
 }
 
@@ -282,6 +284,27 @@ func (s *recordingStateStore) SchemaViolations(ctx context.Context, execID strin
 		}
 	}
 	return violations, nil
+}
+
+func (s *recordingStateStore) SaveMemory(ctx context.Context, scope, key, value string) error {
+	if s.memory[scope] == nil {
+		s.memory[scope] = map[string]MemoryRecord{}
+	}
+	s.memory[scope][key] = MemoryRecord{Scope: scope, Key: key, Value: value}
+	return nil
+}
+
+func (s *recordingStateStore) Memory(ctx context.Context, scope, key string) (string, bool, error) {
+	record, ok := s.memory[scope][key]
+	return record.Value, ok, nil
+}
+
+func (s *recordingStateStore) ListMemory(ctx context.Context, scope string) ([]MemoryRecord, error) {
+	records := make([]MemoryRecord, 0, len(s.memory[scope]))
+	for _, record := range s.memory[scope] {
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 func TestRunnerPricingRejectsEmptyTable(t *testing.T) {

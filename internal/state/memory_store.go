@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ type MemoryStore struct {
 	nextEventID     uint64
 	violations      []SchemaViolation
 	nextViolationID uint64
+	memory          map[string]map[string]MemoryRecord
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -27,6 +29,7 @@ func NewMemoryStore() *MemoryStore {
 		executions:  make(map[string]Execution),
 		sessions:    make(map[string]runtimecore.Session),
 		idempotency: make(map[string]string),
+		memory:      make(map[string]map[string]MemoryRecord),
 	}
 }
 
@@ -222,6 +225,63 @@ func (s *MemoryStore) SchemaViolations(ctx context.Context, execID string) ([]Sc
 		}
 	}
 	return violations, nil
+}
+
+func (s *MemoryStore) SaveMemory(ctx context.Context, scope, key, value string) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	scope, key, value, err := normalizeMemory(scope, key, value)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bucket := s.memory[scope]
+	if bucket == nil {
+		bucket = make(map[string]MemoryRecord)
+		s.memory[scope] = bucket
+	}
+	bucket[key] = MemoryRecord{
+		Scope:     scope,
+		Key:       key,
+		Value:     value,
+		UpdatedAt: time.Now().UTC(),
+	}
+	return nil
+}
+
+func (s *MemoryStore) Memory(ctx context.Context, scope, key string) (string, bool, error) {
+	if err := checkContext(ctx); err != nil {
+		return "", false, err
+	}
+	scope = strings.TrimSpace(scope)
+	key = strings.TrimSpace(key)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.memory[scope][key]
+	return record.Value, ok, nil
+}
+
+func (s *MemoryStore) ListMemory(ctx context.Context, scope string) ([]MemoryRecord, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	scope = strings.TrimSpace(scope)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bucket := s.memory[scope]
+	records := make([]MemoryRecord, 0, len(bucket))
+	for _, record := range bucket {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Key < records[j].Key
+	})
+	return records, nil
 }
 
 func checkContext(ctx context.Context) error {

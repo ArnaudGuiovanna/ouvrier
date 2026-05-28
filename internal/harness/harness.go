@@ -38,6 +38,7 @@ type Harness struct {
 	fallbackModels   []string
 	providerResolver func(model string) (provider.Provider, error)
 	providerGate     *ProviderGate
+	memoryScope      string
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -88,6 +89,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		fallbackModels:   append([]string(nil), cfg.fallbackModels...),
 		providerResolver: cfg.providerResolver,
 		providerGate:     cfg.providerGate,
+		memoryScope:      cfg.memoryScope,
 	}, nil
 }
 

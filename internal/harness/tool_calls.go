@@ -111,6 +111,7 @@ func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, cal
 	toolCtx := contextWithExecution(ctx, session, h.budgetLedger)
 	if h.stateStore != nil {
 		toolCtx = tools.ContextWithIdempotencyStore(toolCtx, h.stateStore, session.ExecID)
+		toolCtx = tools.ContextWithMemoryStore(toolCtx, memoryStoreAdapter{store: h.stateStore}, h.memoryScopeFor(session))
 	}
 	toolCtx = tools.ContextWithToolRetry(toolCtx, h.providerRetries, h.retryBackoff)
 	toolCtx = tools.ContextWithToolRetryObserver(toolCtx, func(ctx context.Context, audit tools.ToolRetryAudit) error {

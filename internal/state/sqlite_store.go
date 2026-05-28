@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultSQLitePath   = ".ouvrier/state.db"
-	sqliteSchemaVersion = 2
+	sqliteSchemaVersion = 3
 )
 
 type SQLiteStore struct {
@@ -222,5 +222,12 @@ var sqliteSchemaStatements = []string{
 		session_id TEXT NOT NULL,
 		schema_name TEXT NOT NULL,
 		error TEXT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS ouvrier_memory (
+		scope TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (scope, key)
 	)`,
 }

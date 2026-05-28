@@ -71,6 +71,18 @@ type StateStore interface {
 	EventsSince(context.Context, string, uint64) ([]Event, error)
 	AddSchemaViolation(context.Context, SchemaViolation) (SchemaViolation, error)
 	SchemaViolations(context.Context, string) ([]SchemaViolation, error)
+	SaveMemory(context.Context, string, string, string) error
+	Memory(context.Context, string, string) (string, bool, error)
+	ListMemory(context.Context, string) ([]MemoryRecord, error)
+}
+
+// MemoryRecord is the public state-store representation of one persistent,
+// scoped agent-memory entry that survives across sessions.
+type MemoryRecord struct {
+	Scope     string
+	Key       string
+	Value     string
+	UpdatedAt time.Time
 }
 
 type publicStateStoreAdapter struct {
@@ -167,6 +179,35 @@ func (s publicStateStoreAdapter) SchemaViolations(ctx context.Context, execID st
 		internal[i] = internalSchemaViolation(violation)
 	}
 	return internal, nil
+}
+
+func (s publicStateStoreAdapter) SaveMemory(ctx context.Context, scope, key, value string) error {
+	return s.store.SaveMemory(ctx, scope, key, value)
+}
+
+func (s publicStateStoreAdapter) Memory(ctx context.Context, scope, key string) (string, bool, error) {
+	return s.store.Memory(ctx, scope, key)
+}
+
+func (s publicStateStoreAdapter) ListMemory(ctx context.Context, scope string) ([]internalstate.MemoryRecord, error) {
+	records, err := s.store.ListMemory(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	internal := make([]internalstate.MemoryRecord, len(records))
+	for i, record := range records {
+		internal[i] = internalMemoryRecord(record)
+	}
+	return internal, nil
+}
+
+func internalMemoryRecord(record MemoryRecord) internalstate.MemoryRecord {
+	return internalstate.MemoryRecord{
+		Scope:     record.Scope,
+		Key:       record.Key,
+		Value:     record.Value,
+		UpdatedAt: record.UpdatedAt,
+	}
 }
 
 func publicExecution(execution internalstate.Execution) Execution {

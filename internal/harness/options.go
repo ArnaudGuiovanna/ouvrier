@@ -45,6 +45,7 @@ type config struct {
 	fallbackModels   []string
 	providerResolver func(model string) (provider.Provider, error)
 	providerGate     *ProviderGate
+	memoryScope      string
 }
 
 func defaultConfig() config {
@@ -192,6 +193,16 @@ func WithStateStore(store state.Store) Option {
 			return errors.New("state store is required")
 		}
 		cfg.stateStore = store
+		return nil
+	}
+}
+
+// WithMemoryScope sets the stable scope used for persistent agent memory. The
+// scope identifies the worker plus logical agent so concurrent agents stay
+// isolated while a single logical agent's memory persists across sessions.
+func WithMemoryScope(scope string) Option {
+	return func(cfg *config) error {
+		cfg.memoryScope = strings.TrimSpace(scope)
 		return nil
 	}
 }

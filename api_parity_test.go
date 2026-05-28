@@ -104,6 +104,15 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.Validate
 	_ = ovr.WithPermissionPolicy
 	_ = ovr.WithStateStore
+	_ = ovr.MemoryRecord{}
+	// StateStore now carries scoped persistent agent memory; reference the
+	// method set so signature drift on the public interface breaks the build.
+	var memStore ovr.StateStore
+	if memStore != nil {
+		_ = memStore.SaveMemory
+		_ = memStore.Memory
+		_ = memStore.ListMemory
+	}
 	_ = ovr.WithHooks
 	_ = ovr.WithSandbox
 	_ = ovr.WithSchemaRepairAttempts

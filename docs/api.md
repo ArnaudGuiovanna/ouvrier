@@ -158,6 +158,31 @@ ovr.Validate(nodes ...ovr.Node) error              // validation without serving
 | `WithPricing(t PricingTable)`           | Cost accounting from a per-model pricing table.    |
 | `WithProviderBudget(provider string, maxInFlight int)` | Bound concurrent in-flight LLM calls per provider. |
 
+### Persistent memory
+
+The durable `StateStore` carries scoped agent memory that survives across
+sessions. A scope identifies the worker plus logical agent so concurrent agents
+stay isolated while one logical agent's memory persists.
+
+```go
+type MemoryRecord struct {
+    Scope     string
+    Key       string
+    Value     string
+    UpdatedAt time.Time
+}
+
+// StateStore memory methods (in addition to execution/session/event methods):
+SaveMemory(ctx context.Context, scope, key, value string) error
+Memory(ctx context.Context, scope, key string) (string, bool, error)
+ListMemory(ctx context.Context, scope string) ([]MemoryRecord, error)
+```
+
+Values are bounded in size and redacted before persistence, so secrets and skill
+bodies never reach durable storage. Writes are last-write-wins per `(scope, key)`;
+entries are not auto-expired — prune by overwriting keys or scoping them with a
+generation marker.
+
 ## Pricing
 
 ```go
