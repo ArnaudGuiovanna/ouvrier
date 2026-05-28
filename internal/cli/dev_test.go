@@ -283,6 +283,108 @@ func TestWatchProjectDetectsGoFileChange(t *testing.T) {
 	}
 }
 
+func TestParseDevFlagsAcceptsNoDotenv(t *testing.T) {
+	cfg, err := parseDevFlags([]string{"--no-dotenv"})
+	if err != nil {
+		t.Fatalf("parseDevFlags() error = %v", err)
+	}
+	if !cfg.NoDotenv {
+		t.Fatalf("parseDevFlags() NoDotenv = false, want true")
+	}
+}
+
+func TestRunDevLoadsDotenvIntoChildEnv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
+		t.Fatalf("write pip.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("OUVRIER_DEV_DOTENV_ONLY=fromfile\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	var capturedEnv []string
+	stub := func(_ context.Context, _ string, env []string, _, _ io.Writer) error {
+		capturedEnv = env
+		return nil
+	}
+	var out, errOut bytes.Buffer
+	if err := runDev(context.Background(), DevConfig{Dir: dir, NoReload: true}, &out, &errOut, devRunner(stub)); err != nil {
+		t.Fatalf("runDev() error = %v", err)
+	}
+	if !envHas(capturedEnv, "OUVRIER_DEV_DOTENV_ONLY=fromfile") {
+		t.Fatalf("child env missing .env value; got %v", capturedEnv)
+	}
+}
+
+func TestRunDevProcessEnvWinsOverDotenv(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
+		t.Fatalf("write pip.yaml: %v", err)
+	}
+	const key = "OUVRIER_DEV_PRECEDENCE_TEST"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(key+"=fromfile\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	t.Setenv(key, "fromprocess")
+
+	var capturedEnv []string
+	stub := func(_ context.Context, _ string, env []string, _, _ io.Writer) error {
+		capturedEnv = env
+		return nil
+	}
+	var out, errOut bytes.Buffer
+	if err := runDev(context.Background(), DevConfig{Dir: dir, NoReload: true}, &out, &errOut, devRunner(stub)); err != nil {
+		t.Fatalf("runDev() error = %v", err)
+	}
+	if !envHas(capturedEnv, key+"=fromprocess") {
+		t.Fatalf("process env should win; got %v", capturedEnv)
+	}
+	if envHas(capturedEnv, key+"=fromfile") {
+		t.Fatalf(".env overrode process env; got %v", capturedEnv)
+	}
+}
+
+func TestRunDevNoDotenvSkipsLoading(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
+		t.Fatalf("write pip.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("OUVRIER_DEV_SKIPPED=fromfile\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	var capturedEnv []string
+	stub := func(_ context.Context, _ string, env []string, _, _ io.Writer) error {
+		capturedEnv = env
+		return nil
+	}
+	var out, errOut bytes.Buffer
+	if err := runDev(context.Background(), DevConfig{Dir: dir, NoReload: true, NoDotenv: true}, &out, &errOut, devRunner(stub)); err != nil {
+		t.Fatalf("runDev() error = %v", err)
+	}
+	if envHas(capturedEnv, "OUVRIER_DEV_SKIPPED=fromfile") {
+		t.Fatalf("--no-dotenv should skip .env loading; got %v", capturedEnv)
+	}
+}
+
+func TestRunDevDotenvValuesNotPrinted(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
+		t.Fatalf("write pip.yaml: %v", err)
+	}
+	const secret = "supersecretvalue12345"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("MY_SECRET="+secret+"\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	stub := func(_ context.Context, _ string, _ []string, _, _ io.Writer) error { return nil }
+	var out, errOut bytes.Buffer
+	if err := runDev(context.Background(), DevConfig{Dir: dir, NoReload: true}, &out, &errOut, devRunner(stub)); err != nil {
+		t.Fatalf("runDev() error = %v", err)
+	}
+	if strings.Contains(out.String(), secret) || strings.Contains(errOut.String(), secret) {
+		t.Fatalf("dev printed a .env secret value:\nstdout=%s\nstderr=%s", out.String(), errOut.String())
+	}
+}
+
 func waitForStart(t *testing.T, starts <-chan struct{}) {
 	t.Helper()
 	select {

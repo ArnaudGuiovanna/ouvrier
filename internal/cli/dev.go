@@ -31,6 +31,7 @@ type DevConfig struct {
 	Dir      string
 	Addr     string
 	NoReload bool
+	NoDotenv bool
 }
 
 // devRunner abstracts the `go run .` invocation so tests can stub it out.
@@ -66,6 +67,7 @@ func parseDevFlags(args []string) (DevConfig, error) {
 	dir := flags.String("dir", ".", "project directory")
 	addr := flags.String("addr", "", "override the worker listen address via PIP_ADDR")
 	noReload := flags.Bool("no-reload", false, "disable hot reload; run `go run .` once")
+	noDotenv := flags.Bool("no-dotenv", false, "do not auto-load a local .env into the worker environment")
 	if err := flags.Parse(args); err != nil {
 		return DevConfig{}, fmt.Errorf("%w: %w", ErrUsage, err)
 	}
@@ -76,6 +78,7 @@ func parseDevFlags(args []string) (DevConfig, error) {
 		Dir:      *dir,
 		Addr:     strings.TrimSpace(*addr),
 		NoReload: *noReload,
+		NoDotenv: *noDotenv,
 	}, nil
 }
 
@@ -97,7 +100,7 @@ func runDev(ctx context.Context, cfg DevConfig, out, errOut io.Writer, runner de
 		return fmt.Errorf("%w: stat pip.yaml: %w", ErrDev, statErr)
 	}
 
-	env := devEnv(cfg)
+	env := devEnv(cfg, dir, errOut)
 
 	// Wire SIGINT/SIGTERM into a cancellable context so the runner can stop
 	// the child process gracefully. Cancellation flows down to each child via
@@ -328,8 +331,22 @@ func devWatchedFile(path string) bool {
 	return false
 }
 
-func devEnv(cfg DevConfig) []string {
+// devEnv builds the child process environment for `ouvrier dev`. It starts
+// from the real process environment, optionally merges a local .env (dev-only;
+// the process environment always wins), and finally applies the --addr
+// override via PIP_ADDR. .env values are never logged.
+func devEnv(cfg DevConfig, dir string, errOut io.Writer) []string {
 	env := os.Environ()
+	if !cfg.NoDotenv {
+		dotenv, err := loadDotenvFile(filepath.Join(dir, ".env"))
+		if err != nil {
+			// Report the failure but never echo file contents or values.
+			fmt.Fprintf(errOut, "ouvrier dev: ignoring unreadable .env: %v\n", err)
+		} else if len(dotenv) > 0 {
+			env = mergeDotenvEnv(env, dotenv)
+			fmt.Fprintf(errOut, "ouvrier dev: loaded %d variable(s) from .env\n", len(dotenv))
+		}
+	}
 	if cfg.Addr == "" {
 		return env
 	}

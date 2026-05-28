@@ -172,6 +172,7 @@ Options:
       --addr string   Address override exposed via PIP_ADDR (default ":8080")
       --dir string    Project directory containing main.go and pip.yaml (default ".")
       --no-reload     Disable hot reload; run "go run ." once
+      --no-dotenv     Do not auto-load a local .env into the worker environment
   -h, --help          Show this help message
 
 The dev runner shells out to "go run ." in --dir, streams stdout/stderr, and
@@ -180,6 +181,11 @@ tools/, skills/, and pip.yaml (ignoring .ouvrier/ and build artifacts) by
 polling mod-times; on a change it gracefully stops the worker and restarts it.
 A build or start failure is logged and the watcher keeps running. Pass
 --no-reload to run the worker once without watching.
+
+For convenience, dev auto-loads a local <dir>/.env into the worker environment.
+The real process environment always wins, so explicitly-set variables are never
+overridden, and .env values are never printed. This is dev-only; deployed
+binaries are unaffected. Pass --no-dotenv to disable.
 `
 
 const deployHelp = `Ship a project to a remote host or build an image for it.

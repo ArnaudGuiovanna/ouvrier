@@ -391,6 +391,12 @@ Admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
 stream-only, and mixed runtimes. Set `PIP_ADMIN_TOKEN` outside local
 development when exposing a worker.
 
+During local development, `ouvrier dev` auto-loads a `.env` file from the
+project directory into the worker's environment. The real process environment
+always takes precedence, so any variable you set explicitly is never
+overridden, and `.env` values are never printed. This is dev-only and does not
+affect deployed/prod binaries; pass `--no-dotenv` to opt out.
+
 ## Observability
 
 Ouvrier records structured events for pipeline, pipe, session, LLM, tool,
