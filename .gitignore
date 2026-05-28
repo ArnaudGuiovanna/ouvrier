@@ -14,3 +14,4 @@ coverage.txt
 # Local source material that is not published in the remote repository.
 specs.md
 ouvrier-doc-v0.1.pdf
+AGENTS.md
