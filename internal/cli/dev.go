@@ -12,15 +12,25 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // ErrDev is returned when `ouvrier dev` cannot proceed.
 var ErrDev = errors.New("dev error")
 
+// devPollInterval is how often the file watcher samples mod-times.
+const devPollInterval = 300 * time.Millisecond
+
+// devDebounce is how long the watcher waits for the filesystem to settle
+// after the first detected change before triggering a reload. Editors often
+// touch several files in quick succession; debouncing collapses them.
+const devDebounce = 200 * time.Millisecond
+
 // DevConfig captures the resolved options for `ouvrier dev`.
 type DevConfig struct {
-	Dir  string
-	Addr string
+	Dir      string
+	Addr     string
+	NoReload bool
 }
 
 // devRunner abstracts the `go run .` invocation so tests can stub it out.
@@ -55,6 +65,7 @@ func parseDevFlags(args []string) (DevConfig, error) {
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", ".", "project directory")
 	addr := flags.String("addr", "", "override the worker listen address via PIP_ADDR")
+	noReload := flags.Bool("no-reload", false, "disable hot reload; run `go run .` once")
 	if err := flags.Parse(args); err != nil {
 		return DevConfig{}, fmt.Errorf("%w: %w", ErrUsage, err)
 	}
@@ -62,8 +73,9 @@ func parseDevFlags(args []string) (DevConfig, error) {
 		return DevConfig{}, fmt.Errorf("%w: dev does not accept positional arguments", ErrUsage)
 	}
 	return DevConfig{
-		Dir:  *dir,
-		Addr: strings.TrimSpace(*addr),
+		Dir:      *dir,
+		Addr:     strings.TrimSpace(*addr),
+		NoReload: *noReload,
 	}, nil
 }
 
@@ -88,8 +100,8 @@ func runDev(ctx context.Context, cfg DevConfig, out, errOut io.Writer, runner de
 	env := devEnv(cfg)
 
 	// Wire SIGINT/SIGTERM into a cancellable context so the runner can stop
-	// the child process gracefully. The signal package writes to the channel
-	// before we cancel; runners interpret cancellation via the supplied ctx.
+	// the child process gracefully. Cancellation flows down to each child via
+	// the supplied ctx.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -97,37 +109,223 @@ func runDev(ctx context.Context, cfg DevConfig, out, errOut io.Writer, runner de
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	done := make(chan struct{})
 	go func() {
 		select {
 		case <-sigCh:
 			fmt.Fprintln(errOut, "\nouvrier dev: shutting down worker")
 			cancel()
-		case <-done:
 		case <-runCtx.Done():
 		}
 	}()
 
-	fmt.Fprintf(out, "ouvrier dev: running `go run .` in %s\n", dir)
+	if cfg.NoReload {
+		fmt.Fprintf(out, "ouvrier dev: running `go run .` in %s\n", dir)
+		if cfg.Addr != "" {
+			fmt.Fprintf(out, "ouvrier dev: PIP_ADDR=%s\n", cfg.Addr)
+		}
+		fmt.Fprintln(out, "ouvrier dev: hot reload disabled (--no-reload); restart this command after edits to main.go, tools/, or skills/.")
+		return finishDevRun(runner(runCtx, dir, env, out, errOut), runCtx)
+	}
+
+	fmt.Fprintf(out, "ouvrier dev: watching %s for changes (hot reload enabled)\n", dir)
 	if cfg.Addr != "" {
 		fmt.Fprintf(out, "ouvrier dev: PIP_ADDR=%s\n", cfg.Addr)
 	}
-	fmt.Fprintln(out, "ouvrier dev: hot reload is NOT implemented in v0.1; restart this command after edits to main.go, tools/, or skills/.")
 
-	runErr := runner(runCtx, dir, env, out, errOut)
-	close(done)
+	// Start the file watcher; it emits one signal per debounced change burst.
+	triggers := watchProject(runCtx, dir, devPollInterval, devDebounce)
+	return runDevLoop(runCtx, dir, env, out, errOut, runner, triggers)
+}
 
+// runDevLoop runs the worker, restarting it whenever a trigger arrives on the
+// triggers channel. It returns nil when runCtx is cancelled (a clean shutdown)
+// and only returns an error for conditions that should abort the whole loop.
+// Build/start failures are logged and the loop keeps watching.
+func runDevLoop(runCtx context.Context, dir string, env []string, out, errOut io.Writer, runner devRunner, triggers <-chan struct{}) error {
+	for {
+		// Start the child in its own cancellable context so a trigger can
+		// stop just this run without tearing down the watch loop.
+		childCtx, stop := context.WithCancel(runCtx)
+		runResult := make(chan error, 1)
+		go func() {
+			runResult <- runner(childCtx, dir, env, out, errOut)
+		}()
+
+		select {
+		case <-runCtx.Done():
+			stop()
+			<-runResult
+			return nil
+
+		case err := <-runResult:
+			// The child exited on its own (crash, build failure, or clean
+			// exit). Keep watching so the next save can recover.
+			stop()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(errOut, "ouvrier dev: worker exited with error: %v\n", err)
+			} else {
+				fmt.Fprintln(out, "ouvrier dev: worker exited; waiting for changes")
+			}
+			// Block until a change (or shutdown) before restarting so we do
+			// not hot-loop on a process that fails immediately.
+			select {
+			case <-runCtx.Done():
+				return nil
+			case _, ok := <-triggers:
+				if !ok {
+					return nil
+				}
+				fmt.Fprintln(out, "ouvrier dev: change detected, reloading...")
+			}
+
+		case _, ok := <-triggers:
+			if !ok {
+				stop()
+				<-runResult
+				return nil
+			}
+			fmt.Fprintln(out, "ouvrier dev: change detected, reloading...")
+			stop()
+			<-runResult
+		}
+	}
+}
+
+// finishDevRun translates a single runner result into a dev command result.
+func finishDevRun(runErr error, runCtx context.Context) error {
 	if runErr != nil {
-		// If the user asked us to shut down, that is success.
 		if errors.Is(runErr, context.Canceled) || errors.Is(runCtx.Err(), context.Canceled) {
 			return nil
 		}
-		// An ExitError from the child surfaces with its exit code preserved
-		// in stderr; bubble it up as a dev error so the parent sees a
-		// non-zero exit code while keeping the message specific.
 		return fmt.Errorf("%w: go run failed: %w", ErrDev, runErr)
 	}
 	return nil
+}
+
+// watchProject polls the project sources under dir and emits a value on the
+// returned channel for each debounced burst of changes. It stops when ctx is
+// cancelled (closing the channel). It uses os.Stat mod-times only, so it needs
+// no third-party file-notification dependency.
+func watchProject(ctx context.Context, dir string, interval, debounce time.Duration) <-chan struct{} {
+	out := make(chan struct{})
+	go func() {
+		defer close(out)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		prev := snapshotProject(dir)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			cur := snapshotProject(dir)
+			if snapshotsEqual(prev, cur) {
+				continue
+			}
+
+			// Debounce: keep sampling until the tree settles so a multi-file
+			// save collapses into a single reload.
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(debounce):
+				}
+				next := snapshotProject(dir)
+				if snapshotsEqual(cur, next) {
+					cur = next
+					break
+				}
+				cur = next
+			}
+
+			prev = cur
+			select {
+			case <-ctx.Done():
+				return
+			case out <- struct{}{}:
+			}
+		}
+	}()
+	return out
+}
+
+// snapshotProject records the mod-times of the watched source files under dir.
+func snapshotProject(dir string) map[string]time.Time {
+	snap := make(map[string]time.Time)
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if devShouldSkipDir(dir, path, d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !devWatchedFile(path) {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		snap[path] = info.ModTime()
+		return nil
+	})
+	return snap
+}
+
+func snapshotsEqual(a, b map[string]time.Time) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || !va.Equal(vb) {
+			return false
+		}
+	}
+	return true
+}
+
+// devShouldSkipDir reports whether a directory should be excluded from the
+// watch: dotfiles/dirs (including .ouvrier and .git), vendor, and node_modules.
+func devShouldSkipDir(root, path, name string) bool {
+	if path == root {
+		return false
+	}
+	if name == "vendor" || name == "node_modules" {
+		return true
+	}
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	return false
+}
+
+// devWatchedFile reports whether a file path is a project source we watch:
+// any *.go file, files under tools/ or skills/, and pip.yaml.
+func devWatchedFile(path string) bool {
+	base := filepath.Base(path)
+	if base == "pip.yaml" {
+		return true
+	}
+	if strings.HasSuffix(base, ".go") {
+		return true
+	}
+	// Files under tools/ or skills/ (e.g. SKILL.md, scripts) are sources too.
+	// Inspect only the directory components, not the file name itself.
+	parts := strings.Split(filepath.ToSlash(filepath.Dir(path)), "/")
+	for _, p := range parts {
+		if p == "tools" || p == "skills" {
+			return true
+		}
+	}
+	return false
 }
 
 func devEnv(cfg DevConfig) []string {

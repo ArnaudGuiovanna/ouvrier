@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseDevFlagsAcceptsAddrAndDir(t *testing.T) {
@@ -55,7 +56,7 @@ func TestRunDevInvokesRunnerWithDirAndEnv(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runDev(context.Background(), DevConfig{Dir: dir, Addr: ":9090"}, &out, &errOut, devRunner(stub))
+	err := runDev(context.Background(), DevConfig{Dir: dir, Addr: ":9090", NoReload: true}, &out, &errOut, devRunner(stub))
 	if err != nil {
 		t.Fatalf("runDev() error = %v\nstderr=%s", err, errOut.String())
 	}
@@ -66,8 +67,8 @@ func TestRunDevInvokesRunnerWithDirAndEnv(t *testing.T) {
 	if !envHas(capturedEnv, "PIP_ADDR=:9090") {
 		t.Fatalf("dev runner env missing PIP_ADDR; got %v", filterDevEnv(capturedEnv))
 	}
-	if !strings.Contains(out.String(), "hot reload is NOT implemented") {
-		t.Fatalf("dev did not log hot-reload limitation; got:\n%s", out.String())
+	if !strings.Contains(out.String(), "hot reload disabled") {
+		t.Fatalf("dev did not log --no-reload notice; got:\n%s", out.String())
 	}
 }
 
@@ -80,7 +81,7 @@ func TestRunDevReturnsErrDevOnFailure(t *testing.T) {
 		return errors.New("boom")
 	}
 	var out, errOut bytes.Buffer
-	err := runDev(context.Background(), DevConfig{Dir: dir}, &out, &errOut, devRunner(stub))
+	err := runDev(context.Background(), DevConfig{Dir: dir, NoReload: true}, &out, &errOut, devRunner(stub))
 	if !errors.Is(err, ErrDev) {
 		t.Fatalf("runDev() error = %v, want ErrDev", err)
 	}
@@ -99,7 +100,7 @@ func TestRunDevTreatsContextCancelAsClean(t *testing.T) {
 	cancel() // Cancel immediately so stub returns context.Canceled.
 
 	var out, errOut bytes.Buffer
-	if err := runDev(ctx, DevConfig{Dir: dir}, &out, &errOut, devRunner(stub)); err != nil {
+	if err := runDev(ctx, DevConfig{Dir: dir, NoReload: true}, &out, &errOut, devRunner(stub)); err != nil {
 		t.Fatalf("runDev() error = %v, want nil after context cancellation", err)
 	}
 }
@@ -115,6 +116,179 @@ func TestRunDevHelpPrintsUsage(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Hot reload") {
 		t.Fatalf("dev help missing hot reload limitation; got:\n%s", out.String())
+	}
+}
+
+func TestParseDevFlagsAcceptsNoReload(t *testing.T) {
+	cfg, err := parseDevFlags([]string{"--no-reload"})
+	if err != nil {
+		t.Fatalf("parseDevFlags() error = %v", err)
+	}
+	if !cfg.NoReload {
+		t.Fatalf("parseDevFlags() NoReload = false, want true")
+	}
+}
+
+// TestRunDevLoopRestartsOnTrigger drives the watch state machine with a
+// stubbed runner: the worker blocks until its per-run context is cancelled.
+// A trigger must stop the current run and start a fresh one.
+func TestRunDevLoopRestartsOnTrigger(t *testing.T) {
+	starts := make(chan struct{}, 8)
+	stub := func(ctx context.Context, _ string, _ []string, _, _ io.Writer) error {
+		starts <- struct{}{}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	triggers := make(chan struct{})
+	runCtx, cancel := context.WithCancel(context.Background())
+
+	var out, errOut bytes.Buffer
+	loopDone := make(chan error, 1)
+	go func() {
+		loopDone <- runDevLoop(runCtx, "/proj", nil, &out, &errOut, devRunner(stub), triggers)
+	}()
+
+	// First start.
+	waitForStart(t, starts)
+
+	// A trigger should restart the worker.
+	triggers <- struct{}{}
+	waitForStart(t, starts)
+
+	// Second trigger restarts again.
+	triggers <- struct{}{}
+	waitForStart(t, starts)
+
+	cancel()
+	select {
+	case err := <-loopDone:
+		if err != nil {
+			t.Fatalf("runDevLoop() error = %v, want nil after cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDevLoop did not return after cancel")
+	}
+
+	if !strings.Contains(out.String(), "reloading") {
+		t.Fatalf("expected reloading output; got:\n%s", out.String())
+	}
+}
+
+// TestRunDevLoopKeepsWatchingAfterFailure ensures a build/start failure does
+// not exit the loop: the worker exits with an error, the loop logs it and
+// waits for the next change to retry.
+func TestRunDevLoopKeepsWatchingAfterFailure(t *testing.T) {
+	starts := make(chan struct{}, 8)
+	var calls int
+	stub := func(ctx context.Context, _ string, _ []string, _, _ io.Writer) error {
+		calls++
+		starts <- struct{}{}
+		if calls == 1 {
+			return errors.New("build failed")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	triggers := make(chan struct{})
+	runCtx, cancel := context.WithCancel(context.Background())
+
+	var out, errOut bytes.Buffer
+	loopDone := make(chan error, 1)
+	go func() {
+		loopDone <- runDevLoop(runCtx, "/proj", nil, &out, &errOut, devRunner(stub), triggers)
+	}()
+
+	// First start fails immediately; loop should not exit.
+	waitForStart(t, starts)
+
+	// A change should retry the worker.
+	triggers <- struct{}{}
+	waitForStart(t, starts)
+
+	cancel()
+	select {
+	case err := <-loopDone:
+		if err != nil {
+			t.Fatalf("runDevLoop() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runDevLoop did not return after cancel")
+	}
+
+	if !strings.Contains(errOut.String(), "build failed") {
+		t.Fatalf("expected failure logged to stderr; got:\n%s", errOut.String())
+	}
+}
+
+// TestRunDevNoReloadDoesNotRestart confirms --no-reload runs the worker exactly
+// once even if the runner returns (no watch loop, no restart).
+func TestRunDevNoReloadDoesNotRestart(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
+		t.Fatalf("write pip.yaml: %v", err)
+	}
+	var calls int
+	stub := func(_ context.Context, _ string, _ []string, _, _ io.Writer) error {
+		calls++
+		return nil
+	}
+	var out, errOut bytes.Buffer
+	if err := runDev(context.Background(), DevConfig{Dir: dir, NoReload: true}, &out, &errOut, devRunner(stub)); err != nil {
+		t.Fatalf("runDev() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runner called %d times, want 1 (no restart with --no-reload)", calls)
+	}
+}
+
+// TestWatchProjectDetectsGoFileChange verifies the polling watcher emits on a
+// real file change and ignores files under .ouvrier/.
+func TestWatchProjectDetectsGoFileChange(t *testing.T) {
+	dir := t.TempDir()
+	mainGo := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainGo, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	// Build artifacts under .ouvrier/ must be ignored.
+	ouvrierDir := filepath.Join(dir, ".ouvrier")
+	if err := os.MkdirAll(ouvrierDir, 0o755); err != nil {
+		t.Fatalf("mkdir .ouvrier: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	triggers := watchProject(ctx, dir, 20*time.Millisecond, 20*time.Millisecond)
+
+	// Touching a file under .ouvrier/ should NOT trigger.
+	time.Sleep(40 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(ouvrierDir, "state.db"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write state.db: %v", err)
+	}
+	select {
+	case <-triggers:
+		t.Fatal("watchProject triggered on ignored .ouvrier/ change")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Modifying main.go should trigger.
+	if err := os.WriteFile(mainGo, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("rewrite main.go: %v", err)
+	}
+	select {
+	case <-triggers:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchProject did not trigger on main.go change")
+	}
+}
+
+func waitForStart(t *testing.T, starts <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-starts:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not start in time")
 	}
 }
 
