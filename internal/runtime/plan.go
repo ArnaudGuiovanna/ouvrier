@@ -42,6 +42,7 @@ type Step struct {
 	Kind            StepKind
 	Goal            string
 	Model           string
+	Fallback        []string
 	Tools           []Tool
 	Bash            []BashTool
 	Skills          []Skill

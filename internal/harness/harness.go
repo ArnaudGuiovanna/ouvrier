@@ -16,25 +16,28 @@ import (
 )
 
 type Harness struct {
-	provider        provider.Provider
-	model           string
-	systemPrompt    string
-	budget          runtimecore.Budget
-	budgetLedger    *BudgetLedger
-	parentSession   *runtimecore.Session
-	toolExecutor    *tools.Executor
-	tools           []provider.ToolSpec
-	stateStore      state.Store
-	eventStream     *events.EventStream
-	hookBus         *events.HookBus
-	resultSchema    *runtimecore.ResultSchema
-	schemaRepairs   int
-	providerRetries int
-	retryBackoff    time.Duration
-	promptCache     bool
-	sequentialTools bool
-	pricing         provider.PricingTable
-	streamDeltas    bool
+	provider         provider.Provider
+	model            string
+	systemPrompt     string
+	budget           runtimecore.Budget
+	budgetLedger     *BudgetLedger
+	parentSession    *runtimecore.Session
+	toolExecutor     *tools.Executor
+	tools            []provider.ToolSpec
+	stateStore       state.Store
+	eventStream      *events.EventStream
+	hookBus          *events.HookBus
+	resultSchema     *runtimecore.ResultSchema
+	schemaRepairs    int
+	providerRetries  int
+	retryBackoff     time.Duration
+	promptCache      bool
+	sequentialTools  bool
+	pricing          provider.PricingTable
+	streamDeltas     bool
+	fallbackModels   []string
+	providerResolver func(model string) (provider.Provider, error)
+	providerGate     *ProviderGate
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -63,25 +66,28 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		ledger = NewBudgetLedger(cfg.budget)
 	}
 	return &Harness{
-		provider:        p,
-		model:           cfg.model,
-		systemPrompt:    cfg.systemPrompt,
-		budget:          cfg.budget,
-		budgetLedger:    ledger,
-		parentSession:   cfg.parentSession,
-		toolExecutor:    cfg.toolExecutor,
-		tools:           append([]provider.ToolSpec(nil), cfg.tools...),
-		stateStore:      cfg.stateStore,
-		eventStream:     stream,
-		hookBus:         cfg.hookBus,
-		resultSchema:    cfg.resultSchema,
-		schemaRepairs:   cfg.schemaRepairs,
-		providerRetries: cfg.providerRetries,
-		retryBackoff:    cfg.retryBackoff,
-		promptCache:     cfg.promptCache,
-		sequentialTools: cfg.sequentialTools,
-		pricing:         cfg.pricing,
-		streamDeltas:    cfg.streamDeltas,
+		provider:         p,
+		model:            cfg.model,
+		systemPrompt:     cfg.systemPrompt,
+		budget:           cfg.budget,
+		budgetLedger:     ledger,
+		parentSession:    cfg.parentSession,
+		toolExecutor:     cfg.toolExecutor,
+		tools:            append([]provider.ToolSpec(nil), cfg.tools...),
+		stateStore:       cfg.stateStore,
+		eventStream:      stream,
+		hookBus:          cfg.hookBus,
+		resultSchema:     cfg.resultSchema,
+		schemaRepairs:    cfg.schemaRepairs,
+		providerRetries:  cfg.providerRetries,
+		retryBackoff:     cfg.retryBackoff,
+		promptCache:      cfg.promptCache,
+		sequentialTools:  cfg.sequentialTools,
+		pricing:          cfg.pricing,
+		streamDeltas:     cfg.streamDeltas,
+		fallbackModels:   append([]string(nil), cfg.fallbackModels...),
+		providerResolver: cfg.providerResolver,
+		providerGate:     cfg.providerGate,
 	}, nil
 }
 
@@ -133,8 +139,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			out.Status = StatusFailed
 			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
-		resp, err := h.completeWithRetry(runCtx, session, out.Iterations, provider.Request{
-			Model:    h.model,
+		resp, err := h.completeWithFallback(runCtx, session, out.Iterations, provider.Request{
 			System:   h.requestSystemPrompt(),
 			Messages: append([]provider.Message(nil), messages...),
 			Tools:    append([]provider.ToolSpec(nil), h.tools...),
@@ -213,19 +218,75 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 	})
 }
 
-func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Session, iteration int, req provider.Request, retryAllowed bool) (provider.Response, error) {
-	resp, err := h.complete(ctx, session, req)
+// completeWithFallback tries the primary model and then each configured
+// fallback model in order. A model is abandoned for the next candidate only
+// when its call fails with a classified provider failure that fallback should
+// react to (transient, rate-limit, or auth). Permanent and validation failures
+// fail fast without falling through. Each candidate goes through the full
+// provider retry loop before a fallback decision is made.
+func (h *Harness) completeWithFallback(ctx context.Context, session runtimecore.Session, iteration int, req provider.Request, retryAllowed bool) (provider.Response, error) {
+	models := append([]string{h.model}, h.fallbackModels...)
+	var lastResp provider.Response
+	var lastErr error
+	for i, model := range models {
+		p, resolveErr := h.providerForModel(model)
+		if resolveErr != nil {
+			lastResp, lastErr = provider.Response{}, resolveErr
+			break
+		}
+		attempt := req
+		attempt.Model = model
+		resp, err := h.completeWithRetry(ctx, session, iteration, p, attempt, retryAllowed)
+		if err == nil {
+			return resp, nil
+		}
+		lastResp, lastErr = resp, err
+		if i == len(models)-1 || !shouldFallback(err) {
+			break
+		}
+		if emitErr := h.emitModelFallback(ctx, session, iteration, model, models[i+1], err); emitErr != nil {
+			return provider.Response{}, errors.Join(err, emitErr)
+		}
+	}
+	return lastResp, lastErr
+}
+
+func (h *Harness) providerForModel(model string) (provider.Provider, error) {
+	if h.providerResolver != nil {
+		return h.providerResolver(model)
+	}
+	return h.provider, nil
+}
+
+// shouldFallback reports whether a classified provider failure should trigger a
+// fallback to the next model. Transient, rate-limit, and auth failures fall
+// through; permanent and validation failures fail fast.
+func shouldFallback(err error) bool {
+	var classified provider.ClassifiedError
+	if !errors.As(err, &classified) {
+		return false
+	}
+	switch classified.Kind {
+	case provider.ErrorTransient, provider.ErrorRateLimit, provider.ErrorAuth:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Session, iteration int, p provider.Provider, req provider.Request, retryAllowed bool) (provider.Response, error) {
+	resp, err := h.complete(ctx, session, p, req)
 	for attempt := 0; err != nil && retryAllowed && provider.IsTransientError(err) && attempt < h.providerRetries; attempt++ {
-		if emitErr := h.emitProviderFailure(ctx, session, iteration, attempt+1, req.Model, err, true); emitErr != nil {
+		if emitErr := h.emitProviderFailure(ctx, session, iteration, attempt+1, p, req.Model, err, true); emitErr != nil {
 			return provider.Response{}, errors.Join(err, emitErr)
 		}
 		if waitErr := waitRetryBackoff(ctx, h.retryBackoff, attempt); waitErr != nil {
 			return provider.Response{}, waitErr
 		}
-		resp, err = h.complete(ctx, session, req)
+		resp, err = h.complete(ctx, session, p, req)
 	}
 	if err != nil {
-		if emitErr := h.emitProviderFailure(ctx, session, iteration, providerAttemptNumber(err, retryAllowed, h.providerRetries), req.Model, err, false); emitErr != nil {
+		if emitErr := h.emitProviderFailure(ctx, session, iteration, providerAttemptNumber(err, retryAllowed, h.providerRetries), p, req.Model, err, false); emitErr != nil {
 			return provider.Response{}, errors.Join(err, emitErr)
 		}
 		return resp, err
@@ -240,9 +301,14 @@ func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Ses
 // appends to the in-memory event stream, so a slow SSE client draining the
 // stream can never block or deadlock the harness. Providers without streaming
 // support fall back to Complete.
-func (h *Harness) complete(ctx context.Context, session runtimecore.Session, req provider.Request) (provider.Response, error) {
+func (h *Harness) complete(ctx context.Context, session runtimecore.Session, p provider.Provider, req provider.Request) (provider.Response, error) {
+	release, err := h.acquireProviderSlot(ctx, p)
+	if err != nil {
+		return provider.Response{}, err
+	}
+	defer release()
 	if h.streamDeltas {
-		if streamer, ok := h.provider.(provider.StreamingProvider); ok {
+		if streamer, ok := p.(provider.StreamingProvider); ok {
 			index := 0
 			return streamer.CompleteStream(ctx, req, func(delta provider.Delta) {
 				if delta.Text == "" {
@@ -256,10 +322,19 @@ func (h *Harness) complete(ctx context.Context, session runtimecore.Session, req
 			})
 		}
 	}
-	return h.provider.Complete(ctx, req)
+	return p.Complete(ctx, req)
 }
 
-func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.Session, iteration, attempt int, model string, err error, retrying bool) error {
+// acquireProviderSlot blocks on the per-provider concurrency gate, if any, so
+// one provider's saturated rate budget cannot stall calls to other providers.
+func (h *Harness) acquireProviderSlot(ctx context.Context, p provider.Provider) (func(), error) {
+	if h.providerGate == nil || p == nil {
+		return func() {}, nil
+	}
+	return h.providerGate.Acquire(ctx, p.Name())
+}
+
+func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.Session, iteration, attempt int, p provider.Provider, model string, err error, retrying bool) error {
 	payload := map[string]any{
 		"iteration": iteration,
 		"attempt":   attempt,
@@ -268,8 +343,8 @@ func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.S
 		"transient": provider.IsTransientError(err),
 		"retrying":  retrying,
 	}
-	if h.provider != nil {
-		if name := strings.TrimSpace(h.provider.Name()); name != "" {
+	if p != nil {
+		if name := strings.TrimSpace(p.Name()); name != "" {
 			payload["provider"] = name
 		}
 	}
@@ -277,6 +352,22 @@ func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.S
 		payload["error_kind"] = string(kind)
 	}
 	return h.emit(ctx, session, events.EventLLMCallFailed, payload)
+}
+
+// emitModelFallback records a fallback decision on the trace. The payload is
+// redaction-safe: it carries only model ids, the classified error kind, and a
+// short error message (never request messages or skill bodies).
+func (h *Harness) emitModelFallback(ctx context.Context, session runtimecore.Session, iteration int, fromModel, toModel string, err error) error {
+	payload := map[string]any{
+		"iteration":  iteration,
+		"from_model": fromModel,
+		"to_model":   toModel,
+		"error":      err.Error(),
+	}
+	if kind := providerErrorKind(err); kind != "" {
+		payload["error_kind"] = string(kind)
+	}
+	return h.emit(ctx, session, events.EventModelFallback, payload)
 }
 
 func providerErrorKind(err error) provider.ErrorKind {
@@ -540,8 +631,7 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 		}); err != nil {
 			return currentText, usage, err
 		}
-		resp, err := h.completeWithRetry(ctx, session, iteration, provider.Request{
-			Model:    h.model,
+		resp, err := h.completeWithFallback(ctx, session, iteration, provider.Request{
 			System:   h.systemPrompt,
 			CacheKey: h.requestCacheKeyFor(h.systemPrompt, nil),
 			Messages: []provider.Message{

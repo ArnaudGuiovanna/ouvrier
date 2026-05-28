@@ -50,6 +50,7 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	// Pipe option surface.
 	_ = ovr.Pipe
 	_ = ovr.Model("anthropic/claude-sonnet-4-6")
+	_ = ovr.Fallback("anthropic/claude-sonnet-4-6", "openai/gpt-4.1-mini")
 	_ = ovr.Timeout("30s")
 	_ = ovr.MaxTokens(500_000)
 	_ = ovr.MaxCostUSD(5.0)
@@ -108,6 +109,7 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.WithSchemaRepairAttempts
 	_ = ovr.WithTracer
 	_ = ovr.WithPricing
+	_ = ovr.WithProviderBudget
 	_ = ovr.PerMillion
 	_ = ovr.PricingTable{"anthropic/claude-sonnet-4-6": ovr.ModelRate{}}
 	_ = ovr.NopTracer()

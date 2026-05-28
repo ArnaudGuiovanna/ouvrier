@@ -40,6 +40,7 @@ type httpRuntime struct {
 	adminPlans           []adminPlanRoute
 	async                *runtimeAsyncGroup
 	streamDeltas         bool
+	providerGate         *harness.ProviderGate
 }
 
 func defaultHTTPRuntime() httpRuntime {
@@ -348,6 +349,15 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		}
 		if rt.streamDeltas {
 			harnessOptions = append(harnessOptions, harness.WithStreaming(true))
+		}
+		if len(step.Fallback) > 0 {
+			harnessOptions = append(harnessOptions,
+				harness.WithFallback(step.Fallback...),
+				harness.WithProviderResolver(rt.providerForModel),
+			)
+		}
+		if rt.providerGate != nil {
+			harnessOptions = append(harnessOptions, harness.WithProviderGate(rt.providerGate))
 		}
 		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {

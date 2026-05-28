@@ -19,6 +19,7 @@ const (
 	EventLLMCallCompleted EventKind = "llm_call_completed"
 	EventLLMCallFailed    EventKind = "llm_call_failed"
 	EventLLMTokenDelta    EventKind = "llm_token_delta"
+	EventModelFallback    EventKind = "model_fallback"
 
 	EventToolCallStarted   EventKind = "tool_call_started"
 	EventToolCallCompleted EventKind = "tool_call_completed"

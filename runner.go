@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
@@ -34,6 +35,7 @@ type Runner struct {
 	schemaRepairAttempts int
 	tracer               Tracer
 	pricing              PricingTable
+	providerBudgets      map[string]int
 	err                  error
 }
 
@@ -45,6 +47,7 @@ type runnerConfig struct {
 	schemaRepairAttempts int
 	tracer               Tracer
 	pricing              PricingTable
+	providerBudgets      map[string]int
 	err                  error
 }
 
@@ -101,6 +104,7 @@ func NewRunner(options ...RunnerOption) *Runner {
 		schemaRepairAttempts: cfg.schemaRepairAttempts,
 		tracer:               cfg.tracer,
 		pricing:              cfg.pricing,
+		providerBudgets:      cfg.providerBudgets,
 		err:                  cfg.err,
 	}
 }
@@ -129,6 +133,29 @@ func WithPricing(table PricingTable) RunnerOption {
 			return
 		}
 		cfg.pricing = table
+	}
+}
+
+// WithProviderBudget bounds the number of concurrent in-flight LLM calls for a
+// single provider (the part before "/" in a model id). It prevents one
+// provider's rate limit from stalling calls routed to other providers. The
+// budget is shared across every Pipe in the runner. A limit less than or equal
+// to zero is rejected.
+func WithProviderBudget(provider string, maxInFlight int) RunnerOption {
+	return func(cfg *runnerConfig) {
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			cfg.setErr(errors.New("provider budget name is required"))
+			return
+		}
+		if maxInFlight <= 0 {
+			cfg.setErr(errors.New("provider budget max in-flight must be greater than zero"))
+			return
+		}
+		if cfg.providerBudgets == nil {
+			cfg.providerBudgets = make(map[string]int)
+		}
+		cfg.providerBudgets[provider] = maxInFlight
 	}
 }
 
@@ -323,6 +350,9 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 	rt.schemaRepairAttempts = r.schemaRepairAttempts
 	if len(r.pricing) > 0 {
 		rt.pricing = r.pricing
+	}
+	if gate := harness.NewProviderGate(r.providerBudgets); gate != nil {
+		rt.providerGate = gate
 	}
 	return nil
 }

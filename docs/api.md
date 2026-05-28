@@ -33,6 +33,7 @@ ovr.Pipe(goal string, options ...PipeOption) Node
 | Option                                  | Purpose                                            |
 | --------------------------------------- | -------------------------------------------------- |
 | `Model(id string)`                      | Provider/model id (`anthropic/claude-sonnet-4-6`). |
+| `Fallback(models ...string)`            | Ordered fallback models tried on classified provider failures. |
 | `Timeout(value string)`                 | Wall-clock budget (`"30s"`).                       |
 | `MaxTokens(max int)`                    | Token budget.                                      |
 | `MaxCostUSD(max float64)`               | Cost budget in USD.                                |
@@ -155,6 +156,7 @@ ovr.Validate(nodes ...ovr.Node) error              // validation without serving
 | `WithSchemaRepairAttempts(n int)`       | Bounded ResultSchema repair attempts.              |
 | `WithTracer(t Tracer)`                  | OTel-compatible span emission.                     |
 | `WithPricing(t PricingTable)`           | Cost accounting from a per-model pricing table.    |
+| `WithProviderBudget(provider string, maxInFlight int)` | Bound concurrent in-flight LLM calls per provider. |
 
 ## Pricing
 
