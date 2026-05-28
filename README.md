@@ -149,7 +149,7 @@ back to this checkout.
 ## Create A Worker
 
 The non-interactive scaffold is the fastest way to create a development worker.
-Today it generates HTTP-triggered workers only:
+It generates compiling HTTP, cron, webhook, and stream workers:
 
 ```sh
 ouvrier new \
@@ -158,6 +158,17 @@ ouvrier new \
   --trigger "POST /tickets/{id}" \
   --model "anthropic/claude-sonnet-4-6" \
   --dir /tmp
+```
+
+The `--trigger` flag accepts every supported trigger category. HTTP workers
+reply with JSON; cron, webhook, and stream workers terminate with
+`Sink(Log())`:
+
+```sh
+--trigger "POST /tickets"             # http  -> Reply(JSON)
+--trigger "0 6 * * *"                 # cron  -> Sink(Log())  (or "cron 0 6 * * *")
+--trigger "webhook github"            # webhook -> Sink(Log())
+--trigger "stream kafka://tickets"    # stream  -> Sink(Log())
 ```
 
 Then run it:

@@ -3,6 +3,8 @@ package scaffold
 import (
 	"context"
 	"errors"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,23 +85,89 @@ func TestGenerateRejectsUnsafeProjectName(t *testing.T) {
 	}
 }
 
-func TestGenerateRejectsNonHTTPTriggerStringClearly(t *testing.T) {
+func TestGenerateRejectsUnparseableTriggerStringClearly(t *testing.T) {
 	parent := t.TempDir()
 
 	_, err := Generate(context.Background(), Config{
 		Name:    "demo",
-		Trigger: "kafka://tickets",
+		Trigger: "telepathy whenever",
 		Model:   "anthropic/claude-sonnet-4-6",
 		Dir:     parent,
 	})
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("Generate() error = %v, want ErrInvalidConfig", err)
 	}
-	if !strings.Contains(err.Error(), "--trigger accepts only HTTP routes") {
-		t.Fatalf("Generate() error = %v, want clear HTTP-only trigger guidance", err)
+	if !strings.Contains(err.Error(), "--trigger accepts") {
+		t.Fatalf("Generate() error = %v, want clear trigger guidance", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(parent, "demo")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("project directory stat error = %v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestGenerateNonHTTPTriggers(t *testing.T) {
+	root := repoRoot(t)
+
+	cases := []struct {
+		name        string
+		trigger     string
+		wantFrom    string
+		wantTermina string
+	}{
+		{
+			name:        "cron-bare",
+			trigger:     "0 6 * * *",
+			wantFrom:    `ovr.From(ovr.Cron("0 6 * * *"))`,
+			wantTermina: `ovr.Sink(ovr.Log())`,
+		},
+		{
+			name:        "cron-prefixed",
+			trigger:     "cron @every 1h",
+			wantFrom:    `ovr.From(ovr.Cron("@every 1h"))`,
+			wantTermina: `ovr.Sink(ovr.Log())`,
+		},
+		{
+			name:        "webhook",
+			trigger:     "webhook github",
+			wantFrom:    `ovr.From(ovr.Webhook("github"))`,
+			wantTermina: `ovr.Sink(ovr.Log())`,
+		},
+		{
+			name:        "stream",
+			trigger:     "stream kafka://tickets",
+			wantFrom:    `ovr.From(ovr.Stream("kafka://tickets"))`,
+			wantTermina: `ovr.Sink(ovr.Log())`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			project, err := Generate(context.Background(), Config{
+				Name:         tc.name,
+				Trigger:      tc.trigger,
+				Model:        "anthropic/claude-sonnet-4-6",
+				Dir:          parent,
+				FrameworkDir: root,
+			})
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+
+			mainPath := filepath.Join(project.Dir, "main.go")
+			assertFileContains(t, mainPath, []string{tc.wantFrom, tc.wantTermina})
+
+			// The generated main.go must parse as valid Go.
+			if _, err := parser.ParseFile(token.NewFileSet(), mainPath, nil, parser.AllErrors); err != nil {
+				t.Fatalf("generated main.go does not parse: %v", err)
+			}
+
+			cmd := exec.Command("go", "build", "-buildvcs=false", "./...")
+			cmd.Dir = project.Dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("generated project does not compile: %v\n%s", err, out)
+			}
+		})
 	}
 }
 

@@ -237,7 +237,7 @@ func (m *wizardModel) advance() (tea.Model, tea.Cmd) {
 		return m, m.triggerInput.Focus()
 	case stepTrigger:
 		trigger := strings.TrimSpace(m.triggerInput.Value())
-		normalized, err := scaffold.NormalizeHTTPTrigger(trigger)
+		normalized, err := scaffold.NormalizeTrigger(trigger)
 		if err != nil {
 			m.errMsg = humanError(err)
 			return m, nil
@@ -347,9 +347,10 @@ func renderWizard(m *wizardModel) string {
 		)
 	case stepTrigger:
 		lines = append(lines,
-			labelStyle.Render("HTTP trigger"),
+			labelStyle.Render("Trigger"),
 			m.triggerInput.View(),
-			mutedStyle.Render("v0.1 supports HTTP only; e.g. \"POST /tickets\""),
+			mutedStyle.Render("http: \"POST /tickets\" | cron: \"0 6 * * *\""),
+			mutedStyle.Render("webhook: \"webhook github\" | stream: \"stream kafka://tickets\""),
 		)
 	case stepModel:
 		lines = append(lines,
@@ -406,7 +407,7 @@ func stepHint(step wizardStep) string {
 	case stepName:
 		return "letters, digits, '-', '_', '.' - no slashes"
 	case stepTrigger:
-		return "HTTP only in v0.1: METHOD /path"
+		return "http, cron, webhook, or stream"
 	case stepModel:
 		return "validated with provider.ParseModelID"
 	case stepReview:

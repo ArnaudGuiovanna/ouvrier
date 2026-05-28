@@ -33,7 +33,8 @@ flags for non-interactive scaffolding.
 
 Options:
       --name string      Project name
-      --trigger string   HTTP trigger, for example "POST /tickets"
+      --trigger string   Trigger: http "POST /tickets", cron "0 6 * * *",
+                         webhook "webhook github", or stream "stream kafka://tickets"
       --model string     Model ID, for example anthropic/claude-sonnet-4-6
       --dir string       Parent directory for the project (default ".")
       --yes              Confirm non-interactive scaffold

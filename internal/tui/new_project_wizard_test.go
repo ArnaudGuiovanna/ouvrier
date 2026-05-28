@@ -119,21 +119,39 @@ func TestWizardRejectsInvalidProjectNameWithInlineError(t *testing.T) {
 	}
 }
 
-func TestWizardRejectsNonHTTPTrigger(t *testing.T) {
+func TestWizardRejectsUnparseableTrigger(t *testing.T) {
 	m := NewProjectWizard(NewProjectWizardOptions{ParentDir: "."})
 	m.Init()
 
 	m = typeString(t, m, "demo")
 	m = pressEnter(t, m)
-	m = typeString(t, m, "kafka://topic")
+	m = typeString(t, m, "telepathy whenever")
 	m = pressEnter(t, m)
 
 	w := wizardFromModel(t, m)
 	if w.step != stepTrigger {
 		t.Fatalf("step = %v, want stepTrigger after invalid trigger", w.step)
 	}
-	if !strings.Contains(w.errMsg, "HTTP") {
-		t.Fatalf("errMsg = %q, want HTTP guidance", w.errMsg)
+	if w.errMsg == "" {
+		t.Fatal("errMsg empty, want inline trigger guidance")
+	}
+}
+
+func TestWizardAcceptsStreamTrigger(t *testing.T) {
+	m := NewProjectWizard(NewProjectWizardOptions{ParentDir: "."})
+	m.Init()
+
+	m = typeString(t, m, "demo")
+	m = pressEnter(t, m)
+	m = typeString(t, m, "stream kafka://tickets")
+	m = pressEnter(t, m)
+
+	w := wizardFromModel(t, m)
+	if w.step != stepModel {
+		t.Fatalf("step = %v, want stepModel after valid stream trigger (err=%q)", w.step, w.errMsg)
+	}
+	if got := strings.TrimSpace(w.triggerInput.Value()); got != "stream kafka://tickets" {
+		t.Fatalf("normalized trigger = %q, want %q", got, "stream kafka://tickets")
 	}
 }
 

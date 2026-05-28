@@ -8,6 +8,10 @@ import (
 )
 
 func mainGo(cfg Config) string {
+	replyType := ""
+	if cfg.trigger.usesReplyType {
+		replyType = "\ntype ticketReply struct {\n\tStatus string `json:\"status\"`\n}\n"
+	}
 	return fmt.Sprintf(`package main
 
 import (
@@ -15,23 +19,19 @@ import (
 
 	ovr %q
 )
-
-type ticketReply struct {
-	Status string `+"`json:\"status\"`"+`
-}
-
+%s
 func main() {
 	if err := ovr.Run(":8080",
-		ovr.From(%q),
-		ovr.Pipe("Handle the request and return a concise JSON status.",
+		ovr.From(%s),
+		ovr.Pipe("Handle the event and return a concise status.",
 			ovr.Model(%q),
 		),
-		ovr.Reply(ovr.JSON[ticketReply]()),
+		%s,
 	); err != nil {
 		log.Fatal(err)
 	}
 }
-`, cfg.FrameworkModule, cfg.Trigger, cfg.Model)
+`, cfg.FrameworkModule, replyType, cfg.trigger.fromArg, cfg.Model, cfg.trigger.terminalExpr)
 }
 
 func goMod(cfg Config) string {
