@@ -40,6 +40,7 @@ type config struct {
 	retryBackoff    time.Duration
 	promptCache     bool
 	sequentialTools bool
+	pricing         provider.PricingTable
 }
 
 func defaultConfig() config {
@@ -234,6 +235,15 @@ func WithSchemaRepairAttempts(max int) Option {
 func WithSequentialTools() Option {
 	return func(cfg *config) error {
 		cfg.sequentialTools = true
+		return nil
+	}
+}
+
+// WithPricing installs a pricing table used to compute Usage.CostUSD per call.
+// When unset (nil/empty), cost stays best-effort and is left untouched.
+func WithPricing(table provider.PricingTable) Option {
+	return func(cfg *config) error {
+		cfg.pricing = table
 		return nil
 	}
 }

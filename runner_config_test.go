@@ -283,3 +283,37 @@ func (s *recordingStateStore) SchemaViolations(ctx context.Context, execID strin
 	}
 	return violations, nil
 }
+
+func TestRunnerPricingRejectsEmptyTable(t *testing.T) {
+	runner := NewRunner(WithPricing(PricingTable{}))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "pricing table is required") {
+		t.Fatalf("Run error = %v, want pricing table context", err)
+	}
+}
+
+func TestRunnerPricingConfiguresHTTPRuntime(t *testing.T) {
+	table := PricingTable{
+		"anthropic/claude-sonnet-4-6": PerMillion(3, 15, 0.30, 3.75),
+	}
+	runner := NewRunner(WithPricing(table))
+	rt := defaultHTTPRuntime()
+
+	if err := runner.configureHTTPRuntime(&rt); err != nil {
+		t.Fatalf("configureHTTPRuntime returned error: %v", err)
+	}
+	if len(rt.pricing) != 1 {
+		t.Fatalf("pricing entries = %d, want 1", len(rt.pricing))
+	}
+	if _, ok := rt.pricing["anthropic/claude-sonnet-4-6"]; !ok {
+		t.Fatalf("pricing missing expected model rate: %+v", rt.pricing)
+	}
+}

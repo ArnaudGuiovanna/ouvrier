@@ -34,6 +34,7 @@ type httpRuntime struct {
 	hookBus              *events.HookBus
 	sandbox              *sandbox.Sandbox
 	schemaRepairAttempts int
+	pricing              provider.PricingTable
 	adminToken           string
 	adminRoutes          []httpRoute
 	adminPlans           []adminPlanRoute
@@ -334,6 +335,9 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		}
 		if step.NoCache {
 			harnessOptions = append(harnessOptions, harness.WithPromptCache(false))
+		}
+		if len(rt.pricing) > 0 {
+			harnessOptions = append(harnessOptions, harness.WithPricing(rt.pricing))
 		}
 		if scope.parentSession != nil {
 			harnessOptions = append(harnessOptions, harness.WithParentSession(*scope.parentSession))

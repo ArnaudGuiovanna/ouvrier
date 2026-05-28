@@ -33,6 +33,7 @@ type Runner struct {
 	sandbox              SandboxConfig
 	schemaRepairAttempts int
 	tracer               Tracer
+	pricing              PricingTable
 	err                  error
 }
 
@@ -43,6 +44,7 @@ type runnerConfig struct {
 	sandbox              SandboxConfig
 	schemaRepairAttempts int
 	tracer               Tracer
+	pricing              PricingTable
 	err                  error
 }
 
@@ -98,6 +100,7 @@ func NewRunner(options ...RunnerOption) *Runner {
 		sandbox:              cfg.sandbox,
 		schemaRepairAttempts: cfg.schemaRepairAttempts,
 		tracer:               cfg.tracer,
+		pricing:              cfg.pricing,
 		err:                  cfg.err,
 	}
 }
@@ -113,6 +116,19 @@ func WithTracer(tracer Tracer) RunnerOption {
 			return
 		}
 		cfg.tracer = tracer
+	}
+}
+
+// WithPricing installs a pricing table used to compute per-call and
+// per-execution cost. When unset, cost stays best-effort (zero) with no
+// behavior change.
+func WithPricing(table PricingTable) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if len(table) == 0 {
+			cfg.setErr(errors.New("pricing table is required"))
+			return
+		}
+		cfg.pricing = table
 	}
 }
 
@@ -305,6 +321,9 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 		rt.sandbox = sandbox
 	}
 	rt.schemaRepairAttempts = r.schemaRepairAttempts
+	if len(r.pricing) > 0 {
+		rt.pricing = r.pricing
+	}
 	return nil
 }
 

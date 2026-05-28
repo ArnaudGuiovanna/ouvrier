@@ -1741,3 +1741,122 @@ func (p *blockingHarnessProvider) Complete(ctx context.Context, req provider.Req
 	<-ctx.Done()
 	return provider.Response{}, ctx.Err()
 }
+
+func TestRunComputesCostFromPricingTable(t *testing.T) {
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+			Usage:      provider.Usage{InputTokens: 1000, OutputTokens: 500},
+			Metadata: provider.ResponseMetadata{
+				PromptCache: provider.PromptCacheMetadata{ReadInputTokens: 200, WriteInputTokens: 100},
+			},
+		}},
+	}
+	pricing := provider.PricingTable{
+		"anthropic/claude-sonnet-4-6": provider.PerMillion(3, 15, 0.30, 3.75),
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithPricing(pricing),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	want := 1000*(3.0/1_000_000) + 500*(15.0/1_000_000) + 200*(0.30/1_000_000) + 100*(3.75/1_000_000)
+	if diff := out.Usage.CostUSD - want; diff > 1e-12 || diff < -1e-12 {
+		t.Fatalf("Usage.CostUSD = %v, want %v", out.Usage.CostUSD, want)
+	}
+}
+
+func TestRunPricingTableMissingRateLeavesBestEffortCost(t *testing.T) {
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+			Usage:      provider.Usage{InputTokens: 100, OutputTokens: 50, CostUSD: 0.02},
+		}},
+	}
+	pricing := provider.PricingTable{
+		"openai/gpt-4o": provider.PerMillion(2.5, 10, 0, 0),
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithPricing(pricing),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Usage.CostUSD != 0.02 {
+		t.Fatalf("Usage.CostUSD = %v, want best-effort 0.02 preserved", out.Usage.CostUSD)
+	}
+}
+
+func TestRunNoPricingTableLeavesCostUnchanged(t *testing.T) {
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+			Usage:      provider.Usage{InputTokens: 100, OutputTokens: 50, CostUSD: 0.05},
+		}},
+	}
+	h, err := harness.New(p, harness.WithModel("anthropic/claude-sonnet-4-6"))
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Usage.CostUSD != 0.05 {
+		t.Fatalf("Usage.CostUSD = %v, want unchanged 0.05", out.Usage.CostUSD)
+	}
+}
+
+func TestRunEmitsComputedCostOnLLMCallCompleted(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "done",
+			StopReason: provider.StopEndTurn,
+			Usage:      provider.Usage{InputTokens: 1000, OutputTokens: 500},
+		}},
+	}
+	pricing := provider.PricingTable{
+		"anthropic/claude-sonnet-4-6": provider.PerMillion(3, 15, 0, 0),
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithPricing(pricing),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if _, err := h.Run(context.Background(), "payload"); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	event, ok := findEvent(stream.List(), events.EventLLMCallCompleted)
+	if !ok {
+		t.Fatalf("llm_call_completed event not emitted")
+	}
+	cost, ok := event.Payload["cost_usd"].(float64)
+	if !ok {
+		t.Fatalf("cost_usd payload missing or wrong type: %#v", event.Payload["cost_usd"])
+	}
+	want := 1000*(3.0/1_000_000) + 500*(15.0/1_000_000)
+	if diff := cost - want; diff > 1e-12 || diff < -1e-12 {
+		t.Fatalf("cost_usd payload = %v, want %v", cost, want)
+	}
+}

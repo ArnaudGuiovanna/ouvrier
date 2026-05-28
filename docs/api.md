@@ -154,6 +154,26 @@ ovr.Validate(nodes ...ovr.Node) error              // validation without serving
 | `WithSandbox(c SandboxConfig)`          | Filesystem workspace boundary.                     |
 | `WithSchemaRepairAttempts(n int)`       | Bounded ResultSchema repair attempts.              |
 | `WithTracer(t Tracer)`                  | OTel-compatible span emission.                     |
+| `WithPricing(t PricingTable)`           | Cost accounting from a per-model pricing table.    |
+
+## Pricing
+
+```go
+type PricingTable map[string]ModelRate   // keyed by "provider/model"
+type ModelRate struct {
+    InputUSDPerToken      float64
+    OutputUSDPerToken     float64
+    CacheReadUSDPerToken  float64
+    CacheWriteUSDPerToken float64
+}
+ovr.PerMillion(input, output, cacheRead, cacheWrite float64) ovr.ModelRate
+```
+
+When a rate exists for the request model, the harness computes `Usage.CostUSD`
+per call (including cache read/write tokens) and aggregates total cost per
+execution, surfaced as `cost_usd` on `llm_call_completed` events and in
+`/admin/status` and trace detail. When no table is configured (or no rate
+matches a model), cost stays best-effort (zero) with no behavior change.
 
 ## Tracing
 

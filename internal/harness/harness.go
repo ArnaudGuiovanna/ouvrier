@@ -33,6 +33,7 @@ type Harness struct {
 	retryBackoff    time.Duration
 	promptCache     bool
 	sequentialTools bool
+	pricing         provider.PricingTable
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -78,7 +79,20 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		retryBackoff:    cfg.retryBackoff,
 		promptCache:     cfg.promptCache,
 		sequentialTools: cfg.sequentialTools,
+		pricing:         cfg.pricing,
 	}, nil
+}
+
+// applyPricing overwrites resp.Usage.CostUSD when a configured pricing rate
+// exists for the request model. When no table is configured or no rate
+// matches, the existing best-effort cost is left untouched.
+func (h *Harness) applyPricing(model string, resp *provider.Response) {
+	if h == nil || resp == nil || len(h.pricing) == 0 {
+		return
+	}
+	if cost, ok := h.pricing.Cost(model, resp.Usage, resp.Metadata.PromptCache); ok {
+		resp.Usage.CostUSD = cost
+	}
 }
 
 func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
@@ -212,7 +226,9 @@ func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Ses
 		if emitErr := h.emitProviderFailure(ctx, session, iteration, providerAttemptNumber(err, retryAllowed, h.providerRetries), req.Model, err, false); emitErr != nil {
 			return provider.Response{}, errors.Join(err, emitErr)
 		}
+		return resp, err
 	}
+	h.applyPricing(req.Model, &resp)
 	return resp, err
 }
 

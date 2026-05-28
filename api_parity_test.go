@@ -107,6 +107,9 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.WithSandbox
 	_ = ovr.WithSchemaRepairAttempts
 	_ = ovr.WithTracer
+	_ = ovr.WithPricing
+	_ = ovr.PerMillion
+	_ = ovr.PricingTable{"anthropic/claude-sonnet-4-6": ovr.ModelRate{}}
 	_ = ovr.NopTracer()
 
 	// Exercise the runner constructor without starting any runtime so the
