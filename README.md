@@ -83,8 +83,8 @@ What ships in v0.1:
   frontmatter validation, and a sandboxed Bash capability with workspace,
   env allowlist, timeout, output bounds, and process cleanup.
 - Provider adapters for `anthropic/*`, `openai/*`, `ollama/*`, `mistral/*`,
-  `gemini/*`, and `vllm/*` with tool use, typed final results, and
-  classified errors.
+  `gemini/*`, `vllm/*`, `groq/*`, `deepseek/*`, `azure/*`, and `bedrock/*`
+  with tool use, typed final results, and classified errors.
 - Reply (`JSON[T]`, `SSE`, `Accepted`), Push (webhook, queue), and Sink
   (log, file) outputs.
 - Protected admin endpoints (`/admin/health`, `/admin/status`,
@@ -226,6 +226,10 @@ Every `Pipe` must declare an explicit model. Model IDs use a provider prefix:
 - `mistral/*`
 - `gemini/*`
 - `vllm/*`
+- `groq/*`
+- `deepseek/*`
+- `azure/*` (Azure OpenAI deployments)
+- `bedrock/*` (AWS Bedrock Converse models)
 
 ### Tools
 
@@ -377,7 +381,25 @@ GEMINI_BASE_URL=
 OLLAMA_BASE_URL=
 VLLM_API_KEY=
 VLLM_BASE_URL=
+GROQ_API_KEY=
+GROQ_BASE_URL=
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=
+AZURE_OPENAI_API_KEY=
+AZURE_OPENAI_BASE_URL=
+AZURE_OPENAI_API_VERSION=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_SESSION_TOKEN=
+AWS_REGION=
+AWS_BEDROCK_BASE_URL=
 ```
+
+AWS Bedrock requests are authenticated with hand-rolled SigV4 signing (no
+aws-sdk dependency); set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+`AWS_REGION` to enable the `bedrock/*` prefix. Real-AWS integration testing is
+tracked as follow-up; unit coverage exercises the signing helper and the
+Converse request/response mapping against a fake HTTP doer.
 
 Runtime/admin configuration:
 
