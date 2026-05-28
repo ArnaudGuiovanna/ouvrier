@@ -34,6 +34,7 @@ type Harness struct {
 	promptCache     bool
 	sequentialTools bool
 	pricing         provider.PricingTable
+	streamDeltas    bool
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -80,6 +81,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		promptCache:     cfg.promptCache,
 		sequentialTools: cfg.sequentialTools,
 		pricing:         cfg.pricing,
+		streamDeltas:    cfg.streamDeltas,
 	}, nil
 }
 
@@ -212,7 +214,7 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 }
 
 func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Session, iteration int, req provider.Request, retryAllowed bool) (provider.Response, error) {
-	resp, err := h.provider.Complete(ctx, req)
+	resp, err := h.complete(ctx, session, req)
 	for attempt := 0; err != nil && retryAllowed && provider.IsTransientError(err) && attempt < h.providerRetries; attempt++ {
 		if emitErr := h.emitProviderFailure(ctx, session, iteration, attempt+1, req.Model, err, true); emitErr != nil {
 			return provider.Response{}, errors.Join(err, emitErr)
@@ -220,7 +222,7 @@ func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Ses
 		if waitErr := waitRetryBackoff(ctx, h.retryBackoff, attempt); waitErr != nil {
 			return provider.Response{}, waitErr
 		}
-		resp, err = h.provider.Complete(ctx, req)
+		resp, err = h.complete(ctx, session, req)
 	}
 	if err != nil {
 		if emitErr := h.emitProviderFailure(ctx, session, iteration, providerAttemptNumber(err, retryAllowed, h.providerRetries), req.Model, err, false); emitErr != nil {
@@ -230,6 +232,31 @@ func (h *Harness) completeWithRetry(ctx context.Context, session runtimecore.Ses
 	}
 	h.applyPricing(req.Model, &resp)
 	return resp, err
+}
+
+// complete runs a single provider call. When streaming is enabled and the
+// provider implements provider.StreamingProvider, it forwards each token delta
+// to the event stream as an EventLLMTokenDelta event. The delta callback only
+// appends to the in-memory event stream, so a slow SSE client draining the
+// stream can never block or deadlock the harness. Providers without streaming
+// support fall back to Complete.
+func (h *Harness) complete(ctx context.Context, session runtimecore.Session, req provider.Request) (provider.Response, error) {
+	if h.streamDeltas {
+		if streamer, ok := h.provider.(provider.StreamingProvider); ok {
+			index := 0
+			return streamer.CompleteStream(ctx, req, func(delta provider.Delta) {
+				if delta.Text == "" {
+					return
+				}
+				_ = h.emit(ctx, session, events.EventLLMTokenDelta, map[string]any{
+					"index": index,
+					"text":  delta.Text,
+				})
+				index++
+			})
+		}
+	}
+	return h.provider.Complete(ctx, req)
 }
 
 func (h *Harness) emitProviderFailure(ctx context.Context, session runtimecore.Session, iteration, attempt int, model string, err error, retrying bool) error {

@@ -43,3 +43,9 @@ func (p *OpenAI) BaseURL() string {
 func (p *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	return p.compat.Complete(ctx, req)
 }
+
+// CompleteStream satisfies StreamingProvider by delegating to the underlying
+// OpenAI-compatible streaming implementation.
+func (p *OpenAI) CompleteStream(ctx context.Context, req Request, onDelta func(Delta)) (Response, error) {
+	return p.compat.CompleteStream(ctx, req, onDelta)
+}

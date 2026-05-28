@@ -41,6 +41,7 @@ type config struct {
 	promptCache     bool
 	sequentialTools bool
 	pricing         provider.PricingTable
+	streamDeltas    bool
 }
 
 func defaultConfig() config {
@@ -228,6 +229,17 @@ func WithSchemaRepairAttempts(max int) Option {
 			return errors.New("schema repair attempts must be greater than or equal to zero")
 		}
 		cfg.schemaRepairs = max
+		return nil
+	}
+}
+
+// WithStreaming enables provider token-delta streaming. When enabled and the
+// configured provider implements provider.StreamingProvider, the harness emits
+// an EventLLMTokenDelta event per token chunk while a completion is in flight.
+// Providers without streaming support fall back to Complete transparently.
+func WithStreaming(enabled bool) Option {
+	return func(cfg *config) error {
+		cfg.streamDeltas = enabled
 		return nil
 	}
 }

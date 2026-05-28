@@ -3,9 +3,40 @@ package provider
 import "encoding/json"
 
 type openAICompatRequest struct {
-	Model    string                `json:"model"`
-	Messages []openAICompatMessage `json:"messages"`
-	Tools    []openAICompatTool    `json:"tools,omitempty"`
+	Model         string                  `json:"model"`
+	Messages      []openAICompatMessage   `json:"messages"`
+	Tools         []openAICompatTool      `json:"tools,omitempty"`
+	Stream        bool                    `json:"stream,omitempty"`
+	StreamOptions *openAICompatStreamOpts `json:"stream_options,omitempty"`
+}
+
+type openAICompatStreamOpts struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+type openAICompatStreamChunk struct {
+	Choices []openAICompatStreamChoice `json:"choices"`
+	Usage   *openAICompatUsage         `json:"usage"`
+}
+
+type openAICompatStreamChoice struct {
+	Delta        openAICompatStreamDelta `json:"delta"`
+	FinishReason string                  `json:"finish_reason"`
+}
+
+type openAICompatStreamDelta struct {
+	Content   string                       `json:"content"`
+	ToolCalls []openAICompatStreamToolCall `json:"tool_calls"`
+}
+
+type openAICompatStreamToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type openAICompatMessage struct {
