@@ -111,6 +111,12 @@ func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, cal
 	toolCtx := contextWithExecution(ctx, session, h.budgetLedger)
 	if h.stateStore != nil {
 		toolCtx = tools.ContextWithIdempotencyStore(toolCtx, h.stateStore, session.ExecID)
+		toolCtx = tools.ContextWithMemoryStore(toolCtx, memoryStoreAdapter{store: h.stateStore}, h.memoryScopeFor(session))
+		toolCtx = tools.ContextWithApprovalGate(toolCtx, approvalGateAdapter{store: h.stateStore}, tools.ApprovalContext{
+			ExecID:    session.ExecID,
+			SessionID: session.SessionID,
+			TraceID:   session.TraceID,
+		})
 	}
 	toolCtx = tools.ContextWithToolRetry(toolCtx, h.providerRetries, h.retryBackoff)
 	toolCtx = tools.ContextWithToolRetryObserver(toolCtx, func(ctx context.Context, audit tools.ToolRetryAudit) error {
@@ -143,6 +149,17 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 		return provider.Message{}, outcome.budgetPayload, nil
 	}
 	if outcome.toolErr != nil {
+		var suspended *tools.SuspendedError
+		if errors.As(outcome.toolErr, &suspended) {
+			if emitErr := h.emit(ctx, session, events.EventApprovalRequested, map[string]any{
+				"tool":         call.Name,
+				"tool_call_id": call.ID,
+				"approval_id":  suspended.ApprovalID,
+			}); emitErr != nil {
+				return provider.Message{}, nil, errors.Join(outcome.toolErr, emitErr)
+			}
+			return provider.Message{}, nil, outcome.toolErr
+		}
 		if emitErr := h.emit(ctx, session, events.EventToolCallFailed, map[string]any{
 			"tool":         call.Name,
 			"tool_call_id": call.ID,

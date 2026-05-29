@@ -46,7 +46,7 @@ func TestRunNewHelpPrintsUsage(t *testing.T) {
 		"Usage: ouvrier new",
 		"Bubble Tea",
 		"project wizard",
-		"HTTP trigger",
+		"--trigger string",
 		"--help",
 	} {
 		if !strings.Contains(got, want) {
@@ -130,7 +130,7 @@ func TestRunNewWithFlagsScaffoldsProject(t *testing.T) {
 	}
 }
 
-func TestRunNewWithFlagsRejectsNonHTTPTriggerClearly(t *testing.T) {
+func TestRunNewWithFlagsRejectsUnparseableTriggerClearly(t *testing.T) {
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	parent := t.TempDir()
@@ -139,7 +139,7 @@ func TestRunNewWithFlagsRejectsNonHTTPTriggerClearly(t *testing.T) {
 	err := app.Run(context.Background(), []string{
 		"new",
 		"--name", "demo",
-		"--trigger", "kafka://tickets",
+		"--trigger", "telepathy whenever",
 		"--model", "anthropic/claude-sonnet-4-6",
 		"--yes",
 		"--dir", parent,
@@ -150,11 +150,33 @@ func TestRunNewWithFlagsRejectsNonHTTPTriggerClearly(t *testing.T) {
 	if got := out.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
-	if got := errOut.String(); !strings.Contains(got, "--trigger accepts only HTTP routes") {
-		t.Fatalf("stderr = %q, want HTTP-only trigger guidance", got)
+	if got := errOut.String(); !strings.Contains(got, "--trigger accepts") {
+		t.Fatalf("stderr = %q, want trigger guidance", got)
 	}
 	if _, statErr := os.Stat(filepath.Join(parent, "demo")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("project directory stat error = %v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestRunNewWithFlagsScaffoldsStreamTrigger(t *testing.T) {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	parent := t.TempDir()
+	app := New("dev", WithStreams(nil, &out, &errOut))
+
+	err := app.Run(context.Background(), []string{
+		"new",
+		"--name", "demo",
+		"--trigger", "stream kafka://tickets",
+		"--model", "anthropic/claude-sonnet-4-6",
+		"--yes",
+		"--dir", parent,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "demo", "main.go")); statErr != nil {
+		t.Fatalf("main.go stat error = %v, want generated project", statErr)
 	}
 }
 

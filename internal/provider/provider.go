@@ -12,6 +12,26 @@ type Provider interface {
 	Complete(context.Context, Request) (Response, error)
 }
 
+// Delta is an incremental chunk of model output emitted while a streaming
+// completion is in flight. Text carries provider token text; it is model
+// output and must be treated as redaction-safe content (never a secret).
+type Delta struct {
+	Text string
+}
+
+// StreamingProvider is an OPTIONAL capability. Providers that implement it can
+// surface token deltas as they arrive. The harness detects support via a type
+// assertion and falls back to Complete for providers that do not implement it.
+//
+// CompleteStream invokes onDelta for each incremental text chunk and returns the
+// fully assembled Response, identical to what Complete would return. onDelta may
+// be nil, in which case the call behaves like Complete. onDelta must return
+// quickly and must not be retained beyond the call.
+type StreamingProvider interface {
+	Provider
+	CompleteStream(ctx context.Context, req Request, onDelta func(Delta)) (Response, error)
+}
+
 type Request struct {
 	Model    string
 	System   string

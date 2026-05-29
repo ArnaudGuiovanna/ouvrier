@@ -23,6 +23,9 @@ Trigger options (passed inside the trigger constructor or via `From`-level
 | `IdempotencyKey(header string) FromOption`        | Use the named HTTP/webhook header as the idempotency key. |
 | `VerifySignature(envVar, header string) FromOption` | HMAC-SHA256 signature verification using a shared secret read from `envVar`. |
 | `WorkerPool(limit int) FromOption`                 | Cap concurrent trigger handlers.                     |
+| `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries. The target is published to the real broker transport (`kafka://`, `nats://`, `redis://`); replay it with `ReplayStreamDLQ` or `POST /admin/streams/replay`. |
+| `StreamMaxInFlight(limit int) FromOption`          | Bound concurrently processed stream messages so a slow handler applies backpressure to the broker. |
+| `StreamAckPolicy(policy StreamAckMode) FromOption` | Per-broker acknowledgement mode: `StreamAckAuto` (default; runtime acks after successful processing) or `StreamAckManual` (handler owns the ack, broker redelivers until acked). No-op for brokers whose receiver exposes no ack closure. |
 
 ## Pipe
 
@@ -33,6 +36,7 @@ ovr.Pipe(goal string, options ...PipeOption) Node
 | Option                                  | Purpose                                            |
 | --------------------------------------- | -------------------------------------------------- |
 | `Model(id string)`                      | Provider/model id (`anthropic/claude-sonnet-4-6`). |
+| `Fallback(models ...string)`            | Ordered fallback models tried on classified provider failures. |
 | `Timeout(value string)`                 | Wall-clock budget (`"30s"`).                       |
 | `MaxTokens(max int)`                    | Token budget.                                      |
 | `MaxCostUSD(max float64)`               | Cost budget in USD.                                |
@@ -82,7 +86,7 @@ ovr.Sink(target SinkTarget) Node     // terminate without reply (log/file)
 | `JSON[T]() JSONReply[T]`  | Typed JSON reply with strict schema validation.    |
 | `SSE() SSEReply`          | Server-Sent Events streaming reply.                |
 | `Accepted() AcceptedReply`| HTTP 202 reply while the pipeline runs async.      |
-| `Queue(uri string)`       | Push target publishing to a queue URI.             |
+| `Queue(uri string)`       | Push target publishing to a queue URI (`http(s)://`, `nats://`, `kafka://`, `redis://`, `sqs://`). |
 | `Log() LogSink`           | Sink writing to logs.                              |
 | `File(path string)`       | Sink writing the result to a file.                 |
 
@@ -154,6 +158,53 @@ ovr.Validate(nodes ...ovr.Node) error              // validation without serving
 | `WithSandbox(c SandboxConfig)`          | Filesystem workspace boundary.                     |
 | `WithSchemaRepairAttempts(n int)`       | Bounded ResultSchema repair attempts.              |
 | `WithTracer(t Tracer)`                  | OTel-compatible span emission.                     |
+| `WithOTLPExporter(endpoint string, opts ...OTLPExporterOption)` | Native OTLP/HTTP span export (no otel SDK). |
+| `WithPricing(t PricingTable)`           | Cost accounting from a per-model pricing table.    |
+| `WithProviderBudget(provider string, maxInFlight int)` | Bound concurrent in-flight LLM calls per provider. |
+
+### Persistent memory
+
+The durable `StateStore` carries scoped agent memory that survives across
+sessions. A scope identifies the worker plus logical agent so concurrent agents
+stay isolated while one logical agent's memory persists.
+
+```go
+type MemoryRecord struct {
+    Scope     string
+    Key       string
+    Value     string
+    UpdatedAt time.Time
+}
+
+// StateStore memory methods (in addition to execution/session/event methods):
+SaveMemory(ctx context.Context, scope, key, value string) error
+Memory(ctx context.Context, scope, key string) (string, bool, error)
+ListMemory(ctx context.Context, scope string) ([]MemoryRecord, error)
+```
+
+Values are bounded in size and redacted before persistence, so secrets and skill
+bodies never reach durable storage. Writes are last-write-wins per `(scope, key)`;
+entries are not auto-expired — prune by overwriting keys or scoping them with a
+generation marker.
+
+## Pricing
+
+```go
+type PricingTable map[string]ModelRate   // keyed by "provider/model"
+type ModelRate struct {
+    InputUSDPerToken      float64
+    OutputUSDPerToken     float64
+    CacheReadUSDPerToken  float64
+    CacheWriteUSDPerToken float64
+}
+ovr.PerMillion(input, output, cacheRead, cacheWrite float64) ovr.ModelRate
+```
+
+When a rate exists for the request model, the harness computes `Usage.CostUSD`
+per call (including cache read/write tokens) and aggregates total cost per
+execution, surfaced as `cost_usd` on `llm_call_completed` events and in
+`/admin/status` and trace detail. When no table is configured (or no rate
+matches a model), cost stays best-effort (zero) with no behavior change.
 
 ## Tracing
 
@@ -173,6 +224,46 @@ The harness emits one span per pipeline, pipe, session, LLM call, tool call,
 schema validation, and subagent task. `*_started` events are paired with their
 `*_completed` or `*_failed` counterparts internally.
 
+### Native OTLP exporter
+
+`WithOTLPExporter` installs a built-in `Tracer` that ships spans to an
+OTLP/HTTP collector using the JSON encoding — no OpenTelemetry SDK dependency.
+Default off: when unset, behavior is unchanged.
+
+```go
+type OTLPExporterOption // configures the exporter
+ovr.OTLPServiceName(name string) OTLPExporterOption
+ovr.OTLPHeaders(headers map[string]string) OTLPExporterOption
+
+runner := ovr.NewRunner(
+    ovr.WithOTLPExporter("https://collector:4318",
+        ovr.OTLPServiceName("orders-api"),
+        ovr.OTLPHeaders(map[string]string{"Authorization": "Bearer <token>"}),
+    ),
+)
+```
+
+The exporter appends `/v1/traces` to the endpoint, posts one span per logical
+operation, and redacts span attributes (sensitive keys, credential-looking
+strings) before export. Export errors are swallowed so observability never
+breaks the pipeline. `WithOTLPExporter` is a convenience over `WithTracer`;
+when both are passed, the last option wins.
+
+## Metrics
+
+```
+GET /metrics
+```
+
+A hand-rolled Prometheus text exposition (no dependency) derived from the
+EventStream/StateStore: per-kind counters (`ouvrier_pipeline_*_total`,
+`ouvrier_pipe_*_total`, `ouvrier_llm_call_*_total`, `ouvrier_tool_call_*_total`,
+`ouvrier_stream_dead_lettered_total`, `ouvrier_stream_redelivered_total`)
+plus latency summaries (`ouvrier_llm_call_duration_ms`,
+`ouvrier_pipeline_duration_ms`, `ouvrier_pipe_duration_ms`,
+`ouvrier_tool_call_duration_ms`) as `_sum`/`_count` series. The endpoint shares
+the admin auth posture: bearer-token protected outside dev mode.
+
 ## Admin
 
 Bearer-authenticated HTTP endpoints exposed by the runtime:
@@ -183,6 +274,7 @@ GET  /admin/status
 GET  /admin/traces?last=N
 GET  /admin/traces/<exec-id>
 POST /admin/trigger
+GET  /metrics              # Prometheus text exposition (admin token required)
 GET  /dev                  # dev-mode trace viewer (admin token required)
 ```
 

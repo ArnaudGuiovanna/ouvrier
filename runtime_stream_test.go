@@ -394,7 +394,7 @@ func TestProcessStreamMessageAcknowledgesSuccessfulDelivery(t *testing.T) {
 			acked = true
 			return ctx.Err()
 		},
-	})
+	}, newStreamAttemptTracker())
 	if err != nil {
 		t.Fatalf("processStreamMessage returned error: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestProcessStreamMessageDeadLettersAckFailure(t *testing.T) {
 		ack: func(ctx context.Context) error {
 			return ackErr
 		},
-	})
+	}, newStreamAttemptTracker())
 	if err != nil {
 		t.Fatalf("processStreamMessage returned error: %v", err)
 	}

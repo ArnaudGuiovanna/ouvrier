@@ -15,3 +15,6 @@ coverage.txt
 specs.md
 ouvrier-doc-v0.1.pdf
 AGENTS.md
+
+# Workflow orchestration scripts (local)
+.ouvrier-wf/

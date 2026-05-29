@@ -2,10 +2,12 @@ package ovr
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
@@ -191,6 +193,9 @@ type recordingStateStore struct {
 	events      []Event
 	nextEventID uint64
 	violations  []SchemaViolation
+	memory      map[string]map[string]MemoryRecord
+	approvals   map[string]PendingApproval
+	approvalSeq []string
 }
 
 func newRecordingStateStore() *recordingStateStore {
@@ -198,6 +203,8 @@ func newRecordingStateStore() *recordingStateStore {
 		executions:  map[string]Execution{},
 		sessions:    map[string]Session{},
 		idempotency: map[string]string{},
+		memory:      map[string]map[string]MemoryRecord{},
+		approvals:   map[string]PendingApproval{},
 	}
 }
 
@@ -282,4 +289,103 @@ func (s *recordingStateStore) SchemaViolations(ctx context.Context, execID strin
 		}
 	}
 	return violations, nil
+}
+
+func (s *recordingStateStore) SaveMemory(ctx context.Context, scope, key, value string) error {
+	if s.memory[scope] == nil {
+		s.memory[scope] = map[string]MemoryRecord{}
+	}
+	s.memory[scope][key] = MemoryRecord{Scope: scope, Key: key, Value: value}
+	return nil
+}
+
+func (s *recordingStateStore) Memory(ctx context.Context, scope, key string) (string, bool, error) {
+	record, ok := s.memory[scope][key]
+	return record.Value, ok, nil
+}
+
+func (s *recordingStateStore) ListMemory(ctx context.Context, scope string) ([]MemoryRecord, error) {
+	records := make([]MemoryRecord, 0, len(s.memory[scope]))
+	for _, record := range s.memory[scope] {
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func (s *recordingStateStore) SaveApproval(ctx context.Context, approval PendingApproval) error {
+	if approval.Status == "" {
+		approval.Status = ApprovalPending
+	}
+	if _, ok := s.approvals[approval.ID]; !ok {
+		s.approvalSeq = append(s.approvalSeq, approval.ID)
+	}
+	if approval.CreatedAt.IsZero() {
+		approval.CreatedAt = time.Now().UTC()
+	}
+	s.approvals[approval.ID] = approval
+	return nil
+}
+
+func (s *recordingStateStore) Approval(ctx context.Context, id string) (PendingApproval, bool, error) {
+	approval, ok := s.approvals[id]
+	return approval, ok, nil
+}
+
+func (s *recordingStateStore) PendingApprovals(ctx context.Context) ([]PendingApproval, error) {
+	pending := make([]PendingApproval, 0, len(s.approvals))
+	for _, id := range s.approvalSeq {
+		if approval := s.approvals[id]; approval.Status == ApprovalPending {
+			pending = append(pending, approval)
+		}
+	}
+	return pending, nil
+}
+
+func (s *recordingStateStore) ResolveApproval(ctx context.Context, id string, status ApprovalStatus, decidedBy string) (PendingApproval, error) {
+	approval, ok := s.approvals[id]
+	if !ok {
+		return PendingApproval{}, errors.New("approval not found")
+	}
+	if approval.Status != ApprovalPending {
+		return PendingApproval{}, errors.New("approval already decided")
+	}
+	approval.Status = status
+	approval.DecidedBy = decidedBy
+	approval.DecidedAt = time.Now().UTC()
+	s.approvals[id] = approval
+	return approval, nil
+}
+
+func TestRunnerPricingRejectsEmptyTable(t *testing.T) {
+	runner := NewRunner(WithPricing(PricingTable{}))
+
+	err := runner.Run(
+		"127.0.0.1:bad-port",
+		From("GET /health"),
+		Reply(JSON[httpTestReply]()),
+	)
+	if err == nil {
+		t.Fatal("Run returned nil, want invalid runner option")
+	}
+	if !strings.Contains(err.Error(), "pricing table is required") {
+		t.Fatalf("Run error = %v, want pricing table context", err)
+	}
+}
+
+func TestRunnerPricingConfiguresHTTPRuntime(t *testing.T) {
+	table := PricingTable{
+		"anthropic/claude-sonnet-4-6": PerMillion(3, 15, 0.30, 3.75),
+	}
+	runner := NewRunner(WithPricing(table))
+	rt := defaultHTTPRuntime()
+
+	if err := runner.configureHTTPRuntime(&rt); err != nil {
+		t.Fatalf("configureHTTPRuntime returned error: %v", err)
+	}
+	if len(rt.pricing) != 1 {
+		t.Fatalf("pricing entries = %d, want 1", len(rt.pricing))
+	}
+	if _, ok := rt.pricing["anthropic/claude-sonnet-4-6"]; !ok {
+		t.Fatalf("pricing missing expected model rate: %+v", rt.pricing)
+	}
 }

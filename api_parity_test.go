@@ -46,10 +46,15 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.IdempotencyKey("Idempotency-Key")
 	_ = ovr.VerifySignature("STRIPE_SIGNING_SECRET", "Stripe-Signature")
 	_ = ovr.WorkerPool(4)
+	_ = ovr.StreamDLQ("kafka://broker:9092/topic.dlq", 5)
+	_ = ovr.StreamMaxInFlight(8)
+	_ = ovr.StreamAckPolicy(ovr.StreamAckManual)
+	_ = ovr.StreamAckAuto
 
 	// Pipe option surface.
 	_ = ovr.Pipe
 	_ = ovr.Model("anthropic/claude-sonnet-4-6")
+	_ = ovr.Fallback("anthropic/claude-sonnet-4-6", "openai/gpt-4.1-mini")
 	_ = ovr.Timeout("30s")
 	_ = ovr.MaxTokens(500_000)
 	_ = ovr.MaxCostUSD(5.0)
@@ -79,6 +84,9 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.SSE()
 	_ = ovr.Accepted()
 	_ = ovr.Queue("nats://127.0.0.1:4222/results")
+	_ = ovr.Queue("kafka://broker:9092/results")
+	_ = ovr.Queue("redis://127.0.0.1:6379/results")
+	_ = ovr.Queue("sqs://sqs.us-east-1.amazonaws.com/123456789012/results")
 	_ = ovr.Log()
 	_ = ovr.File("./out/result.json")
 
@@ -103,10 +111,26 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.Validate
 	_ = ovr.WithPermissionPolicy
 	_ = ovr.WithStateStore
+	_ = ovr.MemoryRecord{}
+	// StateStore now carries scoped persistent agent memory; reference the
+	// method set so signature drift on the public interface breaks the build.
+	var memStore ovr.StateStore
+	if memStore != nil {
+		_ = memStore.SaveMemory
+		_ = memStore.Memory
+		_ = memStore.ListMemory
+	}
 	_ = ovr.WithHooks
 	_ = ovr.WithSandbox
 	_ = ovr.WithSchemaRepairAttempts
 	_ = ovr.WithTracer
+	_ = ovr.WithOTLPExporter
+	_ = ovr.OTLPServiceName
+	_ = ovr.OTLPHeaders
+	_ = ovr.WithPricing
+	_ = ovr.WithProviderBudget
+	_ = ovr.PerMillion
+	_ = ovr.PricingTable{"anthropic/claude-sonnet-4-6": ovr.ModelRate{}}
 	_ = ovr.NopTracer()
 
 	// Exercise the runner constructor without starting any runtime so the

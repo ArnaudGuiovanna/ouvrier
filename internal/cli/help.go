@@ -33,7 +33,8 @@ flags for non-interactive scaffolding.
 
 Options:
       --name string      Project name
-      --trigger string   HTTP trigger, for example "POST /tickets"
+      --trigger string   Trigger: http "POST /tickets", cron "0 6 * * *",
+                         webhook "webhook github", or stream "stream kafka://tickets"
       --model string     Model ID, for example anthropic/claude-sonnet-4-6
       --dir string       Parent directory for the project (default ".")
       --yes              Confirm non-interactive scaffold
@@ -163,19 +164,28 @@ and a body placeholder. Refuses to overwrite an existing SKILL.md. Also
 appends an ovr.Skill("<name>") line into the first ovr.Pipe block in main.go.
 `
 
-const devHelp = `Run the worker locally (go run .) until interrupted.
+const devHelp = `Run the worker locally (go run .) with hot reload until interrupted.
 
 Usage: ouvrier dev [flags]
 
 Options:
       --addr string   Address override exposed via PIP_ADDR (default ":8080")
       --dir string    Project directory containing main.go and pip.yaml (default ".")
+      --no-reload     Disable hot reload; run "go run ." once
+      --no-dotenv     Do not auto-load a local .env into the worker environment
   -h, --help          Show this help message
 
-This is the v0.1 dev runner: it shells out to "go run ." in --dir, streams
-stdout/stderr, and forwards SIGINT/SIGTERM to the child process. Hot reload
-of main.go, tools/, and skills/ is a future enhancement and is NOT implemented
-in v0.1 -- restart ouvrier dev after edits.
+The dev runner shells out to "go run ." in --dir, streams stdout/stderr, and
+forwards SIGINT/SIGTERM to the child process. Hot reload watches *.go files,
+tools/, skills/, and pip.yaml (ignoring .ouvrier/ and build artifacts) by
+polling mod-times; on a change it gracefully stops the worker and restarts it.
+A build or start failure is logged and the watcher keeps running. Pass
+--no-reload to run the worker once without watching.
+
+For convenience, dev auto-loads a local <dir>/.env into the worker environment.
+The real process environment always wins, so explicitly-set variables are never
+overridden, and .env values are never printed. This is dev-only; deployed
+binaries are unaffected. Pass --no-dotenv to disable.
 `
 
 const deployHelp = `Ship a project to a remote host or build an image for it.

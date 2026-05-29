@@ -157,8 +157,9 @@ Interactive scaffold:
 ouvrier new
 ```
 
-The v0.1 TUI asks for a project name, HTTP trigger, model, and review
-confirmation, then generates the project.
+The TUI asks for a project name, trigger, model, and review confirmation, then
+generates the project. The trigger step accepts HTTP, cron, webhook, and stream
+forms.
 
 Non-interactive scaffold:
 
@@ -171,8 +172,12 @@ ouvrier new \
   --dir /tmp
 ```
 
-The v0.1 scaffold accepts HTTP `GET` and `POST` triggers. Cron, webhook, and
-stream triggers are available in Go code.
+The scaffold accepts every supported trigger category via `--trigger`:
+
+- HTTP routes: `"POST /tickets"`, `"GET /health"` (terminates with `Reply(JSON)`).
+- Cron: `"0 6 * * *"` or `"cron @every 1h"` (terminates with `Sink(Log())`).
+- Webhook: `"webhook github"` (terminates with `Sink(Log())`).
+- Stream: `"stream kafka://tickets"` (terminates with `Sink(Log())`).
 
 ## Triggers
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	internalsandbox "github.com/ArnaudGuiovanna/ouvrier/internal/sandbox"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
@@ -33,6 +34,8 @@ type Runner struct {
 	sandbox              SandboxConfig
 	schemaRepairAttempts int
 	tracer               Tracer
+	pricing              PricingTable
+	providerBudgets      map[string]int
 	err                  error
 }
 
@@ -43,6 +46,8 @@ type runnerConfig struct {
 	sandbox              SandboxConfig
 	schemaRepairAttempts int
 	tracer               Tracer
+	pricing              PricingTable
+	providerBudgets      map[string]int
 	err                  error
 }
 
@@ -98,6 +103,8 @@ func NewRunner(options ...RunnerOption) *Runner {
 		sandbox:              cfg.sandbox,
 		schemaRepairAttempts: cfg.schemaRepairAttempts,
 		tracer:               cfg.tracer,
+		pricing:              cfg.pricing,
+		providerBudgets:      cfg.providerBudgets,
 		err:                  cfg.err,
 	}
 }
@@ -113,6 +120,80 @@ func WithTracer(tracer Tracer) RunnerOption {
 			return
 		}
 		cfg.tracer = tracer
+	}
+}
+
+// WithOTLPExporter installs a Tracer that ships spans to an OTLP/HTTP
+// collector at endpoint (e.g. "https://collector:4318"); the exporter appends
+// "/v1/traces". Spans are encoded as OTLP/HTTP JSON with no heavy otel SDK
+// dependency, and attributes are redacted before export. It is a convenience
+// wrapper over WithTracer; passing both means the last option wins. An empty
+// endpoint is rejected. Default off: when this option is unset, behavior is
+// unchanged.
+func WithOTLPExporter(endpoint string, options ...OTLPExporterOption) RunnerOption {
+	return func(cfg *runnerConfig) {
+		opts := make([]events.OTLPOption, 0, len(options))
+		for _, option := range options {
+			if option != nil {
+				opts = append(opts, events.OTLPOption(option))
+			}
+		}
+		exporter, err := events.NewOTLPExporter(endpoint, opts...)
+		if err != nil {
+			cfg.setErr(err)
+			return
+		}
+		cfg.tracer = exporter
+	}
+}
+
+// OTLPExporterOption configures the OTLP exporter installed by WithOTLPExporter.
+type OTLPExporterOption = events.OTLPOption
+
+// OTLPServiceName sets the service.name resource attribute on exported spans.
+func OTLPServiceName(name string) OTLPExporterOption {
+	return events.WithOTLPServiceName(name)
+}
+
+// OTLPHeaders attaches additional HTTP headers (e.g. authorization for hosted
+// collectors) to every OTLP export request.
+func OTLPHeaders(headers map[string]string) OTLPExporterOption {
+	return events.WithOTLPHeaders(headers)
+}
+
+// WithPricing installs a pricing table used to compute per-call and
+// per-execution cost. When unset, cost stays best-effort (zero) with no
+// behavior change.
+func WithPricing(table PricingTable) RunnerOption {
+	return func(cfg *runnerConfig) {
+		if len(table) == 0 {
+			cfg.setErr(errors.New("pricing table is required"))
+			return
+		}
+		cfg.pricing = table
+	}
+}
+
+// WithProviderBudget bounds the number of concurrent in-flight LLM calls for a
+// single provider (the part before "/" in a model id). It prevents one
+// provider's rate limit from stalling calls routed to other providers. The
+// budget is shared across every Pipe in the runner. A limit less than or equal
+// to zero is rejected.
+func WithProviderBudget(provider string, maxInFlight int) RunnerOption {
+	return func(cfg *runnerConfig) {
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			cfg.setErr(errors.New("provider budget name is required"))
+			return
+		}
+		if maxInFlight <= 0 {
+			cfg.setErr(errors.New("provider budget max in-flight must be greater than zero"))
+			return
+		}
+		if cfg.providerBudgets == nil {
+			cfg.providerBudgets = make(map[string]int)
+		}
+		cfg.providerBudgets[provider] = maxInFlight
 	}
 }
 
@@ -305,6 +386,12 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 		rt.sandbox = sandbox
 	}
 	rt.schemaRepairAttempts = r.schemaRepairAttempts
+	if len(r.pricing) > 0 {
+		rt.pricing = r.pricing
+	}
+	if gate := harness.NewProviderGate(r.providerBudgets); gate != nil {
+		rt.providerGate = gate
+	}
 	return nil
 }
 

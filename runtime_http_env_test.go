@@ -23,6 +23,18 @@ func clearProviderEnv(t *testing.T) {
 		"OLLAMA_BASE_URL",
 		"VLLM_API_KEY",
 		"VLLM_BASE_URL",
+		"GROQ_API_KEY",
+		"GROQ_BASE_URL",
+		"DEEPSEEK_API_KEY",
+		"DEEPSEEK_BASE_URL",
+		"AZURE_OPENAI_API_KEY",
+		"AZURE_OPENAI_BASE_URL",
+		"AZURE_OPENAI_API_VERSION",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"AWS_REGION",
+		"AWS_BEDROCK_BASE_URL",
 	} {
 		t.Setenv(key, "")
 	}
@@ -79,6 +91,13 @@ func TestProviderRegistryFromEnvRoutesAllV01ProviderPrefixes(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
 	t.Setenv("MISTRAL_API_KEY", "mistral-key")
 	t.Setenv("GEMINI_API_KEY", "gemini-key")
+	t.Setenv("GROQ_API_KEY", "groq-key")
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-key")
+	t.Setenv("AZURE_OPENAI_API_KEY", "azure-key")
+	t.Setenv("AZURE_OPENAI_BASE_URL", "https://example.openai.azure.com")
+	t.Setenv("AWS_ACCESS_KEY_ID", "aws-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+	t.Setenv("AWS_REGION", "us-east-1")
 
 	registry, err := providerRegistryFromEnv()
 	if err != nil {
@@ -94,6 +113,10 @@ func TestProviderRegistryFromEnvRoutesAllV01ProviderPrefixes(t *testing.T) {
 		{model: "mistral/mistral-large-latest", want: "mistral"},
 		{model: "gemini/gemini-2.0-flash", want: "gemini"},
 		{model: "vllm/qwen2.5-coder", want: "vllm"},
+		{model: "groq/llama-3.3-70b-versatile", want: "groq"},
+		{model: "deepseek/deepseek-chat", want: "deepseek"},
+		{model: "azure/gpt-4o-deploy", want: "azure"},
+		{model: "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0", want: "bedrock"},
 	}
 
 	for _, tt := range tests {

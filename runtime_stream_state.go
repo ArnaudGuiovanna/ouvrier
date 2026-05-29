@@ -11,19 +11,41 @@ import (
 	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
-func (rt httpRuntime) emitStreamDeadLetter(ctx context.Context, plan runtimeplan.Plan, result planRunResult, message streamMessage, deliveryErr error) error {
+func (rt httpRuntime) emitStreamDeadLetter(ctx context.Context, plan runtimeplan.Plan, result planRunResult, message streamMessage, deliveryErr error, attempt int) error {
+	dlq := "event_only"
+	if target := strings.TrimSpace(plan.Trigger.DLQTarget); target != "" {
+		dlq = streamDisplayURI(target)
+	}
 	payload := map[string]any{
 		"trigger":  "stream",
 		"uri":      streamDisplayURI(plan.Trigger.URI),
 		"terminal": string(plan.Terminal.Kind),
 		"steps":    len(plan.Steps),
 		"error":    deliveryErr.Error(),
-		"dlq":      "event_only",
+		"reason":   deliveryErr.Error(),
+		"dlq":      dlq,
+	}
+	if attempt > 0 {
+		payload["attempt"] = attempt
 	}
 	if id := strings.TrimSpace(message.ID); id != "" {
 		payload["id"] = id
 	}
 	return rt.emitRuntimeEvent(ctx, result, events.EventStreamDeadLettered, payload)
+}
+
+func (rt httpRuntime) emitStreamRedelivered(ctx context.Context, plan runtimeplan.Plan, result planRunResult, message streamMessage, deliveryErr error, attempt int) error {
+	payload := map[string]any{
+		"trigger": "stream",
+		"uri":     streamDisplayURI(plan.Trigger.URI),
+		"reason":  deliveryErr.Error(),
+		"error":   deliveryErr.Error(),
+		"attempt": attempt,
+	}
+	if id := strings.TrimSpace(message.ID); id != "" {
+		payload["id"] = id
+	}
+	return rt.emitRuntimeEvent(ctx, result, events.EventStreamRedelivered, payload)
 }
 
 func (rt httpRuntime) reserveStreamIdempotency(ctx context.Context, plan runtimeplan.Plan, message streamMessage) (*runtimeplan.Session, bool, error) {

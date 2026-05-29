@@ -133,7 +133,8 @@ func runStreamLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan) e
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	workerPool := newCronWorkerPool(plan.Trigger.WorkerPool)
+	workerPool := newCronWorkerPool(streamInFlightLimit(plan.Trigger))
+	attempts := newStreamAttemptTracker()
 	processErr := make(chan error, 1)
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -168,7 +169,7 @@ func runStreamLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan) e
 		go func(message streamMessage) {
 			defer wg.Done()
 			defer releaseCronWorker(workerPool)
-			if err := rt.processStreamMessage(runCtx, plan, message); err != nil {
+			if err := rt.processStreamMessage(runCtx, plan, message, attempts); err != nil {
 				select {
 				case processErr <- err:
 					cancel()
@@ -179,18 +180,87 @@ func runStreamLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan) e
 	}
 }
 
-func (rt httpRuntime) processStreamMessage(ctx context.Context, plan runtimeplan.Plan, message streamMessage) error {
+// streamInFlightLimit returns the bound on concurrently processed stream
+// messages. StreamMaxInFlight is the dedicated backpressure knob; WorkerPool is
+// honoured for backwards compatibility when MaxInFlight is unset.
+func streamInFlightLimit(trigger runtimeplan.Trigger) int {
+	if trigger.MaxInFlight > 0 {
+		return trigger.MaxInFlight
+	}
+	return trigger.WorkerPool
+}
+
+// streamManualAck reports whether the trigger uses the manual acknowledgement
+// policy, under which the runtime never auto-acks a successfully processed
+// delivery.
+func streamManualAck(trigger runtimeplan.Trigger) bool {
+	return strings.EqualFold(strings.TrimSpace(trigger.AckPolicy), string(StreamAckManual))
+}
+
+func (rt httpRuntime) processStreamMessage(ctx context.Context, plan runtimeplan.Plan, message streamMessage, attempts *streamAttemptTracker) error {
+	attempt := attempts.next(message.ID)
+
 	result, err := runStreamPlanOnce(ctx, rt, plan, message)
 	if err == nil {
+		attempts.clear(message.ID)
+		// Under the manual ack policy the handler owns acknowledgement: the
+		// runtime does not auto-ack, so the broker keeps the delivery until the
+		// source's own ack closure is invoked elsewhere.
+		if streamManualAck(plan.Trigger) {
+			return nil
+		}
 		if ackErr := ackStreamMessage(ctx, message); ackErr != nil {
-			return rt.emitStreamDeadLetter(ctx, plan, result, message, ackErr)
+			return rt.deadLetterStreamMessage(ctx, plan, result, message, ackErr, attempt)
 		}
 		return nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return errors.Join(rt.emitStreamDeadLetter(ctx, plan, result, message, err), nackStreamMessage(ctx, message, err))
+
+	maxAttempts := plan.Trigger.MaxAttempts
+	if maxAttempts <= 0 {
+		// No retry budget configured: preserve the historical behaviour of
+		// dead-lettering on the first failure.
+		attempts.clear(message.ID)
+		return errors.Join(
+			rt.deadLetterStreamMessage(ctx, plan, result, message, err, attempt),
+			nackStreamMessage(ctx, message, err),
+		)
+	}
+	if attempt < maxAttempts {
+		// Within the retry budget: nack so the broker redelivers and emit a
+		// redelivery event for observability.
+		return errors.Join(
+			rt.emitStreamRedelivered(ctx, plan, result, message, err, attempt),
+			nackStreamMessage(ctx, message, err),
+		)
+	}
+	// Exhausted the retry budget: dead-letter the poisoned message.
+	attempts.clear(message.ID)
+	return rt.deadLetterStreamMessage(ctx, plan, result, message, err, attempt)
+}
+
+// deadLetterStreamMessage routes the poisoned message to the configured DLQ
+// target (when one is set) and emits the stream_dead_lettered event. When a DLQ
+// target is configured the source delivery is acked so the broker stops
+// redelivering it; otherwise the message is left for the broker to handle.
+func (rt httpRuntime) deadLetterStreamMessage(ctx context.Context, plan runtimeplan.Plan, result planRunResult, message streamMessage, deliveryErr error, attempt int) error {
+	target := strings.TrimSpace(plan.Trigger.DLQTarget)
+	if target == "" || rt.streamDLQ == nil {
+		return rt.emitStreamDeadLetter(ctx, plan, result, message, deliveryErr, attempt)
+	}
+	routeErr := rt.streamDLQ.Route(ctx, target, message)
+	if routeErr != nil {
+		// Could not move it to the DLQ: nack so the broker keeps the message.
+		return errors.Join(routeErr, nackStreamMessage(ctx, message, deliveryErr))
+	}
+	// The message now lives in the DLQ; ack the source so it is not
+	// redelivered, then record the dead-letter event.
+	return errors.Join(
+		ackStreamMessage(ctx, message),
+		rt.emitStreamDeadLetter(ctx, plan, result, message, deliveryErr, attempt),
+	)
 }
 
 func ackStreamMessage(ctx context.Context, message streamMessage) error {

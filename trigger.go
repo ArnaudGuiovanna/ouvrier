@@ -147,6 +147,10 @@ type fromConfig struct {
 	idempotencyHeader string
 	signatureEnv      string
 	signatureHeader   string
+	dlqTarget         string
+	maxAttempts       int
+	maxInFlight       int
+	ackPolicy         string
 	err               error
 }
 
@@ -165,6 +169,90 @@ func (o workerPoolOption) applyFrom(config *fromConfig) {
 		return
 	}
 	config.workerPool = o.limit
+}
+
+type streamDLQOption struct {
+	target      string
+	maxAttempts int
+}
+
+// StreamDLQ routes a poisoned stream message to a dead-letter target once it
+// has been redelivered maxAttempts times without success. maxAttempts counts
+// total processing attempts before the message is dead-lettered.
+func StreamDLQ(target string, maxAttempts int) FromOption {
+	return streamDLQOption{target: strings.TrimSpace(target), maxAttempts: maxAttempts}
+}
+
+func (o streamDLQOption) applyFrom(config *fromConfig) {
+	if o.target == "" {
+		config.setErr(fmt.Errorf("%w: StreamDLQ target is required", ErrInvalidNode))
+		return
+	}
+	if err := validateStreamURI(o.target); err != nil {
+		config.setErr(fmt.Errorf("%w: StreamDLQ target %v", ErrInvalidNode, err))
+		return
+	}
+	if o.maxAttempts <= 0 {
+		config.setErr(fmt.Errorf("%w: StreamDLQ maxAttempts must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.dlqTarget = o.target
+	config.maxAttempts = o.maxAttempts
+}
+
+// StreamAckMode selects when a stream delivery is acknowledged to the source
+// broker.
+type StreamAckMode string
+
+const (
+	// StreamAckAuto acknowledges a delivery automatically once the pipeline has
+	// processed it successfully (or it has been routed to the DLQ). This is the
+	// default and matches at-least-once delivery with runtime-managed acks.
+	StreamAckAuto StreamAckMode = "auto"
+	// StreamAckManual leaves acknowledgement to the message handler: the runtime
+	// never auto-acks a successfully processed delivery, so the broker keeps
+	// redelivering until the source's own ack closure is invoked. Brokers whose
+	// receiver does not expose an ack closure treat this as a no-op (the
+	// transport's own delivery semantics apply).
+	StreamAckManual StreamAckMode = "manual"
+)
+
+type streamAckPolicyOption struct {
+	policy StreamAckMode
+}
+
+// StreamAckPolicy configures the per-broker acknowledgement mode for a stream
+// trigger. See StreamAckAuto and StreamAckManual.
+func StreamAckPolicy(policy StreamAckMode) FromOption {
+	return streamAckPolicyOption{policy: policy}
+}
+
+func (o streamAckPolicyOption) applyFrom(config *fromConfig) {
+	switch o.policy {
+	case StreamAckAuto, StreamAckManual:
+		config.ackPolicy = string(o.policy)
+	default:
+		config.setErr(fmt.Errorf("%w: StreamAckPolicy must be %q or %q", ErrInvalidNode, StreamAckAuto, StreamAckManual))
+	}
+}
+
+type streamMaxInFlightOption struct {
+	limit int
+}
+
+// StreamMaxInFlight bounds the number of stream messages processed
+// concurrently so a slow handler applies backpressure to the broker instead of
+// buffering deliveries without bound.
+func StreamMaxInFlight(limit int) FromOption {
+	return streamMaxInFlightOption{limit: limit}
+}
+
+func (o streamMaxInFlightOption) applyFrom(config *fromConfig) {
+	if o.limit <= 0 {
+		config.setErr(fmt.Errorf("%w: StreamMaxInFlight must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.maxInFlight = o.limit
 }
 
 type idempotencyKeyOption struct {

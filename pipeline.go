@@ -13,6 +13,7 @@ type PipeOption interface {
 
 type pipeConfig struct {
 	model      string
+	fallback   []string
 	output     *outputSpec
 	tools      []toolSpec
 	bash       []bashSpec
@@ -105,6 +106,48 @@ func Model(id string) PipeOption {
 
 func (o modelOption) applyPipe(config *pipeConfig) {
 	config.model = o.id
+}
+
+type fallbackOption struct {
+	models []string
+	err    error
+}
+
+// Fallback declares an ordered list of fallback models for a Pipe. On a
+// classified provider failure (transient, rate-limit, or auth) of the primary
+// model, the harness tries each fallback model in order before failing.
+// Permanent and validation failures never fall through.
+func Fallback(models ...string) PipeOption {
+	option := fallbackOption{}
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			option.err = fmt.Errorf("%w: Fallback model is required", ErrInvalidNode)
+			return option
+		}
+		prov, name, ok := strings.Cut(model, "/")
+		if !ok || strings.TrimSpace(prov) == "" || strings.TrimSpace(name) == "" {
+			option.err = fmt.Errorf("%w: Fallback model %q must use provider/model form", ErrInvalidNode, model)
+			return option
+		}
+		option.models = append(option.models, model)
+	}
+	if len(option.models) == 0 {
+		option.err = fmt.Errorf("%w: Fallback requires at least one model", ErrInvalidNode)
+	}
+	return option
+}
+
+func (o fallbackOption) applyPipe(config *pipeConfig) {
+	if o.err != nil {
+		config.setErr(o.err)
+		return
+	}
+	if len(config.fallback) > 0 {
+		config.setErr(fmt.Errorf("%w: Pipe Fallback declared more than once", ErrInvalidNode))
+		return
+	}
+	config.fallback = append([]string(nil), o.models...)
 }
 
 func (c *pipeConfig) setErr(err error) {

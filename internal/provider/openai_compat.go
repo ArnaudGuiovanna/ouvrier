@@ -12,6 +12,21 @@ import (
 	"time"
 )
 
+// authStyle selects how the API key is presented to the upstream provider.
+type authStyle int
+
+const (
+	// authBearer sends "Authorization: Bearer <key>" (OpenAI default).
+	authBearer authStyle = iota
+	// authAPIKeyHeader sends "api-key: <key>" (Azure OpenAI style).
+	authAPIKeyHeader
+)
+
+// compatURLBuilder shapes the chat-completions endpoint URL for a request.
+// model is the unprefixed model/deployment name. When nil, the default
+// "<baseURL>/chat/completions" shaping is used.
+type compatURLBuilder func(baseURL, model string) string
+
 type openAICompatConfig struct {
 	name           string
 	defaultBaseURL string
@@ -19,6 +34,8 @@ type openAICompatConfig struct {
 	baseURL        string
 	apiKeyRequired bool
 	httpClient     *http.Client
+	authStyle      authStyle
+	urlBuilder     compatURLBuilder
 }
 
 type openAICompatProvider struct {
@@ -26,6 +43,8 @@ type openAICompatProvider struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	authStyle  authStyle
+	urlBuilder compatURLBuilder
 }
 
 func newOpenAICompatProvider(cfg openAICompatConfig) (*openAICompatProvider, error) {
@@ -57,7 +76,28 @@ func newOpenAICompatProvider(cfg openAICompatConfig) (*openAICompatProvider, err
 		apiKey:     apiKey,
 		baseURL:    baseURL,
 		httpClient: httpClient,
+		authStyle:  cfg.authStyle,
+		urlBuilder: cfg.urlBuilder,
 	}, nil
+}
+
+func (p *openAICompatProvider) requestURL(model string) string {
+	if p.urlBuilder != nil {
+		return p.urlBuilder(p.baseURL, model)
+	}
+	return p.baseURL + "/chat/completions"
+}
+
+func (p *openAICompatProvider) setAuthHeader(header http.Header) {
+	if p.apiKey == "" {
+		return
+	}
+	if p.authStyle == authAPIKeyHeader {
+		header.Set("api-key", p.apiKey)
+		return
+	}
+	// authBearer (the default) sends a standard bearer token.
+	header.Set("Authorization", "Bearer "+p.apiKey)
 }
 
 func (p *openAICompatProvider) Name() string {
@@ -90,14 +130,12 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (Respo
 		return Response{}, fmt.Errorf("marshal %s request: %w", p.name, err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.requestURL(ref.Name), bytes.NewReader(payload))
 	if err != nil {
 		return Response{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if p.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
+	p.setAuthHeader(httpReq.Header)
 
 	httpResp, err := p.httpClient.Do(httpReq)
 	if err != nil {

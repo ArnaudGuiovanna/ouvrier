@@ -41,6 +41,11 @@ type Action struct {
 type Decision struct {
 	Allowed bool
 	Reason  string
+	// Suspended marks a human-in-the-loop suspension: the action is neither
+	// allowed nor hard-denied, but parked behind a pending approval identified
+	// by ApprovalID until an operator resolves it.
+	Suspended  bool
+	ApprovalID string
 }
 
 type PermissionPolicy interface {

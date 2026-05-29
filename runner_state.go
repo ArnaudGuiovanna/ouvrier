@@ -71,6 +71,51 @@ type StateStore interface {
 	EventsSince(context.Context, string, uint64) ([]Event, error)
 	AddSchemaViolation(context.Context, SchemaViolation) (SchemaViolation, error)
 	SchemaViolations(context.Context, string) ([]SchemaViolation, error)
+	SaveMemory(context.Context, string, string, string) error
+	Memory(context.Context, string, string) (string, bool, error)
+	ListMemory(context.Context, string) ([]MemoryRecord, error)
+	SaveApproval(context.Context, PendingApproval) error
+	Approval(context.Context, string) (PendingApproval, bool, error)
+	PendingApprovals(context.Context) ([]PendingApproval, error)
+	ResolveApproval(context.Context, string, ApprovalStatus, string) (PendingApproval, error)
+}
+
+// ApprovalStatus is the public lifecycle state of a human-in-the-loop approval.
+type ApprovalStatus string
+
+const (
+	ApprovalPending  ApprovalStatus = "pending"
+	ApprovalApproved ApprovalStatus = "approved"
+	ApprovalDenied   ApprovalStatus = "denied"
+)
+
+// PendingApproval is the public state-store representation of one
+// human-in-the-loop approval request that suspends an execution until an
+// operator approves or denies the gated tool call. The Reason is redaction-safe
+// and never carries tool arguments or skill bodies.
+type PendingApproval struct {
+	ID         string
+	ExecID     string
+	SessionID  string
+	TraceID    string
+	ToolName   string
+	ToolCallID string
+	ToolKind   string
+	Effect     string
+	Reason     string
+	Status     ApprovalStatus
+	CreatedAt  time.Time
+	DecidedAt  time.Time
+	DecidedBy  string
+}
+
+// MemoryRecord is the public state-store representation of one persistent,
+// scoped agent-memory entry that survives across sessions.
+type MemoryRecord struct {
+	Scope     string
+	Key       string
+	Value     string
+	UpdatedAt time.Time
 }
 
 type publicStateStoreAdapter struct {
@@ -167,6 +212,97 @@ func (s publicStateStoreAdapter) SchemaViolations(ctx context.Context, execID st
 		internal[i] = internalSchemaViolation(violation)
 	}
 	return internal, nil
+}
+
+func (s publicStateStoreAdapter) SaveMemory(ctx context.Context, scope, key, value string) error {
+	return s.store.SaveMemory(ctx, scope, key, value)
+}
+
+func (s publicStateStoreAdapter) Memory(ctx context.Context, scope, key string) (string, bool, error) {
+	return s.store.Memory(ctx, scope, key)
+}
+
+func (s publicStateStoreAdapter) ListMemory(ctx context.Context, scope string) ([]internalstate.MemoryRecord, error) {
+	records, err := s.store.ListMemory(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	internal := make([]internalstate.MemoryRecord, len(records))
+	for i, record := range records {
+		internal[i] = internalMemoryRecord(record)
+	}
+	return internal, nil
+}
+
+func (s publicStateStoreAdapter) SaveApproval(ctx context.Context, approval internalstate.PendingApproval) error {
+	return s.store.SaveApproval(ctx, publicPendingApproval(approval))
+}
+
+func (s publicStateStoreAdapter) Approval(ctx context.Context, id string) (internalstate.PendingApproval, bool, error) {
+	approval, ok, err := s.store.Approval(ctx, id)
+	return internalPendingApproval(approval), ok, err
+}
+
+func (s publicStateStoreAdapter) PendingApprovals(ctx context.Context) ([]internalstate.PendingApproval, error) {
+	approvals, err := s.store.PendingApprovals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	internal := make([]internalstate.PendingApproval, len(approvals))
+	for i, approval := range approvals {
+		internal[i] = internalPendingApproval(approval)
+	}
+	return internal, nil
+}
+
+func (s publicStateStoreAdapter) ResolveApproval(ctx context.Context, id string, status internalstate.ApprovalStatus, decidedBy string) (internalstate.PendingApproval, error) {
+	resolved, err := s.store.ResolveApproval(ctx, id, ApprovalStatus(status), decidedBy)
+	return internalPendingApproval(resolved), err
+}
+
+func publicPendingApproval(approval internalstate.PendingApproval) PendingApproval {
+	return PendingApproval{
+		ID:         approval.ID,
+		ExecID:     approval.ExecID,
+		SessionID:  approval.SessionID,
+		TraceID:    approval.TraceID,
+		ToolName:   approval.ToolName,
+		ToolCallID: approval.ToolCallID,
+		ToolKind:   approval.ToolKind,
+		Effect:     approval.Effect,
+		Reason:     approval.Reason,
+		Status:     ApprovalStatus(approval.Status),
+		CreatedAt:  approval.CreatedAt,
+		DecidedAt:  approval.DecidedAt,
+		DecidedBy:  approval.DecidedBy,
+	}
+}
+
+func internalPendingApproval(approval PendingApproval) internalstate.PendingApproval {
+	return internalstate.PendingApproval{
+		ID:         approval.ID,
+		ExecID:     approval.ExecID,
+		SessionID:  approval.SessionID,
+		TraceID:    approval.TraceID,
+		ToolName:   approval.ToolName,
+		ToolCallID: approval.ToolCallID,
+		ToolKind:   approval.ToolKind,
+		Effect:     approval.Effect,
+		Reason:     approval.Reason,
+		Status:     internalstate.ApprovalStatus(approval.Status),
+		CreatedAt:  approval.CreatedAt,
+		DecidedAt:  approval.DecidedAt,
+		DecidedBy:  approval.DecidedBy,
+	}
+}
+
+func internalMemoryRecord(record MemoryRecord) internalstate.MemoryRecord {
+	return internalstate.MemoryRecord{
+		Scope:     record.Scope,
+		Key:       record.Key,
+		Value:     record.Value,
+		UpdatedAt: record.UpdatedAt,
+	}
 }
 
 func publicExecution(execution internalstate.Execution) Execution {

@@ -50,6 +50,11 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 		SideEffects:      append([]string(nil), tool.metadata.SideEffects...),
 		RequiresApproval: tool.metadata.RequiresApproval,
 	}
+	if action.RequiresApproval {
+		if gate, approvalCtx, ok := approvalGateFromContext(ctx); ok {
+			return e.suspendForApproval(ctx, action, call, gate, approvalCtx)
+		}
+	}
 	decision, err := permissionPolicy.Authorize(ctx, action)
 	observeErr := observePermissionDecision(ctx, PermissionDecisionAudit{
 		Action:   action,
@@ -70,6 +75,41 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 		reason = policy.ErrDenied.Error()
 	}
 	return errorResult(call, fmt.Errorf("%w: %s", policy.ErrDenied, reason)), false, nil
+}
+
+func (e *Executor) suspendForApproval(ctx context.Context, action policy.Action, call provider.ToolCall, gate ApprovalGate, approvalCtx ApprovalContext) (provider.ToolResult, bool, error) {
+	reason := "tool requires explicit approval"
+	approvalID, recordErr := gate.RecordPendingApproval(ctx, ApprovalRequest{
+		ExecID:     approvalCtx.ExecID,
+		SessionID:  approvalCtx.SessionID,
+		TraceID:    approvalCtx.TraceID,
+		ToolName:   action.ToolName,
+		ToolCallID: action.ToolCallID,
+		ToolKind:   action.ToolKind,
+		Effect:     string(action.Effect),
+		Reason:     reason,
+	})
+	decision := policy.Decision{Allowed: false, Suspended: true, ApprovalID: approvalID, Reason: reason}
+	if recordErr != nil {
+		decision = policy.Decision{Allowed: false, Reason: reason}
+	}
+	observeErr := observePermissionDecision(ctx, PermissionDecisionAudit{
+		Action:   action,
+		Decision: decision,
+		Err:      recordErr,
+	})
+	if recordErr != nil {
+		return provider.ToolResult{}, false, errors.Join(recordErr, observeErr)
+	}
+	if observeErr != nil {
+		return provider.ToolResult{}, false, observeErr
+	}
+	return provider.ToolResult{}, false, &SuspendedError{
+		ApprovalID: approvalID,
+		ExecID:     approvalCtx.ExecID,
+		ToolName:   action.ToolName,
+		ToolCallID: action.ToolCallID,
+	}
 }
 
 func observePermissionDecision(ctx context.Context, audit PermissionDecisionAudit) error {

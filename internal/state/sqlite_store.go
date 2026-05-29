@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultSQLitePath   = ".ouvrier/state.db"
-	sqliteSchemaVersion = 2
+	sqliteSchemaVersion = 4
 )
 
 type SQLiteStore struct {
@@ -223,4 +223,28 @@ var sqliteSchemaStatements = []string{
 		schema_name TEXT NOT NULL,
 		error TEXT NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS ouvrier_memory (
+		scope TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (scope, key)
+	)`,
+	`CREATE TABLE IF NOT EXISTS ouvrier_approvals (
+		seq INTEGER PRIMARY KEY AUTOINCREMENT,
+		id TEXT NOT NULL UNIQUE,
+		exec_id TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		trace_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		tool_call_id TEXT NOT NULL,
+		tool_kind TEXT NOT NULL,
+		effect TEXT NOT NULL,
+		reason TEXT NOT NULL,
+		status TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		decided_at TEXT,
+		decided_by TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ouvrier_approvals_status ON ouvrier_approvals(status, seq)`,
 }

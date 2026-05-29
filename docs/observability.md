@@ -25,6 +25,7 @@ process.
 | `GET /admin/traces?last=N`     | Recent execution headers.                     |
 | `GET /admin/traces/<exec-id>`  | Full event timeline for one execution.        |
 | `POST /admin/trigger`          | Manually fire a trigger (cron/HTTP/stream).    |
+| `GET /metrics`                 | Prometheus text exposition (counters + latency summaries). |
 | `GET /dev`                     | Local dev-mode trace viewer UI.               |
 
 Consume them from the terminal with the CLI:
@@ -36,6 +37,70 @@ ouvrier trace <exec-id>               # /admin/traces/<exec-id>
 ```
 
 `PIP_ADMIN_TOKEN` from the environment is used automatically.
+
+## Prometheus `/metrics`
+
+`GET /metrics` returns a hand-rolled Prometheus text exposition (format version
+0.0.4, no third-party dependency) computed on demand from the EventStream and
+StateStore. It shares the admin auth posture: bearer-token protected outside
+local dev mode (`PIP_ENV=dev`), exactly like the `/admin/*` endpoints.
+
+Counters (all monotonic `_total`):
+
+```
+ouvrier_pipeline_started_total / _completed_total / _failed_total
+ouvrier_pipe_started_total     / _completed_total / _failed_total
+ouvrier_llm_call_started_total / _completed_total / _failed_total
+ouvrier_tool_call_started_total / _completed_total / _failed_total
+```
+
+Latency summaries (emitted as `_sum` and `_count` series):
+
+```
+ouvrier_llm_call_duration_ms     # from sanitized llm_call_completed latency_ms
+ouvrier_pipeline_duration_ms     # paired pipeline_started -> completed/failed
+ouvrier_pipe_duration_ms         # paired pipe_started -> completed/failed
+ouvrier_tool_call_duration_ms    # paired tool_call_started -> completed/failed
+```
+
+Values are derived purely from canonical event kinds and the already-sanitized
+`latency_ms` payload, plus event timestamps for the paired durations, so no raw
+payload content (and therefore no secrets) ever reaches the exposition.
+
+Scrape it with Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: ouvrier
+    metrics_path: /metrics
+    authorization:
+      credentials: <PIP_ADMIN_TOKEN>
+    static_configs:
+      - targets: ["ouvrier:8080"]
+```
+
+## Native OTLP exporter
+
+`ovr.WithOTLPExporter(endpoint, opts...)` installs a built-in `Tracer` that
+ships spans to an OTLP/HTTP collector. It is hand-rolled (no OpenTelemetry SDK):
+spans are encoded as OTLP/HTTP JSON and POSTed to `<endpoint>/v1/traces` behind
+an injectable HTTP client. Default off — unset means no behavior change.
+
+```go
+runner := ovr.NewRunner(
+    ovr.WithOTLPExporter("https://collector:4318",
+        ovr.OTLPServiceName("orders-api"),
+        ovr.OTLPHeaders(map[string]string{"Authorization": "Bearer <token>"}),
+    ),
+)
+```
+
+The exporter reuses the same span-pairing logic as the `Tracer` hook (one span
+per pipeline, pipe, session, LLM call, tool call, schema validation, subagent
+task) and redacts span attributes before export (sensitive keys and
+credential-looking strings). Export failures are swallowed so a flaky collector
+never breaks pipeline execution. `WithOTLPExporter` is a convenience wrapper over
+`WithTracer`; passing both means the last option wins.
 
 ## OpenTelemetry / custom tracers
 

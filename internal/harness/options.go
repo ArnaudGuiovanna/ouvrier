@@ -23,23 +23,29 @@ const (
 type Option func(*config) error
 
 type config struct {
-	model           string
-	systemPrompt    string
-	budget          runtimecore.Budget
-	budgetSet       bool
-	budgetLedger    *BudgetLedger
-	parentSession   *runtimecore.Session
-	toolExecutor    *tools.Executor
-	tools           []provider.ToolSpec
-	stateStore      state.Store
-	eventStream     *events.EventStream
-	hookBus         *events.HookBus
-	resultSchema    *runtimecore.ResultSchema
-	schemaRepairs   int
-	providerRetries int
-	retryBackoff    time.Duration
-	promptCache     bool
-	sequentialTools bool
+	model            string
+	systemPrompt     string
+	budget           runtimecore.Budget
+	budgetSet        bool
+	budgetLedger     *BudgetLedger
+	parentSession    *runtimecore.Session
+	toolExecutor     *tools.Executor
+	tools            []provider.ToolSpec
+	stateStore       state.Store
+	eventStream      *events.EventStream
+	hookBus          *events.HookBus
+	resultSchema     *runtimecore.ResultSchema
+	schemaRepairs    int
+	providerRetries  int
+	retryBackoff     time.Duration
+	promptCache      bool
+	sequentialTools  bool
+	pricing          provider.PricingTable
+	streamDeltas     bool
+	fallbackModels   []string
+	providerResolver func(model string) (provider.Provider, error)
+	providerGate     *ProviderGate
+	memoryScope      string
 }
 
 func defaultConfig() config {
@@ -191,6 +197,16 @@ func WithStateStore(store state.Store) Option {
 	}
 }
 
+// WithMemoryScope sets the stable scope used for persistent agent memory. The
+// scope identifies the worker plus logical agent so concurrent agents stay
+// isolated while a single logical agent's memory persists across sessions.
+func WithMemoryScope(scope string) Option {
+	return func(cfg *config) error {
+		cfg.memoryScope = strings.TrimSpace(scope)
+		return nil
+	}
+}
+
 func WithEventStream(stream *events.EventStream) Option {
 	return func(cfg *config) error {
 		if stream == nil {
@@ -231,9 +247,75 @@ func WithSchemaRepairAttempts(max int) Option {
 	}
 }
 
+// WithStreaming enables provider token-delta streaming. When enabled and the
+// configured provider implements provider.StreamingProvider, the harness emits
+// an EventLLMTokenDelta event per token chunk while a completion is in flight.
+// Providers without streaming support fall back to Complete transparently.
+func WithStreaming(enabled bool) Option {
+	return func(cfg *config) error {
+		cfg.streamDeltas = enabled
+		return nil
+	}
+}
+
 func WithSequentialTools() Option {
 	return func(cfg *config) error {
 		cfg.sequentialTools = true
+		return nil
+	}
+}
+
+// WithPricing installs a pricing table used to compute Usage.CostUSD per call.
+// When unset (nil/empty), cost stays best-effort and is left untouched.
+func WithPricing(table provider.PricingTable) Option {
+	return func(cfg *config) error {
+		cfg.pricing = table
+		return nil
+	}
+}
+
+// WithFallback installs an ordered list of fallback model ids. On a classified
+// provider failure (transient, rate-limit, or auth) that survives provider
+// retries, the harness emits a model_fallback event and tries the next model in
+// order before failing. Permanent and validation failures never fall through.
+func WithFallback(models ...string) Option {
+	return func(cfg *config) error {
+		trimmed := make([]string, 0, len(models))
+		for _, model := range models {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				continue
+			}
+			if _, err := provider.ParseModelID(model); err != nil {
+				return err
+			}
+			trimmed = append(trimmed, model)
+		}
+		cfg.fallbackModels = trimmed
+		return nil
+	}
+}
+
+// WithProviderResolver installs a resolver that maps a fallback model id to the
+// provider that serves it. It is required whenever fallback models target a
+// different provider than the primary one. When unset, fallback models are
+// served by the primary provider.
+func WithProviderResolver(resolver func(model string) (provider.Provider, error)) Option {
+	return func(cfg *config) error {
+		if resolver == nil {
+			return errors.New("provider resolver is required")
+		}
+		cfg.providerResolver = resolver
+		return nil
+	}
+}
+
+// WithProviderGate installs a per-provider concurrency gate so one provider's
+// rate limit cannot stall calls routed to other providers. A nil gate disables
+// gating.
+func WithProviderGate(gate *ProviderGate) Option {
+	return func(cfg *config) error {
+		cfg.providerGate = gate
 		return nil
 	}
 }

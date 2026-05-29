@@ -29,15 +29,19 @@ type httpRuntime struct {
 	toolExecutor         *tools.Executor
 	mcpConnector         mcpConnector
 	streamReceiver       streamReceiver
+	streamDLQ            streamDLQ
 	stateStore           state.Store
 	eventStream          *events.EventStream
 	hookBus              *events.HookBus
 	sandbox              *sandbox.Sandbox
 	schemaRepairAttempts int
+	pricing              provider.PricingTable
 	adminToken           string
 	adminRoutes          []httpRoute
 	adminPlans           []adminPlanRoute
 	async                *runtimeAsyncGroup
+	streamDeltas         bool
+	providerGate         *harness.ProviderGate
 }
 
 func defaultHTTPRuntime() httpRuntime {
@@ -48,6 +52,7 @@ func defaultHTTPRuntime() httpRuntime {
 		toolExecutor:   tools.NewExecutor(),
 		mcpConnector:   envMCPConnector{connector: mcpclient.NewEnvConnector()},
 		streamReceiver: newDefaultStreamReceiver(),
+		streamDLQ:      newRoutingStreamDLQ(),
 		eventStream:    stream,
 		adminToken:     adminTokenFromEnv(),
 		async:          newRuntimeAsyncGroup(),
@@ -335,11 +340,26 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		if step.NoCache {
 			harnessOptions = append(harnessOptions, harness.WithPromptCache(false))
 		}
+		if len(rt.pricing) > 0 {
+			harnessOptions = append(harnessOptions, harness.WithPricing(rt.pricing))
+		}
 		if scope.parentSession != nil {
 			harnessOptions = append(harnessOptions, harness.WithParentSession(*scope.parentSession))
 		}
 		if scope.budgetLedger != nil {
 			harnessOptions = append(harnessOptions, harness.WithBudgetLedger(scope.budgetLedger))
+		}
+		if rt.streamDeltas {
+			harnessOptions = append(harnessOptions, harness.WithStreaming(true))
+		}
+		if len(step.Fallback) > 0 {
+			harnessOptions = append(harnessOptions,
+				harness.WithFallback(step.Fallback...),
+				harness.WithProviderResolver(rt.providerForModel),
+			)
+		}
+		if rt.providerGate != nil {
+			harnessOptions = append(harnessOptions, harness.WithProviderGate(rt.providerGate))
 		}
 		h, err := harness.New(stepProvider, harnessOptions...)
 		if err != nil {

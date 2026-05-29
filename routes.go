@@ -150,6 +150,10 @@ func registerHTTPAdminRoutes(mux *http.ServeMux, rt httpRuntime) {
 	mux.HandleFunc("GET /admin/traces", rt.serveAdminTraces)
 	mux.HandleFunc("GET /admin/traces/{execID}", rt.serveAdminTrace)
 	mux.HandleFunc("POST /admin/trigger", rt.serveAdminTrigger)
+	mux.HandleFunc("GET /admin/approvals", rt.serveAdminApprovals)
+	mux.HandleFunc("POST /admin/approvals/{id}", rt.serveAdminApprovalDecision)
+	mux.HandleFunc("POST /admin/streams/replay", rt.serveAdminStreamReplay)
+	mux.HandleFunc("GET /metrics", rt.serveMetrics)
 	registerHTTPDevRoutes(mux, rt)
 }
 
@@ -966,6 +970,10 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 
 	result, err := rt.runPlanResult(req.Context(), route.plan, input)
 	if err != nil {
+		if suspended, ok := suspendedExecutionError(err); ok {
+			writeSuspendedResponse(w, suspended)
+			return
+		}
 		switch {
 		case errors.Is(err, errHTTPProviderNotConfigured):
 			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")

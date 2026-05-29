@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 
-	ovr "github.com/ArnaudGuiovanna/ouvrier"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
@@ -25,6 +24,10 @@ type Config struct {
 	Dir             string
 	FrameworkModule string
 	FrameworkDir    string
+
+	// trigger holds the parsed trigger spec used by the templates. It is
+	// populated by normalizeConfig and never set by callers.
+	trigger triggerSpec
 }
 
 type Project struct {
@@ -103,20 +106,15 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if trigger == "" {
 		return Config{}, fmt.Errorf("%w: trigger is required", ErrInvalidConfig)
 	}
-	var err error
-	trigger, err = normalizeHTTPScaffoldTrigger(trigger)
+	spec, err := parseScaffoldTrigger(trigger)
 	if err != nil {
 		return Config{}, err
 	}
 	if _, err := provider.ParseModelID(model); err != nil {
 		return Config{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
-	if err := ovr.Validate(
-		ovr.From(trigger),
-		ovr.Pipe("validate scaffold trigger", ovr.Model(model)),
-		ovr.Reply(ovr.JSON[map[string]any]()),
-	); err != nil {
-		return Config{}, fmt.Errorf("%w: trigger %q is not supported: %w", ErrInvalidConfig, trigger, err)
+	if err := validateScaffoldTrigger(spec); err != nil {
+		return Config{}, fmt.Errorf("%w: trigger %q is not supported: %w", ErrInvalidConfig, spec.display, err)
 	}
 
 	dir := strings.TrimSpace(cfg.Dir)
@@ -141,11 +139,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 
 	return Config{
 		Name:            name,
-		Trigger:         trigger,
+		Trigger:         spec.display,
 		Model:           model,
 		Dir:             filepath.Clean(dir),
 		FrameworkModule: module,
 		FrameworkDir:    frameworkDir,
+		trigger:         spec,
 	}, nil
 }
 
@@ -154,6 +153,21 @@ func normalizeConfig(cfg Config) (Config, error) {
 // interactive TUI can reuse the exact same parser the scaffold uses.
 func NormalizeHTTPTrigger(trigger string) (string, error) {
 	return normalizeHTTPScaffoldTrigger(trigger)
+}
+
+// NormalizeTrigger validates and canonicalizes any supported trigger string
+// (HTTP route, cron expression, webhook provider, or stream URI) and returns
+// the canonical display form. It is exported so the interactive TUI can reuse
+// the exact same parser the scaffold uses.
+func NormalizeTrigger(trigger string) (string, error) {
+	spec, err := parseScaffoldTrigger(trigger)
+	if err != nil {
+		return "", err
+	}
+	if err := validateScaffoldTrigger(spec); err != nil {
+		return "", fmt.Errorf("%w: trigger %q is not supported: %w", ErrInvalidConfig, spec.display, err)
+	}
+	return spec.display, nil
 }
 
 // ValidProjectName reports whether name satisfies the scaffold's project

@@ -83,15 +83,16 @@ What ships in v0.1:
   frontmatter validation, and a sandboxed Bash capability with workspace,
   env allowlist, timeout, output bounds, and process cleanup.
 - Provider adapters for `anthropic/*`, `openai/*`, `ollama/*`, `mistral/*`,
-  `gemini/*`, and `vllm/*` with tool use, typed final results, and
-  classified errors.
+  `gemini/*`, `vllm/*`, `groq/*`, `deepseek/*`, `azure/*`, and `bedrock/*`
+  with tool use, typed final results, and classified errors.
 - Reply (`JSON[T]`, `SSE`, `Accepted`), Push (webhook, queue), and Sink
   (log, file) outputs.
 - Protected admin endpoints (`/admin/health`, `/admin/status`,
-  `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`) plus a
-  dev-mode trace viewer at `/dev`.
-- OpenTelemetry-compatible `Tracer` hook for pipeline, pipe, session,
-  LLM, tool, schema, and subagent spans.
+  `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`), a Prometheus
+  `/metrics` endpoint, plus a dev-mode trace viewer at `/dev`.
+- OpenTelemetry-compatible `Tracer` hook (and a built-in native OTLP/HTTP
+  span exporter via `WithOTLPExporter`) for pipeline, pipe, session, LLM,
+  tool, schema, and subagent spans.
 - The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
   `add agent|tool|skill`, `dev`, `build` (static cross-compile), and
   `deploy ssh|docker`.
@@ -149,7 +150,7 @@ back to this checkout.
 ## Create A Worker
 
 The non-interactive scaffold is the fastest way to create a development worker.
-Today it generates HTTP-triggered workers only:
+It generates compiling HTTP, cron, webhook, and stream workers:
 
 ```sh
 ouvrier new \
@@ -158,6 +159,17 @@ ouvrier new \
   --trigger "POST /tickets/{id}" \
   --model "anthropic/claude-sonnet-4-6" \
   --dir /tmp
+```
+
+The `--trigger` flag accepts every supported trigger category. HTTP workers
+reply with JSON; cron, webhook, and stream workers terminate with
+`Sink(Log())`:
+
+```sh
+--trigger "POST /tickets"             # http  -> Reply(JSON)
+--trigger "0 6 * * *"                 # cron  -> Sink(Log())  (or "cron 0 6 * * *")
+--trigger "webhook github"            # webhook -> Sink(Log())
+--trigger "stream kafka://tickets"    # stream  -> Sink(Log())
 ```
 
 Then run it:
@@ -198,6 +210,22 @@ receivers support NATS, Redis Streams, and Kafka boundaries, reserve message
 IDs in the state store when available, and emit stream dead-letter events for
 failed delivery handling.
 
+Stream production hardening:
+
+- `StreamDLQ(target, maxAttempts)` retries a poisoned message up to
+  `maxAttempts` deliveries, then routes it to the configured dead-letter target.
+  The target is published to the real broker transport (`kafka://`, `nats://`,
+  `redis://`) through the same producer machinery as the `Queue` push terminal.
+- `StreamMaxInFlight(limit)` bounds concurrently processed deliveries so a slow
+  handler applies backpressure to the broker.
+- `StreamAckPolicy(StreamAckAuto | StreamAckManual)` selects the per-broker
+  acknowledgement mode. `StreamAckManual` leaves acking to the handler; brokers
+  whose receiver exposes no ack closure treat it as a no-op.
+- Replay a dead-letter queue with `ReplayStreamDLQ` in-process, or via the
+  admin endpoint `POST /admin/streams/replay` (same admin auth as other
+  `/admin/*` routes), which drains and reprocesses the DLQ and returns the
+  replayed count. Dead-letter targets are credential-stripped in events/logs.
+
 ### Pipes
 
 ```go
@@ -215,6 +243,10 @@ Every `Pipe` must declare an explicit model. Model IDs use a provider prefix:
 - `mistral/*`
 - `gemini/*`
 - `vllm/*`
+- `groq/*`
+- `deepseek/*`
+- `azure/*` (Azure OpenAI deployments)
+- `bedrock/*` (AWS Bedrock Converse models)
 
 ### Tools
 
@@ -294,14 +326,26 @@ ovr.Reply(ovr.SSE())
 ovr.Reply(ovr.Accepted())
 ovr.Push(ovr.Webhook("https://example.com/result"))
 ovr.Push(ovr.Queue("nats://127.0.0.1:4222/results"))
+ovr.Push(ovr.Queue("kafka://broker:9092/results"))
+ovr.Push(ovr.Queue("redis://127.0.0.1:6379/results"))
+ovr.Push(ovr.Queue("sqs://sqs.us-east-1.amazonaws.com/123456789012/results"))
 ovr.Sink(ovr.Log())
 ovr.Sink(ovr.File("./out/result.json"))
 ```
 
 `Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push,
-NATS/HTTP queue push, log sink, and file sink have runtime coverage. Push and
-file sink terminals run as governed output tools and require matching
-permission policy when they perform side effects.
+HTTP/NATS/Kafka/Redis/SQS queue push, log sink, and file sink have runtime
+coverage. Push and file sink terminals run as governed output tools and require
+matching permission policy when they perform side effects.
+
+Queue push schemes: `http(s)://` POSTs the body; `nats://` publishes to the
+subject; `kafka://host:9092/topic` produces to the topic (via
+`segmentio/kafka-go`); `redis://host:6379/stream` appends to the stream with
+`XADD` (body stored under the `body` field); `sqs://sqs.<region>.amazonaws.com/<account>/<queue>`
+calls SendMessage as a SigV4-signed HTTPS request using the standard `AWS_*`
+environment credentials (no aws-sdk dependency). An `idempotency_key` query
+parameter is propagated where the protocol supports it: the Kafka message key,
+the SQS `MessageDeduplicationId`, and a Redis `idempotency_key` stream field.
 
 ### SubAgents
 
@@ -366,7 +410,25 @@ GEMINI_BASE_URL=
 OLLAMA_BASE_URL=
 VLLM_API_KEY=
 VLLM_BASE_URL=
+GROQ_API_KEY=
+GROQ_BASE_URL=
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=
+AZURE_OPENAI_API_KEY=
+AZURE_OPENAI_BASE_URL=
+AZURE_OPENAI_API_VERSION=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_SESSION_TOKEN=
+AWS_REGION=
+AWS_BEDROCK_BASE_URL=
 ```
+
+AWS Bedrock requests are authenticated with hand-rolled SigV4 signing (no
+aws-sdk dependency); set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+`AWS_REGION` to enable the `bedrock/*` prefix. Real-AWS integration testing is
+tracked as follow-up; unit coverage exercises the signing helper and the
+Converse request/response mapping against a fake HTTP doer.
 
 Runtime/admin configuration:
 
@@ -379,6 +441,12 @@ OUVRIER_STATE_PATH=.ouvrier/state.db
 Admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
 stream-only, and mixed runtimes. Set `PIP_ADMIN_TOKEN` outside local
 development when exposing a worker.
+
+During local development, `ouvrier dev` auto-loads a `.env` file from the
+project directory into the worker's environment. The real process environment
+always takes precedence, so any variable you set explicitly is never
+overridden, and `.env` values are never printed. This is dev-only and does not
+affect deployed/prod binaries; pass `--no-dotenv` to opt out.
 
 ## Observability
 
@@ -393,10 +461,16 @@ GET  /admin/status
 GET  /admin/traces?last=N
 GET  /admin/traces/{exec-id}
 POST /admin/trigger
+GET  /metrics              # Prometheus text exposition (admin token required)
 ```
 
 Events are redacted before persistence or admin output. The dev trace viewer is
 available at `/dev` behind the same admin authorization behavior.
+
+`GET /metrics` renders a hand-rolled Prometheus exposition (counters and latency
+summaries derived from the EventStream/StateStore) behind the same admin auth.
+For external tracing, `ovr.WithOTLPExporter("https://collector:4318")` ships
+spans to an OTLP/HTTP collector with no OpenTelemetry SDK dependency.
 
 ## CLI
 

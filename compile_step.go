@@ -32,6 +32,7 @@ func compileStep(node Node) (runtimeplan.Step, error) {
 		Kind:       runtimeplan.StepPipe,
 		Goal:       pipe.goal,
 		Model:      pipe.config.model,
+		Fallback:   append([]string(nil), pipe.config.fallback...),
 		Tools:      runtimeToolsFromPipe(pipe.config.tools),
 		Bash:       runtimeBashFromPipe(pipe.config.bash),
 		Skills:     runtimeSkillsFromPipe(pipe.config.skills),

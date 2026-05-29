@@ -52,6 +52,10 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 	trigger.IdempotencyHeader = from.config.idempotencyHeader
 	trigger.SignatureEnv = from.config.signatureEnv
 	trigger.SignatureHeader = from.config.signatureHeader
+	trigger.DLQTarget = from.config.dlqTarget
+	trigger.MaxAttempts = from.config.maxAttempts
+	trigger.MaxInFlight = from.config.maxInFlight
+	trigger.AckPolicy = from.config.ackPolicy
 
 	plan := runtimeplan.Plan{Trigger: trigger}
 	for i := start + 1; i < len(nodes); i++ {

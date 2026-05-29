@@ -30,10 +30,11 @@ func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, in
 	}
 
 	startSSE(w, http.StatusOK)
+	streamingRuntime := r.runtime.withStreaming()
 	done := make(chan ssePipelineResult, 1)
 	go func() {
 		defer r.releaseWorker()
-		result, runErr := r.runtime.runPlanResultWithSession(req.Context(), r.plan, input, &pipelineSession)
+		result, runErr := streamingRuntime.runPlanResultWithSession(req.Context(), r.plan, input, &pipelineSession)
 		if runErr == nil {
 			runErr = r.runtime.validateObservedTerminalReplyOutput(req.Context(), r.plan, result)
 		}
@@ -75,6 +76,14 @@ func pipelineErrorStatus(err error) string {
 	default:
 		return "pipeline_execution_failed"
 	}
+}
+
+// withStreaming returns a copy of the runtime with provider token-delta
+// streaming enabled. The returned runtime shares the same event stream pointer,
+// so deltas emitted by the harness are visible to the SSE poller.
+func (rt httpRuntime) withStreaming() httpRuntime {
+	rt.streamDeltas = true
+	return rt
 }
 
 func (rt httpRuntime) withEventStream() httpRuntime {
