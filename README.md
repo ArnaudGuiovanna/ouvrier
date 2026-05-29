@@ -210,6 +210,22 @@ receivers support NATS, Redis Streams, and Kafka boundaries, reserve message
 IDs in the state store when available, and emit stream dead-letter events for
 failed delivery handling.
 
+Stream production hardening:
+
+- `StreamDLQ(target, maxAttempts)` retries a poisoned message up to
+  `maxAttempts` deliveries, then routes it to the configured dead-letter target.
+  The target is published to the real broker transport (`kafka://`, `nats://`,
+  `redis://`) through the same producer machinery as the `Queue` push terminal.
+- `StreamMaxInFlight(limit)` bounds concurrently processed deliveries so a slow
+  handler applies backpressure to the broker.
+- `StreamAckPolicy(StreamAckAuto | StreamAckManual)` selects the per-broker
+  acknowledgement mode. `StreamAckManual` leaves acking to the handler; brokers
+  whose receiver exposes no ack closure treat it as a no-op.
+- Replay a dead-letter queue with `ReplayStreamDLQ` in-process, or via the
+  admin endpoint `POST /admin/streams/replay` (same admin auth as other
+  `/admin/*` routes), which drains and reprocesses the DLQ and returns the
+  replayed count. Dead-letter targets are credential-stripped in events/logs.
+
 ### Pipes
 
 ```go

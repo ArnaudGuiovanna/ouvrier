@@ -23,8 +23,9 @@ Trigger options (passed inside the trigger constructor or via `From`-level
 | `IdempotencyKey(header string) FromOption`        | Use the named HTTP/webhook header as the idempotency key. |
 | `VerifySignature(envVar, header string) FromOption` | HMAC-SHA256 signature verification using a shared secret read from `envVar`. |
 | `WorkerPool(limit int) FromOption`                 | Cap concurrent trigger handlers.                     |
-| `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries; replay with `ReplayStreamDLQ`. |
+| `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries. The target is published to the real broker transport (`kafka://`, `nats://`, `redis://`); replay it with `ReplayStreamDLQ` or `POST /admin/streams/replay`. |
 | `StreamMaxInFlight(limit int) FromOption`          | Bound concurrently processed stream messages so a slow handler applies backpressure to the broker. |
+| `StreamAckPolicy(policy StreamAckMode) FromOption` | Per-broker acknowledgement mode: `StreamAckAuto` (default; runtime acks after successful processing) or `StreamAckManual` (handler owns the ack, broker redelivers until acked). No-op for brokers whose receiver exposes no ack closure. |
 
 ## Pipe
 

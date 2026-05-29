@@ -190,12 +190,25 @@ func streamInFlightLimit(trigger runtimeplan.Trigger) int {
 	return trigger.WorkerPool
 }
 
+// streamManualAck reports whether the trigger uses the manual acknowledgement
+// policy, under which the runtime never auto-acks a successfully processed
+// delivery.
+func streamManualAck(trigger runtimeplan.Trigger) bool {
+	return strings.EqualFold(strings.TrimSpace(trigger.AckPolicy), string(StreamAckManual))
+}
+
 func (rt httpRuntime) processStreamMessage(ctx context.Context, plan runtimeplan.Plan, message streamMessage, attempts *streamAttemptTracker) error {
 	attempt := attempts.next(message.ID)
 
 	result, err := runStreamPlanOnce(ctx, rt, plan, message)
 	if err == nil {
 		attempts.clear(message.ID)
+		// Under the manual ack policy the handler owns acknowledgement: the
+		// runtime does not auto-ack, so the broker keeps the delivery until the
+		// source's own ack closure is invoked elsewhere.
+		if streamManualAck(plan.Trigger) {
+			return nil
+		}
 		if ackErr := ackStreamMessage(ctx, message); ackErr != nil {
 			return rt.deadLetterStreamMessage(ctx, plan, result, message, ackErr, attempt)
 		}

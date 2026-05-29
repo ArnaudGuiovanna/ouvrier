@@ -152,6 +152,7 @@ func registerHTTPAdminRoutes(mux *http.ServeMux, rt httpRuntime) {
 	mux.HandleFunc("POST /admin/trigger", rt.serveAdminTrigger)
 	mux.HandleFunc("GET /admin/approvals", rt.serveAdminApprovals)
 	mux.HandleFunc("POST /admin/approvals/{id}", rt.serveAdminApprovalDecision)
+	mux.HandleFunc("POST /admin/streams/replay", rt.serveAdminStreamReplay)
 	mux.HandleFunc("GET /metrics", rt.serveMetrics)
 	registerHTTPDevRoutes(mux, rt)
 }

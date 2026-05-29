@@ -2,6 +2,8 @@ package ovr
 
 import (
 	"context"
+	"net/url"
+	"strings"
 	"sync"
 
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
@@ -60,6 +62,77 @@ func (d *memoryStreamDLQ) Depth(target string) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return len(d.messages[target])
+}
+
+// streamDLQPublisher publishes a dead-lettered message body to a broker target.
+// It is a package variable so tests can observe routing without a live broker;
+// production routes through the same publishQueue machinery used by the queue
+// push terminals (kafka://, nats://, redis://, sqs://, http(s)://).
+var streamDLQPublisher = publishQueue
+
+// routingStreamDLQ is the default production dead-letter queue. It publishes the
+// poisoned message body to the configured broker target on the real transport
+// (reusing publishQueue) and also retains a copy in an in-process buffer so the
+// DLQ remains drainable for replay and inspectable for depth. Targets with an
+// empty or in-process scheme (mem://) are kept memory-only.
+//
+// Only the message body is published to the broker; ack/nack closures and the
+// source delivery are never forwarded. DLQ targets are credential-stripped via
+// streamDisplayURI anywhere they surface in events/logs.
+type routingStreamDLQ struct {
+	memory  *memoryStreamDLQ
+	publish func(ctx context.Context, rawURI, output string) error
+}
+
+func newRoutingStreamDLQ() *routingStreamDLQ {
+	return &routingStreamDLQ{
+		memory:  newMemoryStreamDLQ(),
+		publish: streamDLQPublisher,
+	}
+}
+
+// brokerStreamDLQScheme reports whether target names a broker transport that the
+// DLQ can publish to over the wire (as opposed to the in-process mem:// scheme).
+func brokerStreamDLQScheme(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "kafka", "nats", "redis", "rediss", "sqs", "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *routingStreamDLQ) Route(ctx context.Context, target string, message streamMessage) error {
+	if brokerStreamDLQScheme(target) {
+		publish := d.publish
+		if publish == nil {
+			publish = streamDLQPublisher
+		}
+		if err := publish(ctx, target, message.Body); err != nil {
+			return err
+		}
+	}
+	// Retain a copy so the DLQ stays drainable for replay and depth, mirroring
+	// the in-process default. Broker-backed targets are also buffered because
+	// their wire protocols (Kafka topics, NATS subjects, Redis streams) cannot
+	// be drained for replay without a dedicated consumer.
+	return d.memory.Route(ctx, target, message)
+}
+
+func (d *routingStreamDLQ) Drain(ctx context.Context, target string) ([]streamMessage, error) {
+	return d.memory.Drain(ctx, target)
+}
+
+func (d *routingStreamDLQ) Depth(target string) int {
+	return d.memory.Depth(target)
 }
 
 // ReplayStreamDLQ drains the dead-letter target configured on the plan and

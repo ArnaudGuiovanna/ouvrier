@@ -31,6 +31,7 @@ type Trigger struct {
 	DLQTarget         string
 	MaxAttempts       int
 	MaxInFlight       int
+	AckPolicy         string
 }
 
 type StepKind string

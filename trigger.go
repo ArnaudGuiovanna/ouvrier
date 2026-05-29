@@ -150,6 +150,7 @@ type fromConfig struct {
 	dlqTarget         string
 	maxAttempts       int
 	maxInFlight       int
+	ackPolicy         string
 	err               error
 }
 
@@ -197,6 +198,42 @@ func (o streamDLQOption) applyFrom(config *fromConfig) {
 	}
 	config.dlqTarget = o.target
 	config.maxAttempts = o.maxAttempts
+}
+
+// StreamAckMode selects when a stream delivery is acknowledged to the source
+// broker.
+type StreamAckMode string
+
+const (
+	// StreamAckAuto acknowledges a delivery automatically once the pipeline has
+	// processed it successfully (or it has been routed to the DLQ). This is the
+	// default and matches at-least-once delivery with runtime-managed acks.
+	StreamAckAuto StreamAckMode = "auto"
+	// StreamAckManual leaves acknowledgement to the message handler: the runtime
+	// never auto-acks a successfully processed delivery, so the broker keeps
+	// redelivering until the source's own ack closure is invoked. Brokers whose
+	// receiver does not expose an ack closure treat this as a no-op (the
+	// transport's own delivery semantics apply).
+	StreamAckManual StreamAckMode = "manual"
+)
+
+type streamAckPolicyOption struct {
+	policy StreamAckMode
+}
+
+// StreamAckPolicy configures the per-broker acknowledgement mode for a stream
+// trigger. See StreamAckAuto and StreamAckManual.
+func StreamAckPolicy(policy StreamAckMode) FromOption {
+	return streamAckPolicyOption{policy: policy}
+}
+
+func (o streamAckPolicyOption) applyFrom(config *fromConfig) {
+	switch o.policy {
+	case StreamAckAuto, StreamAckManual:
+		config.ackPolicy = string(o.policy)
+	default:
+		config.setErr(fmt.Errorf("%w: StreamAckPolicy must be %q or %q", ErrInvalidNode, StreamAckAuto, StreamAckManual))
+	}
 }
 
 type streamMaxInFlightOption struct {

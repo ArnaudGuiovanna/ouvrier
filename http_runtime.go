@@ -52,7 +52,7 @@ func defaultHTTPRuntime() httpRuntime {
 		toolExecutor:   tools.NewExecutor(),
 		mcpConnector:   envMCPConnector{connector: mcpclient.NewEnvConnector()},
 		streamReceiver: newDefaultStreamReceiver(),
-		streamDLQ:      newMemoryStreamDLQ(),
+		streamDLQ:      newRoutingStreamDLQ(),
 		eventStream:    stream,
 		adminToken:     adminTokenFromEnv(),
 		async:          newRuntimeAsyncGroup(),
