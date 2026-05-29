@@ -310,14 +310,26 @@ ovr.Reply(ovr.SSE())
 ovr.Reply(ovr.Accepted())
 ovr.Push(ovr.Webhook("https://example.com/result"))
 ovr.Push(ovr.Queue("nats://127.0.0.1:4222/results"))
+ovr.Push(ovr.Queue("kafka://broker:9092/results"))
+ovr.Push(ovr.Queue("redis://127.0.0.1:6379/results"))
+ovr.Push(ovr.Queue("sqs://sqs.us-east-1.amazonaws.com/123456789012/results"))
 ovr.Sink(ovr.Log())
 ovr.Sink(ovr.File("./out/result.json"))
 ```
 
 `Reply(JSON[T]())`, `Reply(SSE())`, `Reply(Accepted())`, webhook push,
-NATS/HTTP queue push, log sink, and file sink have runtime coverage. Push and
-file sink terminals run as governed output tools and require matching
-permission policy when they perform side effects.
+HTTP/NATS/Kafka/Redis/SQS queue push, log sink, and file sink have runtime
+coverage. Push and file sink terminals run as governed output tools and require
+matching permission policy when they perform side effects.
+
+Queue push schemes: `http(s)://` POSTs the body; `nats://` publishes to the
+subject; `kafka://host:9092/topic` produces to the topic (via
+`segmentio/kafka-go`); `redis://host:6379/stream` appends to the stream with
+`XADD` (body stored under the `body` field); `sqs://sqs.<region>.amazonaws.com/<account>/<queue>`
+calls SendMessage as a SigV4-signed HTTPS request using the standard `AWS_*`
+environment credentials (no aws-sdk dependency). An `idempotency_key` query
+parameter is propagated where the protocol supports it: the Kafka message key,
+the SQS `MessageDeduplicationId`, and a Redis `idempotency_key` stream field.
 
 ### SubAgents
 

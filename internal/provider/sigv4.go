@@ -18,6 +18,23 @@ type awsCredentials struct {
 	SessionToken    string
 }
 
+// AWSCredentials is the exported view of the static credentials used to sign
+// AWS requests. It lets other internal packages (such as the queue push
+// terminals) reuse the hand-rolled SigV4 signer without duplicating it.
+type AWSCredentials struct {
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+}
+
+// SignSigV4 signs req in place using AWS Signature Version 4. It is a thin
+// exported wrapper over the package-internal signer so callers outside this
+// package can reuse the exact same canonicalization and signing-key
+// derivation. See signSigV4 for the detailed contract.
+func SignSigV4(req *http.Request, payload []byte, creds AWSCredentials, region, service string, signTime time.Time) {
+	signSigV4(req, payload, awsCredentials(creds), region, service, signTime)
+}
+
 // signSigV4 signs an HTTP request in place using the AWS Signature Version 4
 // algorithm. payload is the exact request body bytes. The request must already
 // carry its final URL, method and any headers that should be signed (notably

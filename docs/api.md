@@ -85,7 +85,7 @@ ovr.Sink(target SinkTarget) Node     // terminate without reply (log/file)
 | `JSON[T]() JSONReply[T]`  | Typed JSON reply with strict schema validation.    |
 | `SSE() SSEReply`          | Server-Sent Events streaming reply.                |
 | `Accepted() AcceptedReply`| HTTP 202 reply while the pipeline runs async.      |
-| `Queue(uri string)`       | Push target publishing to a queue URI.             |
+| `Queue(uri string)`       | Push target publishing to a queue URI (`http(s)://`, `nats://`, `kafka://`, `redis://`, `sqs://`). |
 | `Log() LogSink`           | Sink writing to logs.                              |
 | `File(path string)`       | Sink writing the result to a file.                 |
 

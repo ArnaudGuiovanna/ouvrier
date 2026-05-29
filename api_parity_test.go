@@ -82,6 +82,9 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.SSE()
 	_ = ovr.Accepted()
 	_ = ovr.Queue("nats://127.0.0.1:4222/results")
+	_ = ovr.Queue("kafka://broker:9092/results")
+	_ = ovr.Queue("redis://127.0.0.1:6379/results")
+	_ = ovr.Queue("sqs://sqs.us-east-1.amazonaws.com/123456789012/results")
 	_ = ovr.Log()
 	_ = ovr.File("./out/result.json")
 

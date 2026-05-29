@@ -26,9 +26,31 @@ func publishQueue(ctx context.Context, rawURI, output string) error {
 		return postHTTPQueue(ctx, rawURI, output)
 	case "nats":
 		return publishNATSQueue(ctx, parsed, output)
+	case "kafka":
+		return publishKafkaQueue(ctx, parsed, output)
+	case "redis", "rediss":
+		return publishRedisQueue(ctx, parsed, output)
+	case "sqs":
+		return publishSQSQueue(ctx, parsed, output)
 	default:
 		return fmt.Errorf("unsupported queue scheme %q", parsed.Scheme)
 	}
+}
+
+// queueIdempotencyKey returns the idempotency key carried by the queue URI, if
+// any. Callers propagate it to the target protocol where supported (Kafka
+// message key, SQS MessageDeduplicationId, Redis stream field).
+func queueIdempotencyKey(uri *url.URL) string {
+	if uri == nil {
+		return ""
+	}
+	query := uri.Query()
+	for _, name := range []string{"idempotency_key", "idempotency-key", "idempotencyKey"} {
+		if value := strings.TrimSpace(query.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func postHTTPQueue(ctx context.Context, rawURL, output string) error {
