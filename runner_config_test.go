@@ -2,10 +2,12 @@ package ovr
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
@@ -192,6 +194,8 @@ type recordingStateStore struct {
 	nextEventID uint64
 	violations  []SchemaViolation
 	memory      map[string]map[string]MemoryRecord
+	approvals   map[string]PendingApproval
+	approvalSeq []string
 }
 
 func newRecordingStateStore() *recordingStateStore {
@@ -200,6 +204,7 @@ func newRecordingStateStore() *recordingStateStore {
 		sessions:    map[string]Session{},
 		idempotency: map[string]string{},
 		memory:      map[string]map[string]MemoryRecord{},
+		approvals:   map[string]PendingApproval{},
 	}
 }
 
@@ -305,6 +310,50 @@ func (s *recordingStateStore) ListMemory(ctx context.Context, scope string) ([]M
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+func (s *recordingStateStore) SaveApproval(ctx context.Context, approval PendingApproval) error {
+	if approval.Status == "" {
+		approval.Status = ApprovalPending
+	}
+	if _, ok := s.approvals[approval.ID]; !ok {
+		s.approvalSeq = append(s.approvalSeq, approval.ID)
+	}
+	if approval.CreatedAt.IsZero() {
+		approval.CreatedAt = time.Now().UTC()
+	}
+	s.approvals[approval.ID] = approval
+	return nil
+}
+
+func (s *recordingStateStore) Approval(ctx context.Context, id string) (PendingApproval, bool, error) {
+	approval, ok := s.approvals[id]
+	return approval, ok, nil
+}
+
+func (s *recordingStateStore) PendingApprovals(ctx context.Context) ([]PendingApproval, error) {
+	pending := make([]PendingApproval, 0, len(s.approvals))
+	for _, id := range s.approvalSeq {
+		if approval := s.approvals[id]; approval.Status == ApprovalPending {
+			pending = append(pending, approval)
+		}
+	}
+	return pending, nil
+}
+
+func (s *recordingStateStore) ResolveApproval(ctx context.Context, id string, status ApprovalStatus, decidedBy string) (PendingApproval, error) {
+	approval, ok := s.approvals[id]
+	if !ok {
+		return PendingApproval{}, errors.New("approval not found")
+	}
+	if approval.Status != ApprovalPending {
+		return PendingApproval{}, errors.New("approval already decided")
+	}
+	approval.Status = status
+	approval.DecidedBy = decidedBy
+	approval.DecidedAt = time.Now().UTC()
+	s.approvals[id] = approval
+	return approval, nil
 }
 
 func TestRunnerPricingRejectsEmptyTable(t *testing.T) {

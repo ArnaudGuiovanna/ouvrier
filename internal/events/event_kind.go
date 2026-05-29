@@ -29,6 +29,12 @@ const (
 	EventIdempotencyDecision EventKind = "idempotency_decision"
 	EventSignatureDecision   EventKind = "signature_decision"
 
+	EventApprovalRequested  EventKind = "approval_requested"
+	EventApprovalApproved   EventKind = "approval_approved"
+	EventApprovalDenied     EventKind = "approval_denied"
+	EventExecutionSuspended EventKind = "execution_suspended"
+	EventExecutionResumed   EventKind = "execution_resumed"
+
 	EventHookFailed EventKind = "hook_failed"
 
 	EventSchemaValidationPassed EventKind = "schema_validation_passed"

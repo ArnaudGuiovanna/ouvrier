@@ -308,6 +308,10 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 
 	result, err := r.runtime.runPlanResultWithSession(req.Context(), r.plan, input, session)
 	if err != nil {
+		if suspended, ok := suspendedExecutionError(err); ok {
+			writeSuspendedResponse(w, suspended)
+			return
+		}
 		switch {
 		case errors.Is(err, errHTTPProviderNotConfigured):
 			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")

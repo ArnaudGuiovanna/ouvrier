@@ -22,14 +22,19 @@ type MemoryStore struct {
 	violations      []SchemaViolation
 	nextViolationID uint64
 	memory          map[string]map[string]MemoryRecord
+	approvals       map[string]PendingApproval
+	approvalSeq     uint64
+	approvalOrder   map[string]uint64
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		executions:  make(map[string]Execution),
-		sessions:    make(map[string]runtimecore.Session),
-		idempotency: make(map[string]string),
-		memory:      make(map[string]map[string]MemoryRecord),
+		executions:    make(map[string]Execution),
+		sessions:      make(map[string]runtimecore.Session),
+		idempotency:   make(map[string]string),
+		memory:        make(map[string]map[string]MemoryRecord),
+		approvals:     make(map[string]PendingApproval),
+		approvalOrder: make(map[string]uint64),
 	}
 }
 
@@ -282,6 +287,84 @@ func (s *MemoryStore) ListMemory(ctx context.Context, scope string) ([]MemoryRec
 		return records[i].Key < records[j].Key
 	})
 	return records, nil
+}
+
+func (s *MemoryStore) SaveApproval(ctx context.Context, approval PendingApproval) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	approval, err := normalizeApproval(approval)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if approval.CreatedAt.IsZero() {
+		approval.CreatedAt = time.Now().UTC()
+	}
+	if _, ok := s.approvalOrder[approval.ID]; !ok {
+		s.approvalSeq++
+		s.approvalOrder[approval.ID] = s.approvalSeq
+	}
+	s.approvals[approval.ID] = approval
+	return nil
+}
+
+func (s *MemoryStore) Approval(ctx context.Context, id string) (PendingApproval, bool, error) {
+	if err := checkContext(ctx); err != nil {
+		return PendingApproval{}, false, err
+	}
+	id = strings.TrimSpace(id)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	approval, ok := s.approvals[id]
+	return approval, ok, nil
+}
+
+func (s *MemoryStore) PendingApprovals(ctx context.Context) ([]PendingApproval, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pending := make([]PendingApproval, 0, len(s.approvals))
+	for _, approval := range s.approvals {
+		if approval.Status == ApprovalPending {
+			pending = append(pending, approval)
+		}
+	}
+	sort.Slice(pending, func(i, j int) bool {
+		return s.approvalOrder[pending[i].ID] < s.approvalOrder[pending[j].ID]
+	})
+	return pending, nil
+}
+
+func (s *MemoryStore) ResolveApproval(ctx context.Context, id string, status ApprovalStatus, decidedBy string) (PendingApproval, error) {
+	if err := checkContext(ctx); err != nil {
+		return PendingApproval{}, err
+	}
+	id = strings.TrimSpace(id)
+	if !terminalApprovalStatus(status) {
+		return PendingApproval{}, errors.New("approval resolution must be approved or denied")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	approval, ok := s.approvals[id]
+	if !ok {
+		return PendingApproval{}, errors.New("approval not found")
+	}
+	if approval.Status != ApprovalPending {
+		return PendingApproval{}, errors.New("approval already decided")
+	}
+	approval.Status = status
+	approval.DecidedBy = strings.TrimSpace(decidedBy)
+	approval.DecidedAt = time.Now().UTC()
+	s.approvals[id] = approval
+	return approval, nil
 }
 
 func checkContext(ctx context.Context) error {

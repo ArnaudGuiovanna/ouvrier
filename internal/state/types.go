@@ -24,6 +24,39 @@ type Store interface {
 	SaveMemory(context.Context, string, string, string) error
 	Memory(context.Context, string, string) (string, bool, error)
 	ListMemory(context.Context, string) ([]MemoryRecord, error)
+	SaveApproval(context.Context, PendingApproval) error
+	Approval(context.Context, string) (PendingApproval, bool, error)
+	PendingApprovals(context.Context) ([]PendingApproval, error)
+	ResolveApproval(context.Context, string, ApprovalStatus, string) (PendingApproval, error)
+}
+
+// ApprovalStatus is the lifecycle state of a human-in-the-loop approval.
+type ApprovalStatus string
+
+const (
+	ApprovalPending  ApprovalStatus = "pending"
+	ApprovalApproved ApprovalStatus = "approved"
+	ApprovalDenied   ApprovalStatus = "denied"
+)
+
+// PendingApproval is one human-in-the-loop approval request that suspends an
+// execution until an operator approves or denies the gated tool call. The
+// Reason field is redaction-safe (run through the same credential scrubbing as
+// persisted events) and never carries tool arguments or skill bodies.
+type PendingApproval struct {
+	ID         string
+	ExecID     string
+	SessionID  string
+	TraceID    string
+	ToolName   string
+	ToolCallID string
+	ToolKind   string
+	Effect     string
+	Reason     string
+	Status     ApprovalStatus
+	CreatedAt  time.Time
+	DecidedAt  time.Time
+	DecidedBy  string
 }
 
 // MaxMemoryValueBytes bounds the size of a single persisted memory value.
