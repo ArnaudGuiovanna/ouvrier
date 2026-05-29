@@ -61,6 +61,7 @@ func summarizeRuntimeMetrics(recorded []events.Event) runtimeMetrics {
 		pipeStarted, pipeCompleted, pipeFailed             int
 		llmStarted, llmCompleted, llmFailed                int
 		toolStarted, toolCompleted, toolFailed             int
+		streamDeadLettered, streamRedelivered              int
 
 		llmLatencySum   float64
 		llmLatencyCount int
@@ -108,6 +109,10 @@ func summarizeRuntimeMetrics(recorded []events.Event) runtimeMetrics {
 		case events.EventToolCallFailed:
 			toolFailed++
 			durations.finish("tool_call", event)
+		case events.EventStreamDeadLettered:
+			streamDeadLettered++
+		case events.EventStreamRedelivered:
+			streamRedelivered++
 		}
 	}
 
@@ -129,6 +134,8 @@ func summarizeRuntimeMetrics(recorded []events.Event) runtimeMetrics {
 			{"ouvrier_tool_call_started_total", "Total tool calls started.", toolStarted},
 			{"ouvrier_tool_call_completed_total", "Total tool calls completed.", toolCompleted},
 			{"ouvrier_tool_call_failed_total", "Total tool calls failed.", toolFailed},
+			{"ouvrier_stream_dead_lettered_total", "Total stream messages routed to a dead-letter queue.", streamDeadLettered},
+			{"ouvrier_stream_redelivered_total", "Total stream message redeliveries before dead-lettering.", streamRedelivered},
 		},
 		summaries: []metricSummary{
 			{"ouvrier_llm_call_duration_ms", "LLM call latency in milliseconds.", llmLatencySum, llmLatencyCount},

@@ -28,6 +28,9 @@ type Trigger struct {
 	IdempotencyHeader string
 	SignatureEnv      string
 	SignatureHeader   string
+	DLQTarget         string
+	MaxAttempts       int
+	MaxInFlight       int
 }
 
 type StepKind string

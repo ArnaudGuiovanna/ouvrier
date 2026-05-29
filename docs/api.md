@@ -23,6 +23,8 @@ Trigger options (passed inside the trigger constructor or via `From`-level
 | `IdempotencyKey(header string) FromOption`        | Use the named HTTP/webhook header as the idempotency key. |
 | `VerifySignature(envVar, header string) FromOption` | HMAC-SHA256 signature verification using a shared secret read from `envVar`. |
 | `WorkerPool(limit int) FromOption`                 | Cap concurrent trigger handlers.                     |
+| `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries; replay with `ReplayStreamDLQ`. |
+| `StreamMaxInFlight(limit int) FromOption`          | Bound concurrently processed stream messages so a slow handler applies backpressure to the broker. |
 
 ## Pipe
 
@@ -254,7 +256,8 @@ GET /metrics
 
 A hand-rolled Prometheus text exposition (no dependency) derived from the
 EventStream/StateStore: per-kind counters (`ouvrier_pipeline_*_total`,
-`ouvrier_pipe_*_total`, `ouvrier_llm_call_*_total`, `ouvrier_tool_call_*_total`)
+`ouvrier_pipe_*_total`, `ouvrier_llm_call_*_total`, `ouvrier_tool_call_*_total`,
+`ouvrier_stream_dead_lettered_total`, `ouvrier_stream_redelivered_total`)
 plus latency summaries (`ouvrier_llm_call_duration_ms`,
 `ouvrier_pipeline_duration_ms`, `ouvrier_pipe_duration_ms`,
 `ouvrier_tool_call_duration_ms`) as `_sum`/`_count` series. The endpoint shares

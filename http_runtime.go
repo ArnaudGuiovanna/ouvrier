@@ -29,6 +29,7 @@ type httpRuntime struct {
 	toolExecutor         *tools.Executor
 	mcpConnector         mcpConnector
 	streamReceiver       streamReceiver
+	streamDLQ            streamDLQ
 	stateStore           state.Store
 	eventStream          *events.EventStream
 	hookBus              *events.HookBus
@@ -51,6 +52,7 @@ func defaultHTTPRuntime() httpRuntime {
 		toolExecutor:   tools.NewExecutor(),
 		mcpConnector:   envMCPConnector{connector: mcpclient.NewEnvConnector()},
 		streamReceiver: newDefaultStreamReceiver(),
+		streamDLQ:      newMemoryStreamDLQ(),
 		eventStream:    stream,
 		adminToken:     adminTokenFromEnv(),
 		async:          newRuntimeAsyncGroup(),

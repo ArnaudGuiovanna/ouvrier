@@ -52,6 +52,7 @@ const (
 	EventSkillLoaded EventKind = "skill_loaded"
 
 	EventStreamDeadLettered EventKind = "stream_dead_lettered"
+	EventStreamRedelivered  EventKind = "stream_redelivered"
 
 	EventSinkLogged EventKind = "sink_logged"
 )

@@ -147,6 +147,9 @@ type fromConfig struct {
 	idempotencyHeader string
 	signatureEnv      string
 	signatureHeader   string
+	dlqTarget         string
+	maxAttempts       int
+	maxInFlight       int
 	err               error
 }
 
@@ -165,6 +168,54 @@ func (o workerPoolOption) applyFrom(config *fromConfig) {
 		return
 	}
 	config.workerPool = o.limit
+}
+
+type streamDLQOption struct {
+	target      string
+	maxAttempts int
+}
+
+// StreamDLQ routes a poisoned stream message to a dead-letter target once it
+// has been redelivered maxAttempts times without success. maxAttempts counts
+// total processing attempts before the message is dead-lettered.
+func StreamDLQ(target string, maxAttempts int) FromOption {
+	return streamDLQOption{target: strings.TrimSpace(target), maxAttempts: maxAttempts}
+}
+
+func (o streamDLQOption) applyFrom(config *fromConfig) {
+	if o.target == "" {
+		config.setErr(fmt.Errorf("%w: StreamDLQ target is required", ErrInvalidNode))
+		return
+	}
+	if err := validateStreamURI(o.target); err != nil {
+		config.setErr(fmt.Errorf("%w: StreamDLQ target %v", ErrInvalidNode, err))
+		return
+	}
+	if o.maxAttempts <= 0 {
+		config.setErr(fmt.Errorf("%w: StreamDLQ maxAttempts must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.dlqTarget = o.target
+	config.maxAttempts = o.maxAttempts
+}
+
+type streamMaxInFlightOption struct {
+	limit int
+}
+
+// StreamMaxInFlight bounds the number of stream messages processed
+// concurrently so a slow handler applies backpressure to the broker instead of
+// buffering deliveries without bound.
+func StreamMaxInFlight(limit int) FromOption {
+	return streamMaxInFlightOption{limit: limit}
+}
+
+func (o streamMaxInFlightOption) applyFrom(config *fromConfig) {
+	if o.limit <= 0 {
+		config.setErr(fmt.Errorf("%w: StreamMaxInFlight must be greater than zero", ErrInvalidNode))
+		return
+	}
+	config.maxInFlight = o.limit
 }
 
 type idempotencyKeyOption struct {

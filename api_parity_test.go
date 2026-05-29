@@ -46,6 +46,8 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.IdempotencyKey("Idempotency-Key")
 	_ = ovr.VerifySignature("STRIPE_SIGNING_SECRET", "Stripe-Signature")
 	_ = ovr.WorkerPool(4)
+	_ = ovr.StreamDLQ("kafka://broker:9092/topic.dlq", 5)
+	_ = ovr.StreamMaxInFlight(8)
 
 	// Pipe option surface.
 	_ = ovr.Pipe
