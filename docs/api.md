@@ -155,6 +155,7 @@ ovr.Validate(nodes ...ovr.Node) error              // validation without serving
 | `WithSandbox(c SandboxConfig)`          | Filesystem workspace boundary.                     |
 | `WithSchemaRepairAttempts(n int)`       | Bounded ResultSchema repair attempts.              |
 | `WithTracer(t Tracer)`                  | OTel-compatible span emission.                     |
+| `WithOTLPExporter(endpoint string, opts ...OTLPExporterOption)` | Native OTLP/HTTP span export (no otel SDK). |
 | `WithPricing(t PricingTable)`           | Cost accounting from a per-model pricing table.    |
 | `WithProviderBudget(provider string, maxInFlight int)` | Bound concurrent in-flight LLM calls per provider. |
 
@@ -220,6 +221,45 @@ The harness emits one span per pipeline, pipe, session, LLM call, tool call,
 schema validation, and subagent task. `*_started` events are paired with their
 `*_completed` or `*_failed` counterparts internally.
 
+### Native OTLP exporter
+
+`WithOTLPExporter` installs a built-in `Tracer` that ships spans to an
+OTLP/HTTP collector using the JSON encoding — no OpenTelemetry SDK dependency.
+Default off: when unset, behavior is unchanged.
+
+```go
+type OTLPExporterOption // configures the exporter
+ovr.OTLPServiceName(name string) OTLPExporterOption
+ovr.OTLPHeaders(headers map[string]string) OTLPExporterOption
+
+runner := ovr.NewRunner(
+    ovr.WithOTLPExporter("https://collector:4318",
+        ovr.OTLPServiceName("orders-api"),
+        ovr.OTLPHeaders(map[string]string{"Authorization": "Bearer <token>"}),
+    ),
+)
+```
+
+The exporter appends `/v1/traces` to the endpoint, posts one span per logical
+operation, and redacts span attributes (sensitive keys, credential-looking
+strings) before export. Export errors are swallowed so observability never
+breaks the pipeline. `WithOTLPExporter` is a convenience over `WithTracer`;
+when both are passed, the last option wins.
+
+## Metrics
+
+```
+GET /metrics
+```
+
+A hand-rolled Prometheus text exposition (no dependency) derived from the
+EventStream/StateStore: per-kind counters (`ouvrier_pipeline_*_total`,
+`ouvrier_pipe_*_total`, `ouvrier_llm_call_*_total`, `ouvrier_tool_call_*_total`)
+plus latency summaries (`ouvrier_llm_call_duration_ms`,
+`ouvrier_pipeline_duration_ms`, `ouvrier_pipe_duration_ms`,
+`ouvrier_tool_call_duration_ms`) as `_sum`/`_count` series. The endpoint shares
+the admin auth posture: bearer-token protected outside dev mode.
+
 ## Admin
 
 Bearer-authenticated HTTP endpoints exposed by the runtime:
@@ -230,6 +270,7 @@ GET  /admin/status
 GET  /admin/traces?last=N
 GET  /admin/traces/<exec-id>
 POST /admin/trigger
+GET  /metrics              # Prometheus text exposition (admin token required)
 GET  /dev                  # dev-mode trace viewer (admin token required)
 ```
 

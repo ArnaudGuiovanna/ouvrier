@@ -117,6 +117,9 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.WithSandbox
 	_ = ovr.WithSchemaRepairAttempts
 	_ = ovr.WithTracer
+	_ = ovr.WithOTLPExporter
+	_ = ovr.OTLPServiceName
+	_ = ovr.OTLPHeaders
 	_ = ovr.WithPricing
 	_ = ovr.WithProviderBudget
 	_ = ovr.PerMillion

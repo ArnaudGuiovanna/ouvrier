@@ -88,10 +88,11 @@ What ships in v0.1:
 - Reply (`JSON[T]`, `SSE`, `Accepted`), Push (webhook, queue), and Sink
   (log, file) outputs.
 - Protected admin endpoints (`/admin/health`, `/admin/status`,
-  `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`) plus a
-  dev-mode trace viewer at `/dev`.
-- OpenTelemetry-compatible `Tracer` hook for pipeline, pipe, session,
-  LLM, tool, schema, and subagent spans.
+  `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`), a Prometheus
+  `/metrics` endpoint, plus a dev-mode trace viewer at `/dev`.
+- OpenTelemetry-compatible `Tracer` hook (and a built-in native OTLP/HTTP
+  span exporter via `WithOTLPExporter`) for pipeline, pipe, session, LLM,
+  tool, schema, and subagent spans.
 - The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
   `add agent|tool|skill`, `dev`, `build` (static cross-compile), and
   `deploy ssh|docker`.
@@ -432,10 +433,16 @@ GET  /admin/status
 GET  /admin/traces?last=N
 GET  /admin/traces/{exec-id}
 POST /admin/trigger
+GET  /metrics              # Prometheus text exposition (admin token required)
 ```
 
 Events are redacted before persistence or admin output. The dev trace viewer is
 available at `/dev` behind the same admin authorization behavior.
+
+`GET /metrics` renders a hand-rolled Prometheus exposition (counters and latency
+summaries derived from the EventStream/StateStore) behind the same admin auth.
+For external tracing, `ovr.WithOTLPExporter("https://collector:4318")` ships
+spans to an OTLP/HTTP collector with no OpenTelemetry SDK dependency.
 
 ## CLI
 

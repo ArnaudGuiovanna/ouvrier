@@ -88,6 +88,29 @@ func TestNewRunnerWithTracerExposesPublicTracerType(t *testing.T) {
 	}
 }
 
+func TestWithOTLPExporterRejectsEmptyEndpoint(t *testing.T) {
+	runner := NewRunner(WithOTLPExporter(""))
+	if runner == nil {
+		t.Fatal("NewRunner returned nil runner")
+	}
+	if err := runner.Run(":0"); err == nil {
+		t.Fatal("Run() returned nil error, want endpoint-required error")
+	}
+}
+
+func TestWithOTLPExporterInstallsTracer(t *testing.T) {
+	runner := NewRunner(WithOTLPExporter("https://collector.example.com:4318",
+		OTLPServiceName("svc"),
+		OTLPHeaders(map[string]string{"Authorization": "Bearer x"}),
+	))
+	if runner == nil || runner.err != nil {
+		t.Fatalf("WithOTLPExporter set unexpected error: %v", runner.err)
+	}
+	if runner.tracer == nil {
+		t.Fatal("runner.tracer is nil; WithOTLPExporter did not install a tracer")
+	}
+}
+
 func TestNopTracerExposedAtPublicAPI(t *testing.T) {
 	tracer := NopTracer()
 	_, span := tracer.StartSpan(context.Background(), "x", nil)

@@ -123,6 +123,44 @@ func WithTracer(tracer Tracer) RunnerOption {
 	}
 }
 
+// WithOTLPExporter installs a Tracer that ships spans to an OTLP/HTTP
+// collector at endpoint (e.g. "https://collector:4318"); the exporter appends
+// "/v1/traces". Spans are encoded as OTLP/HTTP JSON with no heavy otel SDK
+// dependency, and attributes are redacted before export. It is a convenience
+// wrapper over WithTracer; passing both means the last option wins. An empty
+// endpoint is rejected. Default off: when this option is unset, behavior is
+// unchanged.
+func WithOTLPExporter(endpoint string, options ...OTLPExporterOption) RunnerOption {
+	return func(cfg *runnerConfig) {
+		opts := make([]events.OTLPOption, 0, len(options))
+		for _, option := range options {
+			if option != nil {
+				opts = append(opts, events.OTLPOption(option))
+			}
+		}
+		exporter, err := events.NewOTLPExporter(endpoint, opts...)
+		if err != nil {
+			cfg.setErr(err)
+			return
+		}
+		cfg.tracer = exporter
+	}
+}
+
+// OTLPExporterOption configures the OTLP exporter installed by WithOTLPExporter.
+type OTLPExporterOption = events.OTLPOption
+
+// OTLPServiceName sets the service.name resource attribute on exported spans.
+func OTLPServiceName(name string) OTLPExporterOption {
+	return events.WithOTLPServiceName(name)
+}
+
+// OTLPHeaders attaches additional HTTP headers (e.g. authorization for hosted
+// collectors) to every OTLP export request.
+func OTLPHeaders(headers map[string]string) OTLPExporterOption {
+	return events.WithOTLPHeaders(headers)
+}
+
 // WithPricing installs a pricing table used to compute per-call and
 // per-execution cost. When unset, cost stays best-effort (zero) with no
 // behavior change.
