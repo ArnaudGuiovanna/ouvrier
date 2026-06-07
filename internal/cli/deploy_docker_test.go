@@ -97,9 +97,11 @@ func TestRunDeployDockerHappyPath(t *testing.T) {
 		"FROM golang:1.25 AS build",
 		"WORKDIR /src",
 		"COPY . .",
-		"RUN CGO_ENABLED=0 go build -o /out/demo ./...",
+		"RUN CGO_ENABLED=0 go build -o /out/demo .",
+		"RUN mkdir -p /runtime && if [ -d skills ]; then cp -a skills /runtime/skills; else mkdir -p /runtime/skills; fi",
 		"FROM gcr.io/distroless/static-debian12:nonroot",
 		"COPY --from=build /out/demo /demo",
+		"COPY --from=build /runtime/skills /skills",
 		`ENTRYPOINT ["/demo"]`,
 	} {
 		if !strings.Contains(text, want) {

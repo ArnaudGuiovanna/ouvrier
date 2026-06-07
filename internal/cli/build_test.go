@@ -144,8 +144,11 @@ func TestRunBuildSetsStaticAndTargetEnv(t *testing.T) {
 	if !envHas(capturedEnv, "GOOS=linux") || !envHas(capturedEnv, "GOARCH=amd64") {
 		t.Fatalf("env missing GOOS/GOARCH overrides: %v", filterEnv(capturedEnv))
 	}
-	if !containsAll(capturedArgs, []string{"build", "-o", "-ldflags", "-s -w", "./..."}) {
+	if !containsAll(capturedArgs, []string{"build", "-o", "-ldflags", "-s -w", "."}) {
 		t.Fatalf("go args = %v, missing static ldflags", capturedArgs)
+	}
+	if strings.Contains(strings.Join(capturedArgs, " "), "./...") {
+		t.Fatalf("go args = %v, must build the main package, not ./...", capturedArgs)
 	}
 }
 

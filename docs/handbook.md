@@ -281,7 +281,9 @@ VLLM_API_KEY, VLLM_BASE_URL
 
 `Output[T]()` generates a strict JSON Schema from `T`, injects the schema into
 the harness prompt, validates the final result, records violations, and can run
-bounded repair attempts when enabled on the runner.
+bounded repair attempts when enabled on the runner. Fenced `json` blocks and
+short prose around a JSON object or array are stripped before validation; the
+typed schema still decides whether the result is accepted.
 
 ```go
 type Summary struct {
@@ -637,9 +639,10 @@ ouvrier deploy ssh \
   --admin-token "$PIP_ADMIN_TOKEN"
 ```
 
-The SSH deploy builds a static Linux binary, uploads the binary and `.env`,
-renders a systemd unit, restarts the service, health checks `/admin/health`,
-and rolls back to the previous binary if the health check fails.
+The SSH deploy builds a static Linux binary, uploads the binary, `.env`, and
+`skills/` runtime assets when present, renders a systemd unit, restarts the
+service, health checks `/admin/health`, and rolls back to the previous binary
+if the health check fails.
 
 Build a distroless container image:
 

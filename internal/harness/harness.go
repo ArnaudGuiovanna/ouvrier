@@ -588,7 +588,8 @@ func (h *Harness) validateResult(ctx context.Context, session runtimecore.Sessio
 	if h.resultSchema == nil {
 		return text, provider.Usage{}, nil
 	}
-	if err := schema.ValidateJSON(h.resultSchema, []byte(text)); err != nil {
+	normalized, err := schema.NormalizeJSON(h.resultSchema, []byte(text))
+	if err != nil {
 		recordErr := h.recordSchemaViolation(ctx, session, err)
 		if recordErr != nil {
 			return text, provider.Usage{}, errors.Join(err, recordErr)
@@ -605,7 +606,7 @@ func (h *Harness) validateResult(ctx context.Context, session runtimecore.Sessio
 		}
 		return h.repairResult(ctx, session, iteration, text, err)
 	}
-	return text, provider.Usage{}, h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
+	return string(normalized), provider.Usage{}, h.emit(ctx, session, events.EventSchemaValidationPassed, map[string]any{
 		"schema": h.resultSchema.Name,
 	})
 }
@@ -677,7 +678,8 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 		}
 
 		currentText = resp.Text
-		if err := schema.ValidateJSON(h.resultSchema, []byte(currentText)); err != nil {
+		normalized, err := schema.NormalizeJSON(h.resultSchema, []byte(currentText))
+		if err != nil {
 			currentErr = err
 			recordErr := h.recordSchemaViolation(ctx, session, err)
 			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
@@ -691,6 +693,7 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			}
 			continue
 		}
+		currentText = string(normalized)
 
 		if err := h.emit(ctx, session, events.EventSchemaRepairCompleted, map[string]any{
 			"schema":       h.resultSchema.Name,

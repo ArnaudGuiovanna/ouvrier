@@ -175,10 +175,12 @@ func renderDockerfile(projectName string) string {
 FROM golang:1.25 AS build
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/%s ./...
+RUN CGO_ENABLED=0 go build -o /out/%s .
+RUN mkdir -p /runtime && if [ -d skills ]; then cp -a skills /runtime/skills; else mkdir -p /runtime/skills; fi
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/%s /%s
+COPY --from=build /runtime/skills /skills
 ENTRYPOINT ["/%s"]
 `, projectName, projectName, projectName, projectName)
 }

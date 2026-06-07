@@ -313,7 +313,9 @@ ovr.Pipe("Summarize the ticket.",
 ```
 
 Ouvrier generates JSON Schema from `T`, injects it into the harness prompt, and
-validates final JSON strictly. Violations are recorded in `EventStream` and
+validates final JSON strictly. Common model wrappers such as fenced `json`
+blocks or short prose around a JSON object/array are stripped before validation;
+the schema itself remains strict. Violations are recorded in `EventStream` and
 `StateStore`; bounded repair is supported by the harness where enabled.
 Static prompt-cache hints are enabled by default; `NoCache()` disables them for
 one `Pipe`.
@@ -504,9 +506,10 @@ compiles the worker; `--static` implies `CGO_ENABLED=0` with
 (`modernc.org/sqlite` is pure Go, so static cross-builds work without a C
 toolchain).
 
-`ouvrier deploy ssh` ships a static binary, `.env`, and a systemd unit with
-health-check rollback. `ouvrier deploy docker` renders and builds a distroless
-container image.
+`ouvrier deploy ssh` ships a static binary, `.env`, `skills/` runtime assets
+when present, and a systemd unit with health-check rollback. `ouvrier deploy
+docker` renders and builds a distroless container image that includes `skills/`
+when present.
 
 ## Reference Examples
 

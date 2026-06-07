@@ -434,6 +434,9 @@ func TestRunEmitsToolCallFailedForToolErrorResult(t *testing.T) {
 	if event.Payload["tool_call_id"] != "call_lookup" {
 		t.Fatalf("tool_call_failed payload = %+v, want tool_call_id", event.Payload)
 	}
+	if event.Payload["error"] != "lookup unavailable" {
+		t.Fatalf("tool_call_failed payload = %+v, want concrete tool error", event.Payload)
+	}
 	if _, ok := findEvent(stream.List(), events.EventToolCallCompleted); ok {
 		t.Fatalf("events = %+v, want no tool_call_completed for failed result", stream.List())
 	}

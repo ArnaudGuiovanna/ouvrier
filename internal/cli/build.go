@@ -174,7 +174,7 @@ func runBuildResolved(ctx context.Context, cfg BuildConfig, out, errOut io.Write
 	if cfg.Static {
 		args = append(args, "-ldflags", "-s -w")
 	}
-	args = append(args, "./...")
+	args = append(args, ".")
 
 	fmt.Fprintf(out, "building %s -> %s\n", projectName, output)
 

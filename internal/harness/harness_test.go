@@ -966,6 +966,45 @@ func TestRunValidatesResultSchemaAndRecordsViolation(t *testing.T) {
 	}
 }
 
+func TestRunNormalizesFencedResultSchemaOutput(t *testing.T) {
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	contract, err := schema.FromType(reflect.TypeFor[harnessSchemaReply]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+	p := &scriptedProvider{
+		responses: []provider.Response{{
+			Text:       "```json\n{\"status\":\"ok\"}\n```",
+			StopReason: provider.StopEndTurn,
+		}},
+	}
+	h, err := harness.New(p,
+		harness.WithModel("anthropic/claude-sonnet-4-6"),
+		harness.WithEventStream(stream),
+		harness.WithResultSchema(contract),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	out, err := h.Run(context.Background(), "payload")
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if out.Text != `{"status":"ok"}` {
+		t.Fatalf("Text = %q, want normalized JSON", out.Text)
+	}
+	if _, ok := findEvent(stream.List(), events.EventSchemaViolation); ok {
+		t.Fatalf("events = %+v, want no schema violation for fenced JSON", stream.List())
+	}
+	if _, ok := findEvent(stream.List(), events.EventSchemaValidationPassed); !ok {
+		t.Fatalf("events = %+v, want schema validation passed", stream.List())
+	}
+}
+
 func TestRunRepairsInvalidResultSchemaWithinBound(t *testing.T) {
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()

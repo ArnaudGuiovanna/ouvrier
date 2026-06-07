@@ -228,6 +228,55 @@ func TestRunDeploySSHHappyPath(t *testing.T) {
 	}
 }
 
+func TestRunDeploySSHUploadsSkillsRuntimeAssets(t *testing.T) {
+	dir := writeDeployFixture(t)
+	skillDir := filepath.Join(dir, "skills", "jorf")
+	if err := os.MkdirAll(filepath.Join(skillDir, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir skill fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: jorf\ndescription: Watch JORF.\n---\n\nBody\n"), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "scripts", "parse.txt"), []byte("asset\n"), 0o644); err != nil {
+		t.Fatalf("write skill script: %v", err)
+	}
+
+	cfg := sshConfig{
+		Dir:       dir,
+		Host:      "h",
+		Path:      "/opt/demo",
+		Service:   "demo.service",
+		HealthURL: "/admin/health",
+	}
+	remote := &fakeRemote{}
+	if err := runDeploySSH(context.Background(), cfg, &bytes.Buffer{}, &bytes.Buffer{}, stubGoRunner(t), remote); err != nil {
+		t.Fatalf("runDeploySSH() error = %v", err)
+	}
+
+	uploads := map[string]bool{}
+	for _, upload := range remote.scpUploads {
+		uploads[upload.Remote] = true
+	}
+	for _, want := range []string{
+		"/opt/demo/skills/jorf/SKILL.md",
+		"/opt/demo/skills/jorf/scripts/parse.txt",
+	} {
+		if !uploads[want] {
+			t.Fatalf("scp uploads = %+v, want runtime asset %s", remote.scpUploads, want)
+		}
+	}
+	joined := strings.Join(remote.sshCommands, "\n")
+	for _, want := range []string{
+		"mkdir -p '/opt/demo/skills'",
+		"mkdir -p '/opt/demo/skills/jorf'",
+		"mkdir -p '/opt/demo/skills/jorf/scripts'",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("ssh commands missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
 func TestRunDeploySSHDefaultsServiceAndPath(t *testing.T) {
 	dir := writeDeployFixture(t)
 	cfg := sshConfig{Dir: dir, Host: "h", HealthURL: "/admin/health"}

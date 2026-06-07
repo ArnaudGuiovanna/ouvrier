@@ -182,7 +182,7 @@ func (h *Harness) finishToolCall(ctx context.Context, session runtimecore.Sessio
 	}
 	if outcome.result.IsError {
 		eventKind = events.EventToolCallFailed
-		payload["error"] = "tool returned error result"
+		payload["error"] = boundedToolResultErrorText(outcome.result.Content)
 	}
 	addToolResultObservability(payload, outcome.result.Content)
 	if err := h.emit(ctx, session, eventKind, payload); err != nil {
@@ -219,6 +219,15 @@ func toolResultErrorText(content json.RawMessage) string {
 		return "tool returned error result"
 	}
 	return string(content)
+}
+
+func boundedToolResultErrorText(content json.RawMessage) string {
+	const maxToolErrorTextBytes = 2048
+	text := toolResultErrorText(content)
+	if len(text) <= maxToolErrorTextBytes {
+		return text
+	}
+	return text[:maxToolErrorTextBytes] + "...(truncated)"
 }
 
 func addToolResultObservability(payload map[string]any, content json.RawMessage) {

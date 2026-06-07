@@ -265,7 +265,13 @@ func runDeploySSH(ctx context.Context, cfg sshConfig, out, errOut io.Writer, goR
 		return fmt.Errorf("%w: chmod remote .env: %w", ErrDeploy, err)
 	}
 
-	// 7. Render and upload the systemd unit, then daemon-reload.
+	// 7. Upload runtime assets that are intentionally read from disk by the
+	//    worker, such as skills/<name>/SKILL.md.
+	if err := uploadRuntimeAssets(ctx, ssh, connect, br.Dir, remotePath, out); err != nil {
+		return err
+	}
+
+	// 8. Render and upload the systemd unit, then daemon-reload.
 	unitPath := remotePath + "/" + service + ".service"
 	unit := renderSystemdUnit(systemdUnitParams{
 		Name:        br.ProjectName,
@@ -285,7 +291,7 @@ func runDeploySSH(ctx context.Context, cfg sshConfig, out, errOut io.Writer, goR
 		return fmt.Errorf("%w: install systemd unit: %w", ErrDeploy, err)
 	}
 
-	// 8. Promote the new binary: keep the previous (if any) as .previous,
+	// 9. Promote the new binary: keep the previous (if any) as .previous,
 	//    move .new into place, then restart the service.
 	remoteBin := remotePath + "/bin/" + br.ProjectName
 	remoteBinPrev := remotePath + "/bin/" + br.ProjectName + ".previous"
@@ -304,7 +310,7 @@ func runDeploySSH(ctx context.Context, cfg sshConfig, out, errOut io.Writer, goR
 		return rollbackBinary(ctx, ssh, connect, remoteBin, remoteBinPrev, service, fmt.Errorf("%w: systemctl restart failed: %w", ErrDeploy, err), out)
 	}
 
-	// 9. Health check on the remote host.
+	// 10. Health check on the remote host.
 	healthCmd := buildHealthCheckCommand(cfg.HealthURL, cfg.AdminToken)
 	if _, err := ssh.SSH(ctx, connect, healthCmd); err != nil {
 		return rollbackBinary(ctx, ssh, connect, remoteBin, remoteBinPrev, service, fmt.Errorf("%w: health check failed: %w", ErrDeploy, err), out)
@@ -312,6 +318,51 @@ func runDeploySSH(ctx context.Context, cfg sshConfig, out, errOut io.Writer, goR
 
 	fmt.Fprintf(out, "deployed %s to %s:%s (service=%s)\n", br.ProjectName, connect.userHost(), remotePath, service)
 	return nil
+}
+
+func uploadRuntimeAssets(ctx context.Context, ssh remoteRunner, connect sshConnectOpts, localRoot, remotePath string, out io.Writer) error {
+	skillsRoot := filepath.Join(localRoot, "skills")
+	info, err := os.Stat(skillsRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("%w: stat runtime assets: %w", ErrDeploy, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s exists but is not a directory", ErrDeploy, skillsRoot)
+	}
+
+	return filepath.WalkDir(skillsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("%w: read runtime asset %s: %w", ErrDeploy, path, walkErr)
+		}
+		rel, err := filepath.Rel(localRoot, path)
+		if err != nil {
+			return fmt.Errorf("%w: resolve runtime asset %s: %w", ErrDeploy, path, err)
+		}
+		remoteAssetPath := remotePath + "/" + filepath.ToSlash(rel)
+		if entry.IsDir() {
+			mkdirCmd := fmt.Sprintf("mkdir -p %s", shellQuote(remoteAssetPath))
+			fmt.Fprintf(out, "ssh %s: %s\n", connect.userHost(), mkdirCmd)
+			if _, err := ssh.SSH(ctx, connect, mkdirCmd); err != nil {
+				return fmt.Errorf("%w: create remote runtime asset directory: %w", ErrDeploy, err)
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("%w: stat runtime asset %s: %w", ErrDeploy, path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		fmt.Fprintf(out, "scp %s -> %s:%s\n", rel, connect.userHost(), remoteAssetPath)
+		if err := ssh.SCP(ctx, connect, path, remoteAssetPath); err != nil {
+			return fmt.Errorf("%w: upload runtime asset %s: %w", ErrDeploy, rel, err)
+		}
+		return nil
+	})
 }
 
 func rollbackBinary(ctx context.Context, ssh remoteRunner, connect sshConnectOpts, remoteBin, remoteBinPrev, service string, cause error, out io.Writer) error {

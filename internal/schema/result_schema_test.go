@@ -129,6 +129,41 @@ func TestValidateJSONEnforcesGeneratedSchema(t *testing.T) {
 	}
 }
 
+func TestNormalizeJSONAcceptsFencedAndWrappedObjectOutput(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[resultSchemaPayload]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	for _, data := range [][]byte{
+		[]byte("```json\n{\"status\":\"ok\"}\n```"),
+		[]byte("Here is the result:\n{\"status\":\"ok\"}\nDone."),
+	} {
+		normalized, err := schema.NormalizeJSON(contract, data)
+		if err != nil {
+			t.Fatalf("NormalizeJSON(%q) returned error: %v", data, err)
+		}
+		if string(normalized) != `{"status":"ok"}` {
+			t.Fatalf("NormalizeJSON(%q) = %s, want compact JSON object", data, normalized)
+		}
+	}
+}
+
+func TestNormalizeJSONAcceptsWrappedArrayOutput(t *testing.T) {
+	contract, err := schema.FromType(reflect.TypeFor[[]resultSchemaPayload]())
+	if err != nil {
+		t.Fatalf("FromType returned error: %v", err)
+	}
+
+	normalized, err := schema.NormalizeJSON(contract, []byte("Result:\n[{\"status\":\"ok\"}]\n"))
+	if err != nil {
+		t.Fatalf("NormalizeJSON returned error: %v", err)
+	}
+	if string(normalized) != `[{"status":"ok"}]` {
+		t.Fatalf("NormalizeJSON = %s, want compact JSON array", normalized)
+	}
+}
+
 func TestValidateJSONRespectsJSONTagsStrictly(t *testing.T) {
 	contract, err := schema.FromType(reflect.TypeFor[resultSchemaTaggedOutput]())
 	if err != nil {
