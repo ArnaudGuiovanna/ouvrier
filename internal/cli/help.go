@@ -67,6 +67,7 @@ Usage: ouvrier show [flags]
 
 Options:
       --dir string   Project directory containing pip.yaml (default ".")
+      --json         Print a machine-readable JSON summary
   -h, --help         Show this help message
 `
 
@@ -101,14 +102,15 @@ Options:
   -h, --help           Show this help message
 `
 
-const addHelp = `Add an agent, tool, or skill to an existing Ouvrier project.
+const addHelp = `Add an agent, trigger, tool, or skill to an existing Ouvrier project.
 
-Usage: ouvrier add <agent|tool|skill> [flags]
+Usage: ouvrier add <agent|trigger|tool|skill> [flags]
 
 Subcommands:
-  agent   Append a new ovr.Pipe to main.go
-  tool    Generate a tool stub and register it in the first Pipe
-  skill   Create a new SKILL.md and register it in the first Pipe
+  agent     Append a new ovr.Pipe to main.go
+  trigger   Append a new trigger pipeline to main.go
+  tool      Generate a tool stub and register it in the first Pipe
+  skill     Create a new SKILL.md and register it in the first Pipe
 
 Run "ouvrier add <subcommand> --help" for details.
 `
@@ -128,6 +130,27 @@ The command refuses to run unless pip.yaml exists in --dir. The new Pipe is
 inserted immediately after the existing ovr.Pipe(...) line, or before the
 terminal ovr.Reply/ovr.Push/ovr.Sink if no other Pipe was found. If neither
 anchor is detected the command refuses to edit main.go.
+`
+
+const addTriggerHelp = `Append a new trigger pipeline to main.go.
+
+Usage: ouvrier add trigger --trigger TRIGGER [flags]
+
+Options:
+      --trigger string   HTTP route, cron expression, webhook provider, or stream URI
+      --model string     Model ID as provider/name (default: first model in main.go, then anthropic/claude-sonnet-4-6)
+      --goal string      Goal sentence for the generated Pipe
+      --dir string       Project directory containing pip.yaml (default ".")
+  -h, --help             Show this help message
+
+Examples:
+  ouvrier add trigger --trigger "cron @every 1h"
+  ouvrier add trigger --trigger "webhook github" --model openai/gpt-4.1-mini
+  ouvrier add trigger --trigger "stream kafka://tickets"
+
+The command appends a full ovr.From(...), ovr.Pipe(...), and terminal node
+inside the existing ovr.Run(...) call. HTTP triggers use a JSON reply;
+cron, webhook, and stream triggers use ovr.Sink(ovr.Log()) by default.
 `
 
 const addToolHelp = `Generate a Go tool stub and register it in the first Pipe.
@@ -282,6 +305,10 @@ func printAddHelp(w io.Writer) {
 
 func printAddAgentHelp(w io.Writer) {
 	fmt.Fprint(w, addAgentHelp)
+}
+
+func printAddTriggerHelp(w io.Writer) {
+	fmt.Fprint(w, addTriggerHelp)
 }
 
 func printAddToolHelp(w io.Writer) {

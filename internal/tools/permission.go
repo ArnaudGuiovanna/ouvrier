@@ -51,6 +51,14 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 		RequiresApproval: tool.metadata.RequiresApproval,
 	}
 	if action.RequiresApproval {
+		if approvalID, ok := approvedApprovalFromContext(ctx, action.ToolCallID); ok {
+			decision := policy.Decision{Allowed: true, ApprovalID: approvalID, Reason: "approval approved"}
+			observeErr := observePermissionDecision(ctx, PermissionDecisionAudit{
+				Action:   action,
+				Decision: decision,
+			})
+			return provider.ToolResult{}, observeErr == nil, observeErr
+		}
 		if gate, approvalCtx, ok := approvalGateFromContext(ctx); ok {
 			return e.suspendForApproval(ctx, action, call, gate, approvalCtx)
 		}
@@ -69,6 +77,23 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 	}
 	if decision.Allowed {
 		return provider.ToolResult{}, true, nil
+	}
+	if decision.Suspended {
+		approvalID := strings.TrimSpace(decision.ApprovalID)
+		if approvalID == "" {
+			reason := decision.Reason
+			if strings.TrimSpace(reason) == "" {
+				reason = "suspended permission decision requires an approval id"
+			}
+			return errorResult(call, fmt.Errorf("%w: %s", policy.ErrDenied, reason)), false, nil
+		}
+		_, approvalCtx, _ := approvalGateFromContext(ctx)
+		return provider.ToolResult{}, false, &SuspendedError{
+			ApprovalID: approvalID,
+			ExecID:     approvalCtx.ExecID,
+			ToolName:   action.ToolName,
+			ToolCallID: action.ToolCallID,
+		}
 	}
 	reason := decision.Reason
 	if strings.TrimSpace(reason) == "" {

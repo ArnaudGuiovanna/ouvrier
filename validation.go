@@ -19,8 +19,14 @@ var (
 	ErrIncompatibleTerminal = errors.New("terminal is incompatible with trigger")
 	// ErrPipeMissingModel means a Pipe node was declared without Model.
 	ErrPipeMissingModel = errors.New("pipe must include Model")
+	// ErrInvalidModelForm means a Model id was not in provider/model form.
+	ErrInvalidModelForm = errors.New("model must use provider/model form")
 	// ErrInvalidNode means a node was nil, unsupported, or otherwise invalid.
 	ErrInvalidNode = errors.New("invalid node")
+	// ErrIncompatibleTriggerOption means a From option was set on a trigger kind
+	// that does not consume it (e.g. StreamDLQ on an HTTP trigger), which would
+	// otherwise be silently ignored at runtime.
+	ErrIncompatibleTriggerOption = errors.New("From option is incompatible with trigger")
 )
 
 // Validate checks a pipeline declaration without starting any runtime work.

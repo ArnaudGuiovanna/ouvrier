@@ -12,6 +12,7 @@ typed `Triage` JSON response containing `priority`, `summary`, and `tags`.
 ticket-triage/
   main.go
   go.mod                          (replace -> ../../)
+  ouvrier.worker.json             (integration manifest)
   skills/ticket-triage/SKILL.md   (system-prompt instructions)
 ```
 

@@ -6,12 +6,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 func TestHTTPSuspendsGatedToolWhenApprovalStoreConfigured(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
 	call := provider.ToolCall{ID: "call_1", Name: "wire_payment"}
 	scripted := &httpScriptedProvider{
 		responses: []provider.Response{
@@ -19,14 +21,17 @@ func TestHTTPSuspendsGatedToolWhenApprovalStoreConfigured(t *testing.T) {
 			{Text: `{"status":"resumed"}`, StopReason: provider.StopEndTurn},
 		},
 	}
-	called := false
+	called := make(chan struct{}, 1)
 	store := state.NewMemoryStore()
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /payments"),
 		Pipe("settle",
 			Model("anthropic/claude-sonnet-4-6"),
 			Tool("wire_payment", func(ctx context.Context) error {
-				called = true
+				select {
+				case called <- struct{}{}:
+				default:
+				}
 				return nil
 			}, RequiresApproval()),
 		),
@@ -43,8 +48,10 @@ func TestHTTPSuspendsGatedToolWhenApprovalStoreConfigured(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s, want %d", rec.Code, rec.Body.String(), http.StatusAccepted)
 	}
-	if called {
+	select {
+	case <-called:
 		t.Fatal("gated tool body executed before approval")
+	default:
 	}
 	var body struct {
 		Status     string `json:"status"`
@@ -68,6 +75,43 @@ func TestHTTPSuspendsGatedToolWhenApprovalStoreConfigured(t *testing.T) {
 	}
 	if pending[0].ID != body.ApprovalID {
 		t.Fatalf("persisted approval id = %q, want %q", pending[0].ID, body.ApprovalID)
+	}
+
+	approvalReq := httptest.NewRequest(http.MethodPost, "/admin/approvals/"+body.ApprovalID, strings.NewReader(`{"decision":"approve","decided_by":"ops"}`))
+	approvalRec := httptest.NewRecorder()
+	handler.ServeHTTP(approvalRec, approvalReq)
+	if approvalRec.Code != http.StatusOK {
+		t.Fatalf("approval status = %d body=%s, want %d", approvalRec.Code, approvalRec.Body.String(), http.StatusOK)
+	}
+	var approvalBody struct {
+		Status  string `json:"status"`
+		Resumed bool   `json:"resumed"`
+	}
+	decodeAdminJSON(t, approvalRec, &approvalBody)
+	if approvalBody.Status != "ok" || !approvalBody.Resumed {
+		t.Fatalf("approval body = %+v, want resumed approval", approvalBody)
+	}
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		approvals, _ := store.PendingApprovals(context.Background())
+		events, _ := store.Events(context.Background(), body.ExecID)
+		execution, ok, _ := store.Execution(context.Background(), body.ExecID)
+		t.Fatalf("approved gated tool was not executed; execution ok=%v value=%+v approvals=%+v events=%+v", ok, execution, approvals, events)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		execution, ok, err := store.Execution(context.Background(), body.ExecID)
+		if err != nil {
+			t.Fatalf("Execution returned error: %v", err)
+		}
+		if ok && execution.Status == state.ExecutionCompleted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("execution = %+v ok=%v, want completed", execution, ok)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

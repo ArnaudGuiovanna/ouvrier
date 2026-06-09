@@ -168,6 +168,97 @@ func TestDefaultHTTPRuntimeLoadsAdminTokenFromEnv(t *testing.T) {
 	}
 }
 
+func TestHTTPAdminPlansDescribeCompiledWorkerCapabilities(t *testing.T) {
+	t.Setenv("PIP_ENV", "dev")
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets/{id}", WorkerPool(3)),
+		Pipe("classify ticket",
+			Model("anthropic/claude-sonnet-4-6"),
+			Tool("load_ticket", func(context.Context) error { return nil },
+				ReadOnly(),
+				Describe("Load a ticket."),
+			),
+			Output[httpTestReply](),
+		),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/plans", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body adminPlansResponse
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "ok" || len(body.Plans) != 1 {
+		t.Fatalf("body = %+v, want one ok plan", body)
+	}
+	plan := body.Plans[0]
+	if plan.Trigger.Kind != "http" || plan.Trigger.Method != "POST" || plan.Trigger.Path != "/tickets/{id}" || plan.Trigger.WorkerPool != 3 {
+		t.Fatalf("trigger = %+v, want HTTP POST /tickets/{id} with worker pool", plan.Trigger)
+	}
+	if len(plan.Steps) != 1 || plan.Steps[0].Model != "anthropic/claude-sonnet-4-6" || len(plan.Steps[0].Tools) != 1 {
+		t.Fatalf("steps = %+v, want model and load_ticket tool", plan.Steps)
+	}
+	tool := plan.Steps[0].Tools[0]
+	if tool.Name != "load_ticket" || tool.Effect != "read_only" || tool.Description != "Load a ticket." {
+		t.Fatalf("tool = %+v, want read-only load_ticket", tool)
+	}
+	if plan.Terminal.Kind != "reply" || plan.Terminal.ResultSchema == nil {
+		t.Fatalf("terminal = %+v, want reply with result schema", plan.Terminal)
+	}
+}
+
+func TestHTTPAdminEventsStreamsExistingEventsAsJSONL(t *testing.T) {
+	store := state.NewMemoryStore()
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPipelineStarted, ExecID: "exec_1", TraceID: "trace_1"})
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPipelineCompleted, ExecID: "exec_1", TraceID: "trace_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/events?follow=false", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/x-ndjson") {
+		t.Fatalf("content-type = %q, want jsonl", contentType)
+	}
+	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("events stream = %q, want two JSONL records", rec.Body.String())
+	}
+	var first adminEventResponse
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("first event is not JSON: %v", err)
+	}
+	if first.ID == 0 || first.Kind != string(events.EventPipelineStarted) || first.ExecID != "exec_1" {
+		t.Fatalf("first event = %+v, want pipeline_started exec_1", first)
+	}
+}
+
+func TestHTTPAdminEventsSupportsSSE(t *testing.T) {
+	store := state.NewMemoryStore()
+	addAdminStoreEvent(t, store, events.Event{Kind: events.EventPipelineStarted, ExecID: "exec_1"})
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/events?format=sse&follow=false", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: pipeline_started") || !strings.Contains(body, "data: {") {
+		t.Fatalf("SSE body = %q, want event and data lines", body)
+	}
+}
+
 func TestHTTPAdminStatusSummarizesStateStoreExecutions(t *testing.T) {
 	store := state.NewMemoryStore()
 	now := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)

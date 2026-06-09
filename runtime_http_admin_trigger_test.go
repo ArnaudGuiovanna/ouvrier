@@ -51,10 +51,13 @@ func TestHTTPAdminTriggerRunsExistingHTTPRouteThroughHarness(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var body httpStatusResponse
+	var body adminTriggerResponse
 	decodeAdminJSON(t, rec, &body)
 	if body.Status != "ok" || body.Output != `{"status":"classified"}` {
 		t.Fatalf("body = %+v, want ok classified output", body)
+	}
+	if body.ExecID == "" || body.TraceID == "" || body.SessionID == "" {
+		t.Fatalf("body = %+v, want admin trigger execution identifiers", body)
 	}
 	if len(scripted.requests) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
@@ -405,6 +408,11 @@ func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var body adminTriggerResponse
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "accepted" || body.ExecID == "" || body.TraceID == "" || body.SessionID == "" {
+		t.Fatalf("body = %+v, want accepted with execution identifiers", body)
 	}
 	select {
 	case <-scripted.started:

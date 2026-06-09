@@ -1,10 +1,9 @@
 # Ouvrier Handbook
 
 <!-- This single-file handbook intentionally exceeds the usual preferred doc
-length because v0.1 usage is documented end to end in one user-facing guide. -->
+length because Ouvrier usage is documented end to end in one user-facing guide. -->
 
-This handbook explains how to build, run, observe, and deploy Ouvrier v0.1
-workers.
+This handbook explains how to build, run, observe, and deploy Ouvrier workers.
 
 Ouvrier is a Go framework for small agentic middleware services. You declare
 where work comes from, what an agent should do, which tools it may call, and
@@ -14,7 +13,8 @@ commands.
 
 ## Version And Requirements
 
-- Ouvrier version: v0.1.
+- Ouvrier version: current `main` includes v0.1 and v0.2 milestone work; the
+  latest tagged release remains `v0.1.0` until v0.2 is tagged.
 - Go version: Go 1.25 or newer.
 - Public module path: `github.com/ArnaudGuiovanna/ouvrier`.
 - Runtime package name: `ovr`.
@@ -138,6 +138,7 @@ my-worker/
   go.mod
   go.sum
   pip.yaml
+  ouvrier.worker.json
   .env.example
   .gitignore
   README.md
@@ -147,7 +148,11 @@ my-worker/
 
 Use `.env.example` as the team-visible template. Keep `.env` local and out of
 Git. `pip.yaml` supplies project metadata used by `ouvrier show`, `ouvrier
-build`, and deployment commands.
+build`, and deployment commands. `ouvrier.worker.json` is a small
+machine-readable manifest (`name`, `description`, `events`, `outcomes`,
+`admin_url`) intended for editor and agent integrations. The Pi extension in
+`integrations/pi-ouvrier/` uses it to discover workers, stream admin events, and
+show asynchronous feedback in an Ouvrier Inbox.
 
 ## Creating Projects
 
@@ -217,7 +222,14 @@ Webhook routes are mounted at `POST /webhooks/<provider>`. The pipe input is:
 ```
 
 `VerifySignature` checks HMAC-SHA256 signatures. Headers may be either raw hex
-or prefixed with `sha256=`.
+or prefixed with `sha256=`. The comparison is constant-time (`hmac.Equal`).
+
+The signature is computed over the raw request body only, matching the common
+provider convention (GitHub, generic HMAC). It proves authenticity but not
+freshness: a captured, validly-signed request can be replayed. Pair
+`VerifySignature` with `IdempotencyKey` on a stable per-delivery header (e.g.
+`X-GitHub-Delivery`) so a replayed delivery is rejected as a duplicate. Do not
+rely on signature verification alone for replay protection.
 
 ### Stream
 
@@ -230,7 +242,9 @@ ovr.From(ovr.Stream("kafka://localhost:9092/tickets"))
 Streams run through the same harness as HTTP and webhook triggers. Message IDs
 are reserved in the state store for idempotency when available. Failed stream
 deliveries emit a dead-letter event in the event stream so operators can route
-or replay them intentionally.
+or replay them intentionally. Broker DLQ targets are published over the real
+transport; admin replay drains the runtime-retained DLQ copy for the configured
+stream plan, not an arbitrary broker topic or stream.
 
 ### Trigger Options
 
@@ -351,7 +365,10 @@ side-effecting and non-idempotent.
 
 The default policy allows read-only tools, idempotent tools with a key,
 declared subagents, and redacted log sinks. It denies non-idempotent side
-effects, targeted output actions, and tools marked `RequiresApproval()`.
+effects and targeted output actions. Tools marked `RequiresApproval()` are
+blocked without an approval flow; with a configured approval store/runtime, the
+tool call suspends and can resume after `POST /admin/approvals/<id>` approves
+it.
 
 Allow a side-effecting Go tool by label:
 
@@ -492,7 +509,7 @@ ovr.Pipe("Draft a multilingual reply.",
 
 Subagents run through `ToolExecutor`, inherit budgets and policy, create child
 sessions, propagate cancellation, enforce a maximum depth, and attach child
-events to the parent trace. `MaxParallel` cannot exceed 5 in v0.1.
+events to the parent trace. `MaxParallel` cannot exceed the runtime safety cap.
 
 ## Terminals
 
@@ -561,6 +578,96 @@ PIP_ADMIN_TOKEN=...
 PIP_ENV=dev                  # enables unauthenticated admin only when no token is set
 ```
 
+## Testing Workers
+
+Test a worker end to end in a Go test without a real model or a network
+listener. `ovr.WithProvider` injects an LLM provider, `Runner.Handler` (or the
+package-level `ovr.Handler`) compiles your nodes into an `http.Handler` for
+`httptest`, and the `ovrtest` package supplies a scripted provider that returns
+canned turns. The handler defaults to an in-memory state store, so tests touch
+neither disk nor environment.
+
+```go
+func TestTriage(t *testing.T) {
+	provider := ovrtest.NewProvider(
+		ovrtest.Text(`{"priority":"high","summary":"cannot log in"}`),
+	)
+	handler, err := provider.Handler(
+		ovr.From("POST /tickets/{id}"),
+		ovr.Pipe("Triage the support ticket.",
+			ovr.Model("anthropic/claude-sonnet-4-6"),
+			ovr.Output[Triage](),
+		),
+		ovr.Reply(ovr.JSON[Triage]()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, _ := http.Post(srv.URL+"/tickets/42", "application/json", strings.NewReader(`{}`))
+	// resp body is {"status":"ok","output":"<your JSON[T] as a string>"}
+}
+```
+
+Script a tool-using pipe turn by turn: a turn carrying a tool call makes the
+harness run that tool and ask the provider again.
+
+```go
+provider := ovrtest.NewProvider(
+	ovrtest.Tool("load_ticket", `{"id":"42"}`),                 // turn 1: call the tool
+	ovrtest.Text(`{"priority":"low","summary":"resolved"}`),    // turn 2: final answer
+)
+```
+
+`provider.Requests()` and `provider.CallCount()` expose what the worker sent the
+model, so you can assert on the prompt and the number of turns.
+
+## Evals And Regression Gates
+
+The `ovreval` package runs a golden dataset of cases through a worker — the same
+compiled pipeline `Run` serves — and checks the typed output against assertions,
+producing a pass rate you can gate CI on. It builds on `Handler`, so an eval
+suite needs no listener; pair it with a scripted provider for deterministic
+runs, or a live provider to evaluate against a real model.
+
+```go
+func TestTriageEval(t *testing.T) {
+	suite := ovreval.New(
+		ovr.NewRunner(ovr.WithProvider(provider)),
+		ovr.From("POST /tickets/{id}"),
+		ovr.Pipe("Triage the support ticket.",
+			ovr.Model("anthropic/claude-sonnet-4-6"),
+			ovr.Output[Triage](),
+		),
+		ovr.Reply(ovr.JSON[Triage]()),
+	)
+
+	report := suite.RunT(t,
+		ovreval.Case{
+			Name: "outage is high priority",
+			Path: "/tickets/1",
+			Body: `{"subject":"site is down"}`,
+			Assert: []ovreval.Assertion{
+				ovreval.WantStatus(200),
+				ovreval.OutputField("priority", "high"),
+				ovreval.OutputContains("down"),
+			},
+		},
+	)
+	if report.PassRate() < 1.0 {
+		t.Fatalf("eval pass rate %.0f%% below gate", report.PassRate()*100)
+	}
+}
+```
+
+Assertions cover the HTTP status (`WantStatus`), JSON output fields
+(`OutputField`, compared JSON-normalized), substrings (`OutputContains`), and
+anything else via `Custom`. `Run` returns a `Report` (`Passed`, `Failed`,
+`PassRate`) for non-test callers; `RunT` reports each failing case through
+`*testing.T` so a dataset reads like a table test.
+
 ## Observability And Admin
 
 Admin endpoints:
@@ -568,9 +675,12 @@ Admin endpoints:
 ```txt
 GET  /admin/health
 GET  /admin/status
+GET  /admin/plans
+GET  /admin/capabilities
+GET  /admin/events              # JSONL by default, SSE with ?format=sse
 GET  /admin/traces?last=N
 GET  /admin/traces/<exec-id>
-POST /admin/trigger
+POST /admin/trigger             # returns exec_id/trace_id/session_id when scheduled
 GET  /dev
 ```
 
@@ -605,9 +715,10 @@ ouvrier version
 ouvrier new
 ouvrier new --yes --name NAME --trigger "POST /path" --model provider/model
 ouvrier add agent --name NAME --model provider/model [--goal TEXT]
+ouvrier add trigger --trigger "cron @every 1h" [--model provider/model] [--goal TEXT]
 ouvrier add tool --name LoadTicket [--describe TEXT] [--readonly|--side-effecting|--idempotent KEY]
 ouvrier add skill --name ticket-triage [--description TEXT]
-ouvrier show [--dir .]
+ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
 ouvrier status [--url URL] [--token TOKEN]

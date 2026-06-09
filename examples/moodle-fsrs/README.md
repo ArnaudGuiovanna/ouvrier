@@ -16,6 +16,7 @@ response: `next_due`, `stability`, `difficulty`, `lapses`.
 moodle-fsrs/
   main.go
   go.mod                          (replace -> ../../)
+  ouvrier.worker.json             (integration manifest)
 ```
 
 ## Required environment

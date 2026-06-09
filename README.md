@@ -55,7 +55,8 @@ func main() {
 
 ## Status
 
-Ouvrier v0.1 is feature-complete against the documented milestone backlog.
+Ouvrier `main` includes the completed v0.1 and v0.2 milestone backlog. The
+latest tagged release is still `v0.1.0` until v0.2 is tagged.
 The public Go module path is:
 
 ```txt
@@ -71,7 +72,7 @@ The CI gate (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`,
 `staticcheck`, `go test ./...`, race tests on concurrency-sensitive
 packages, and builds the `ouvrier` CLI on every push and pull request.
 
-What ships in v0.1:
+What ships in the current codebase:
 
 - HTTP, Cron, Webhook, and Stream (NATS / Redis / Kafka) triggers with
   worker pools, signed inbound HMAC verification, and idempotency keys.
@@ -87,19 +88,27 @@ What ships in v0.1:
   with tool use, typed final results, and classified errors.
 - Reply (`JSON[T]`, `SSE`, `Accepted`), Push (webhook, queue), and Sink
   (log, file) outputs.
+- Native provider token streaming through `EventStream` and `Reply(SSE())`,
+  human-in-the-loop suspend/resume approvals, scoped persistent memory, model
+  fallback chains, provider budgets, and cost accounting from pricing tables.
+- Stream DLQ routing, replay tooling, broker backpressure/ack policy controls,
+  and queue push terminals for Kafka, Redis, NATS, SQS, and HTTP(S).
 - Protected admin endpoints (`/admin/health`, `/admin/status`,
-  `/admin/traces`, `/admin/traces/<id>`, `/admin/trigger`), a Prometheus
-  `/metrics` endpoint, plus a dev-mode trace viewer at `/dev`.
+  `/admin/plans`, `/admin/capabilities`, `/admin/events`, `/admin/traces`,
+  `/admin/traces/<id>`, `/admin/trigger`, `/admin/approvals`,
+  `/admin/streams/replay`), a Prometheus `/metrics` endpoint, plus a dev-mode
+  trace viewer at `/dev`.
 - OpenTelemetry-compatible `Tracer` hook (and a built-in native OTLP/HTTP
   span exporter via `WithOTLPExporter`) for pipeline, pipe, session, LLM,
   tool, schema, and subagent spans.
 - The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
-  `add agent|tool|skill`, `dev`, `build` (static cross-compile), and
+  `add agent|trigger|tool|skill`, `dev`, `build` (static cross-compile), and
   `deploy ssh|docker`.
 
-Operational notes for v0.1: provider response streaming is not surfaced
-through `EventStream`, `ouvrier dev` runs `go run .` without hot reload, and
-provider cost estimates are best-effort from available provider metadata.
+Operational notes: trace persistence uses the configured `StateStore` (SQLite
+by default), cost accounting depends on configured pricing and provider usage
+metadata, and DLQ replay drains the runtime-retained copy for the configured
+stream plan rather than consuming arbitrary broker DLQ topics.
 
 ## Mental Model
 
@@ -145,7 +154,10 @@ ouvrier version
 ```
 
 During local development, generated projects use a `replace` directive pointing
-back to this checkout.
+back to this checkout. They also include `ouvrier.worker.json`, a small
+machine-readable worker manifest for editor/agent integrations. A prototype Pi
+extension lives in `integrations/pi-ouvrier/`; it discovers these manifests,
+streams `/admin/events`, and exposes an Ouvrier Inbox inside Pi.
 
 ## Create A Worker
 
@@ -223,8 +235,11 @@ Stream production hardening:
   whose receiver exposes no ack closure treat it as a no-op.
 - Replay a dead-letter queue with `ReplayStreamDLQ` in-process, or via the
   admin endpoint `POST /admin/streams/replay` (same admin auth as other
-  `/admin/*` routes), which drains and reprocesses the DLQ and returns the
-  replayed count. Dead-letter targets are credential-stripped in events/logs.
+  `/admin/*` routes), which drains and reprocesses the runtime-retained copy
+  for the configured stream plan and returns the replayed count. Broker DLQ
+  targets are still published over the real transport; replaying an arbitrary
+  broker topic or stream requires a dedicated consumer/custom DLQ integration.
+  Dead-letter targets are credential-stripped in events/logs.
 
 ### Pipes
 
@@ -441,7 +456,10 @@ OUVRIER_STATE_PATH=.ouvrier/state.db
 ```
 
 Admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
-stream-only, and mixed runtimes. Set `PIP_ADMIN_TOKEN` outside local
+stream-only, and mixed runtimes. `/admin/plans` and `/admin/capabilities`
+return machine-readable compiled worker capabilities, and `/admin/events`
+streams redacted events as JSONL or SSE for live IDE integrations. Set
+`PIP_ADMIN_TOKEN` outside local
 development when exposing a worker.
 
 During local development, `ouvrier dev` auto-loads a `.env` file from the
@@ -460,9 +478,12 @@ Runtime endpoints:
 ```txt
 GET  /admin/health
 GET  /admin/status
+GET  /admin/plans          # compiled trigger/step/terminal capabilities
+GET  /admin/capabilities   # alias shape for integrations
+GET  /admin/events         # JSONL/SSE event stream (?format=sse, ?follow=false)
 GET  /admin/traces?last=N
 GET  /admin/traces/{exec-id}
-POST /admin/trigger
+POST /admin/trigger        # returns exec_id/trace_id/session_id when scheduled
 GET  /metrics              # Prometheus text exposition (admin token required)
 ```
 
@@ -483,9 +504,10 @@ ouvrier version
 ouvrier new --yes --name NAME --trigger "POST /path" --model "provider/model"
 ouvrier new
 ouvrier add agent --name NAME --model "provider/model" [--goal TEXT]
+ouvrier add trigger --trigger "cron @every 1h" [--model "provider/model"] [--goal TEXT]
 ouvrier add tool --name LoadTicket [--describe TEXT] [--readonly|--side-effecting|--idempotent KEY]
 ouvrier add skill --name ticket-triage [--description TEXT]
-ouvrier show [--dir .]
+ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]

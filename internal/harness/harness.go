@@ -129,6 +129,10 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		return out, err
 	}
 
+	return h.runLoop(runCtx, session, messages, out, providerRetryAllowed)
+}
+
+func (h *Harness) runLoop(runCtx context.Context, session runtimecore.Session, messages []provider.Message, out Outcome, providerRetryAllowed bool) (Outcome, error) {
 	for out.Iterations < h.budget.MaxIterations {
 		if _, payload, exceeded := h.budgetLedger.Exceeded(); exceeded {
 			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
@@ -204,6 +208,10 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, budgetPayload)
 		}
 		if err != nil {
+			if suspended, ok := suspendedToolError(err); ok {
+				baseMessages := append(cloneMessages(messages), toolMessages...)
+				return h.suspendRun(runCtx, session, baseMessages, out, providerRetryAllowed, callsFromSuspended(resp.ToolCalls, suspended), suspended)
+			}
 			out.Status = StatusFailed
 			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
@@ -218,6 +226,77 @@ func (h *Harness) Run(ctx context.Context, input string) (Outcome, error) {
 		"max_iterations": h.budget.MaxIterations,
 		"iterations":     out.Iterations,
 	})
+}
+
+func (h *Harness) suspendRun(ctx context.Context, session runtimecore.Session, messages []provider.Message, out Outcome, providerRetryAllowed bool, calls []provider.ToolCall, suspended *tools.SuspendedError) (Outcome, error) {
+	out.Status = StatusSuspended
+	emitErr := h.emit(ctx, session, events.EventExecutionSuspended, map[string]any{
+		"approval_id":  suspended.ApprovalID,
+		"tool":         suspended.ToolName,
+		"tool_call_id": suspended.ToolCallID,
+	})
+	resumeMessages := cloneMessages(messages)
+	resumeCalls := append([]provider.ToolCall(nil), calls...)
+	resumeOut := out
+	resume := func(resumeCtx context.Context) (Outcome, error) {
+		return h.resumeAfterApproval(resumeCtx, session, resumeMessages, resumeOut, providerRetryAllowed, resumeCalls, suspended)
+	}
+	return out, errors.Join(NewSuspendedRunError(suspended, resume), emitErr)
+}
+
+func (h *Harness) resumeAfterApproval(ctx context.Context, session runtimecore.Session, messages []provider.Message, out Outcome, providerRetryAllowed bool, calls []provider.ToolCall, suspended *tools.SuspendedError) (Outcome, error) {
+	resumeCtx := ctx
+	if resumeCtx == nil {
+		resumeCtx = context.Background()
+	}
+	var cancel context.CancelFunc
+	if h.budget.MaxWallClock > 0 {
+		resumeCtx, cancel = context.WithTimeout(resumeCtx, h.budget.MaxWallClock)
+		defer cancel()
+	}
+
+	approvedCtx := tools.ContextWithApprovedApproval(resumeCtx, suspended.ApprovalID, suspended.ToolCallID)
+	toolMessages, budgetPayload, err := h.executeToolCalls(approvedCtx, session, calls)
+	if budgetPayload != nil {
+		return h.truncateForBudget(context.WithoutCancel(resumeCtx), session, out, budgetPayload)
+	}
+	if err != nil {
+		if nextSuspended, ok := suspendedToolError(err); ok {
+			baseMessages := append(cloneMessages(messages), toolMessages...)
+			return h.suspendRun(resumeCtx, session, baseMessages, out, providerRetryAllowed, callsFromSuspended(calls, nextSuspended), nextSuspended)
+		}
+		out.Status = StatusFailed
+		return out, errors.Join(err, h.finishExecution(resumeCtx, session, out.Status, err))
+	}
+	messages = append(cloneMessages(messages), toolMessages...)
+	if _, payload, exceeded := h.budgetLedger.Exceeded(); exceeded {
+		return h.truncateForBudget(context.WithoutCancel(resumeCtx), session, out, payload)
+	}
+	return h.runLoop(resumeCtx, session, messages, out, providerRetryAllowed)
+}
+
+func suspendedToolError(err error) (*tools.SuspendedError, bool) {
+	var suspended *tools.SuspendedError
+	if errors.As(err, &suspended) && suspended != nil {
+		return suspended, true
+	}
+	return nil, false
+}
+
+func callsFromSuspended(calls []provider.ToolCall, suspended *tools.SuspendedError) []provider.ToolCall {
+	if suspended == nil || suspended.ToolCallID == "" {
+		return append([]provider.ToolCall(nil), calls...)
+	}
+	for i, call := range calls {
+		if call.ID == suspended.ToolCallID {
+			return append([]provider.ToolCall(nil), calls[i:]...)
+		}
+	}
+	return append([]provider.ToolCall(nil), calls...)
+}
+
+func cloneMessages(messages []provider.Message) []provider.Message {
+	return append([]provider.Message(nil), messages...)
 }
 
 // completeWithFallback tries the primary model and then each configured

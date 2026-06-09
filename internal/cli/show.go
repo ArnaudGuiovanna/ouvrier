@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,15 +18,41 @@ var ErrPipYAMLMissing = errors.New("pip.yaml not found")
 
 // pipYAMLSummary captures the structured pieces of pip.yaml we print.
 type pipYAMLSummary struct {
-	Name    string
-	Version string
-	Trigger string
-	Model   string
-	Deploy  []string
-	EnvReq  []string
-	Health  string
-	Tools   []string
-	Skills  []string
+	Name     string
+	Version  string
+	Trigger  string
+	Model    string
+	Deploy   []string
+	EnvReq   []string
+	Health   string
+	Tools    []string
+	Skills   []string
+	Manifest *workerManifest
+}
+
+const workerManifestFilename = "ouvrier.worker.json"
+
+type workerManifest struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Events      []string `json:"events"`
+	Outcomes    []string `json:"outcomes"`
+	AdminURL    string   `json:"admin_url"`
+}
+
+type showJSONSummary struct {
+	ProjectDir string          `json:"project_dir"`
+	PipYAML    string          `json:"pip_yaml"`
+	Name       string          `json:"name"`
+	Version    string          `json:"version"`
+	Trigger    string          `json:"trigger"`
+	Model      string          `json:"model"`
+	Deploy     []string        `json:"deploy"`
+	Env        []string        `json:"env_required"`
+	Health     string          `json:"health"`
+	Tools      []string        `json:"tools"`
+	Skills     []string        `json:"skills"`
+	Manifest   *workerManifest `json:"manifest,omitempty"`
 }
 
 func (app *App) runShowCommand(args []string) error {
@@ -37,6 +64,7 @@ func (app *App) runShowCommand(args []string) error {
 	flags := flag.NewFlagSet("show", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", ".", "project directory containing pip.yaml")
+	jsonOut := flags.Bool("json", false, "print a machine-readable JSON summary")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", ErrUsage, err)
 	}
@@ -63,9 +91,37 @@ func (app *App) runShowCommand(args []string) error {
 	summary.Model = detectMainModel(root)
 	summary.Tools = listProjectArtifacts(filepath.Join(root, "tools"), ".go")
 	summary.Skills = listSkills(filepath.Join(root, "skills"))
+	manifest, err := readWorkerManifest(root)
+	if err != nil {
+		return err
+	}
+	summary.Manifest = manifest
 
+	if *jsonOut {
+		return printShowJSON(app.out, root, summary)
+	}
 	printShowSummary(app.out, root, summary)
 	return nil
+}
+
+func printShowJSON(w io.Writer, root string, s pipYAMLSummary) error {
+	payload := showJSONSummary{
+		ProjectDir: filepath.Clean(root),
+		PipYAML:    filepath.Clean(filepath.Join(root, "pip.yaml")),
+		Name:       s.Name,
+		Version:    s.Version,
+		Trigger:    s.Trigger,
+		Model:      s.Model,
+		Deploy:     append([]string(nil), s.Deploy...),
+		Env:        append([]string(nil), s.EnvReq...),
+		Health:     s.Health,
+		Tools:      append([]string(nil), s.Tools...),
+		Skills:     append([]string(nil), s.Skills...),
+		Manifest:   s.Manifest,
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(payload)
 }
 
 func printShowSummary(w io.Writer, root string, s pipYAMLSummary) {
@@ -97,6 +153,22 @@ func printShowSummary(w io.Writer, root string, s pipYAMLSummary) {
 	} else {
 		fmt.Fprintf(w, "skills:   %s\n", strings.Join(s.Skills, ", "))
 	}
+}
+
+func readWorkerManifest(root string) (*workerManifest, error) {
+	path := filepath.Join(root, workerManifestFilename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", workerManifestFilename, err)
+	}
+	var manifest workerManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", workerManifestFilename, err)
+	}
+	return &manifest, nil
 }
 
 func orDash(s string) string {
@@ -149,14 +221,27 @@ func listSkills(dir string) []string {
 	return out
 }
 
-// detectMainTrigger extracts the first ovr.From("...") argument from main.go,
-// if present. Returns "" on failure; show prints "-" then.
+// detectMainTrigger extracts the first supported ovr.From(...) trigger from
+// main.go, if present. Returns "" on failure; show prints "-" then.
 func detectMainTrigger(root string) string {
 	data, err := os.ReadFile(filepath.Join(root, "main.go"))
 	if err != nil {
 		return ""
 	}
-	return extractGoStringCall(string(data), "ovr.From(")
+	src := string(data)
+	if trigger := extractGoStringCall(src, "ovr.From("); trigger != "" {
+		return trigger
+	}
+	if expr := extractGoStringCall(src, "ovr.From(ovr.Cron("); expr != "" {
+		return "cron " + expr
+	}
+	if provider := extractGoStringCall(src, "ovr.From(ovr.Webhook("); provider != "" {
+		return "webhook " + provider
+	}
+	if uri := extractGoStringCall(src, "ovr.From(ovr.Stream("); uri != "" {
+		return "stream " + uri
+	}
+	return ""
 }
 
 // detectMainModel extracts the first ovr.Model("...") argument from main.go.

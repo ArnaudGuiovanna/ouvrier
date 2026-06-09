@@ -36,6 +36,7 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 		"go.mod",
 		"go.sum",
 		"pip.yaml",
+		"ouvrier.worker.json",
 		".env.example",
 		".gitignore",
 		"README.md",
@@ -47,6 +48,8 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	}
 
 	assertFileContains(t, filepath.Join(project.Dir, "main.go"), []string{
+		`os.Getenv("PIP_ADDR")`,
+		`ovr.Run(listenAddr()`,
 		`ovr.From("POST /tickets")`,
 		`ovr.Model("anthropic/claude-sonnet-4-6")`,
 		`ovr.Reply(ovr.JSON[ticketReply]())`,
@@ -60,6 +63,16 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 		"name: demo",
 		"- ANTHROPIC_API_KEY",
 	})
+	assertFileContains(t, filepath.Join(project.Dir, ".env.example"), []string{
+		"ANTHROPIC_API_KEY=",
+		"PIP_ADDR=:8080",
+	})
+	assertFileContains(t, filepath.Join(project.Dir, "ouvrier.worker.json"), []string{
+		`"name": "demo"`,
+		`"events": [`,
+		`"outcomes": [`,
+		`"admin_url": "http://127.0.0.1:8080"`,
+	})
 	assertFileContains(t, filepath.Join(project.Dir, ".gitignore"), []string{
 		".env",
 		"bin/",
@@ -71,6 +84,53 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generated project does not compile: %v\n%s", err, output)
 	}
+}
+
+func TestGenerateUsesModelSpecificEnvironment(t *testing.T) {
+	root := repoRoot(t)
+	parent := t.TempDir()
+
+	project, err := Generate(context.Background(), Config{
+		Name:         "openai-demo",
+		Trigger:      "POST /tickets",
+		Model:        "openai/gpt-4.1-mini",
+		Dir:          parent,
+		FrameworkDir: root,
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(project.Dir, "pip.yaml"), []string{
+		"- OPENAI_API_KEY",
+	})
+	assertFileContains(t, filepath.Join(project.Dir, ".env.example"), []string{
+		"OPENAI_API_KEY=",
+		"PIP_ADDR=:8080",
+	})
+}
+
+func TestGenerateMarksLocalModelEnvAsOptional(t *testing.T) {
+	root := repoRoot(t)
+	parent := t.TempDir()
+
+	project, err := Generate(context.Background(), Config{
+		Name:         "ollama-demo",
+		Trigger:      "POST /tickets",
+		Model:        "ollama/llama3.1",
+		Dir:          parent,
+		FrameworkDir: root,
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(project.Dir, "pip.yaml"), []string{
+		"required: []",
+	})
+	assertFileContains(t, filepath.Join(project.Dir, ".env.example"), []string{
+		"OLLAMA_BASE_URL=",
+	})
 }
 
 func TestGenerateRejectsUnsafeProjectName(t *testing.T) {
@@ -156,6 +216,9 @@ func TestGenerateNonHTTPTriggers(t *testing.T) {
 
 			mainPath := filepath.Join(project.Dir, "main.go")
 			assertFileContains(t, mainPath, []string{tc.wantFrom, tc.wantTermina})
+			assertFileContains(t, filepath.Join(project.Dir, "README.md"), []string{
+				"- Output: Log sink",
+			})
 
 			// The generated main.go must parse as valid Go.
 			if _, err := parser.ParseFile(token.NewFileSet(), mainPath, nil, parser.AllErrors); err != nil {

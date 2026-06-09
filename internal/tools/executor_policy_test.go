@@ -20,6 +20,19 @@ func (p *recordingPolicy) Authorize(ctx context.Context, action policy.Action) (
 	return policy.Deny("blocked by test policy"), nil
 }
 
+type suspendingPolicy struct {
+	action policy.Action
+}
+
+func (p *suspendingPolicy) Authorize(ctx context.Context, action policy.Action) (policy.Decision, error) {
+	p.action = action
+	return policy.Decision{
+		Suspended:  true,
+		ApprovalID: "policy-approval-1",
+		Reason:     "policy requires operator approval",
+	}, nil
+}
+
 func TestExecutorChecksPermissionPolicyBeforeToolCall(t *testing.T) {
 	called := false
 	executor := NewExecutor()
@@ -117,6 +130,36 @@ func TestExecutorAuditsDeniedPermissionDecisionAndDoesNotCallTool(t *testing.T) 
 		audit.Decision.Allowed ||
 		audit.Decision.Reason == "" {
 		t.Fatalf("audit = %+v, want denied publish decision", audit)
+	}
+}
+
+func TestExecutorSuspendsWhenPermissionPolicyReturnsSuspendedDecision(t *testing.T) {
+	called := false
+	policyGate := &suspendingPolicy{}
+	executor := NewExecutor(WithPermissionPolicy(policyGate))
+	err := executor.Register("publish", func(ctx context.Context) error {
+		called = true
+		return nil
+	}, WithMetadata(Metadata{Effect: policy.EffectReadOnly}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	_, err = executor.Execute(context.Background(), provider.ToolCall{ID: "call_publish", Name: "publish"})
+	var suspended *SuspendedError
+	if !errors.As(err, &suspended) {
+		t.Fatalf("Execute error = %v, want *SuspendedError", err)
+	}
+	if called {
+		t.Fatal("tool function was called after suspended permission decision")
+	}
+	if suspended.ApprovalID != "policy-approval-1" ||
+		suspended.ToolName != "publish" ||
+		suspended.ToolCallID != "call_publish" {
+		t.Fatalf("suspended error = %+v, want policy approval context", suspended)
+	}
+	if policyGate.action.ToolName != "publish" || policyGate.action.ToolCallID != "call_publish" {
+		t.Fatalf("policy action = %+v, want publish call", policyGate.action)
 	}
 }
 

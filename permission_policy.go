@@ -41,8 +41,10 @@ type PermissionAction struct {
 
 // PermissionDecision is the policy verdict for one action.
 type PermissionDecision struct {
-	Allowed bool
-	Reason  string
+	Allowed    bool
+	Reason     string
+	Suspended  bool
+	ApprovalID string
 }
 
 // PermissionPolicy authorizes privileged runner actions.
@@ -122,14 +124,18 @@ func internalPermissionAction(action PermissionAction) internalpolicy.Action {
 
 func publicPermissionDecision(decision internalpolicy.Decision) PermissionDecision {
 	return PermissionDecision{
-		Allowed: decision.Allowed,
-		Reason:  decision.Reason,
+		Allowed:    decision.Allowed,
+		Reason:     decision.Reason,
+		Suspended:  decision.Suspended,
+		ApprovalID: decision.ApprovalID,
 	}
 }
 
 func internalPermissionDecision(decision PermissionDecision) internalpolicy.Decision {
 	return internalpolicy.Decision{
-		Allowed: decision.Allowed,
-		Reason:  decision.Reason,
+		Allowed:    decision.Allowed,
+		Reason:     decision.Reason,
+		Suspended:  decision.Suspended,
+		ApprovalID: decision.ApprovalID,
 	}
 }

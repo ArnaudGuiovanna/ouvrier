@@ -31,6 +31,7 @@ func (rt httpRuntime) serveAdminStreamReplay(w http.ResponseWriter, req *http.Re
 		return
 	}
 
+	limitAdminBody(w, req)
 	var request adminStreamReplayRequest
 	if req.Body != nil {
 		if err := json.NewDecoder(req.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {

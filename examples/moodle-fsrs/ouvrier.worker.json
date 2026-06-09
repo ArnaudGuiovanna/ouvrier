@@ -1,0 +1,11 @@
+{
+  "name": "moodle-fsrs",
+  "description": "Ouvrier Moodle FSRS review scheduling worker.",
+  "events": [
+    "http.POST /reviews"
+  ],
+  "outcomes": [
+    "json_reply"
+  ],
+  "admin_url": "http://127.0.0.1:8080"
+}

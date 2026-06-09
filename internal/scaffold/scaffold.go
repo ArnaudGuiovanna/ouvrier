@@ -62,12 +62,13 @@ func Generate(ctx context.Context, cfg Config) (Project, error) {
 	}
 
 	files := map[string]string{
-		"main.go":      mainGo(normalized),
-		"go.mod":       goMod(normalized),
-		"pip.yaml":     pipYAML(normalized),
-		".env.example": envExample(),
-		".gitignore":   gitignore(),
-		"README.md":    readme(normalized),
+		"main.go":             mainGo(normalized),
+		"go.mod":              goMod(normalized),
+		"pip.yaml":            pipYAML(normalized),
+		"ouvrier.worker.json": workerManifestJSON(normalized),
+		".env.example":        envExample(normalized),
+		".gitignore":          gitignore(),
+		"README.md":           readme(normalized),
 	}
 	if goSum := frameworkGoSum(normalized); goSum != "" {
 		files["go.sum"] = goSum
@@ -160,14 +161,8 @@ func NormalizeHTTPTrigger(trigger string) (string, error) {
 // the canonical display form. It is exported so the interactive TUI can reuse
 // the exact same parser the scaffold uses.
 func NormalizeTrigger(trigger string) (string, error) {
-	spec, err := parseScaffoldTrigger(trigger)
-	if err != nil {
-		return "", err
-	}
-	if err := validateScaffoldTrigger(spec); err != nil {
-		return "", fmt.Errorf("%w: trigger %q is not supported: %w", ErrInvalidConfig, spec.display, err)
-	}
-	return spec.display, nil
+	rendered, err := RenderTrigger(trigger)
+	return rendered.Display, err
 }
 
 // ValidProjectName reports whether name satisfies the scaffold's project
@@ -180,14 +175,14 @@ func ValidProjectName(name string) bool {
 func normalizeHTTPScaffoldTrigger(trigger string) (string, error) {
 	fields := strings.Fields(trigger)
 	if len(fields) != 2 {
-		return "", fmt.Errorf("%w: --trigger accepts only HTTP routes like \"POST /tickets\"; cron, webhook, and stream scaffolds are not supported by --trigger yet", ErrInvalidConfig)
+		return "", fmt.Errorf("%w: HTTP trigger must look like \"POST /tickets\"", ErrInvalidConfig)
 	}
 
 	method := strings.ToUpper(fields[0])
 	switch method {
 	case "GET", "POST":
 	default:
-		return "", fmt.Errorf("%w: --trigger accepts only HTTP GET or POST routes; got %q. Cron, webhook, and stream scaffolds are not supported by --trigger yet", ErrInvalidConfig, fields[0])
+		return "", fmt.Errorf("%w: HTTP trigger accepts only GET or POST routes; got %q", ErrInvalidConfig, fields[0])
 	}
 
 	path := fields[1]

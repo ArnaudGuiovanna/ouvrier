@@ -113,6 +113,19 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 	return stored, nil
 }
 
+// EnsureNextIDAtLeast advances the stream counter to id when external durable
+// storage already contains events up to that identifier.
+func (s *EventStream) EnsureNextIDAtLeast(id uint64) {
+	if s == nil || id == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nextID < id {
+		s.nextID = id
+	}
+}
+
 // Subscribe registers a Subscriber. Subscribers receive each Event after it is
 // appended. Pass a nil Subscriber to no-op (returns an error). Subscriber
 // registration is concurrency-safe.
