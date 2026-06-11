@@ -13,7 +13,7 @@ import (
 )
 
 func TestHTTPSuspendsGatedToolWhenApprovalStoreConfigured(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	call := provider.ToolCall{ID: "call_1", Name: "wire_payment"}
 	scripted := &httpScriptedProvider{
 		responses: []provider.Response{
@@ -128,7 +128,7 @@ func seedApproval(t *testing.T, store state.Store, id, tool string) {
 }
 
 func TestHTTPAdminApprovalsRequiresAuth(t *testing.T) {
-	t.Setenv("PIP_ENV", "")
+	t.Setenv("OUVRIER_ENV", "")
 	store := state.NewMemoryStore()
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("GET /health"),

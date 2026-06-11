@@ -156,7 +156,7 @@ func TestNewHTTPHandlerCancelsAcceptedWorkOnShutdown(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerCancelsAcceptedWorkOnShutdown(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := newCancelObservedProvider()
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /jobs"),

@@ -264,7 +264,7 @@ func TestRunStreamPlansReturnsNilOnContextCancellation(t *testing.T) {
 }
 
 func TestServeStreamPlansMountsAdminEndpointsWhileLoopRuns(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	plans, err := compilePlans([]Node{
 		From(Stream("kafka://tickets")),
 		Sink(Log()),

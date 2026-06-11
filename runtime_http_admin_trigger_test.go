@@ -392,7 +392,7 @@ func TestHTTPAdminTriggerRejectsInvalidPayload(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := &asyncAdminTriggerProvider{started: make(chan struct{})}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /jobs"),
@@ -422,7 +422,7 @@ func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRunsCronPlanThroughHarness(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"cron"}`, StopReason: provider.StopEndTurn},
 	}
@@ -459,7 +459,7 @@ func TestHTTPAdminTriggerRunsCronPlanThroughHarness(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRedactsCronPushOutput(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	webhook, posts := newWebhookPostRecorder(t)
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"cron","api_key":"sk-cron"}`, StopReason: provider.StopEndTurn},
@@ -499,7 +499,7 @@ func TestHTTPAdminTriggerRedactsCronPushOutput(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRunsStreamPlanThroughHarness(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"stream"}`, StopReason: provider.StopEndTurn},
 	}
@@ -540,7 +540,7 @@ func TestHTTPAdminTriggerRunsStreamPlanThroughHarness(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRedactsStreamPushOutput(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	webhook, posts := newWebhookPostRecorder(t)
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"stream","accessToken":"stream-token"}`, StopReason: provider.StopEndTurn},
@@ -584,7 +584,7 @@ func TestHTTPAdminTriggerRedactsStreamPushOutput(t *testing.T) {
 func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
 	if strings.TrimSpace(rt.adminToken) == "" {
-		t.Setenv("PIP_ENV", "dev")
+		t.Setenv("OUVRIER_ENV", "dev")
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),
@@ -600,7 +600,7 @@ func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 func newTestParameterizedAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
 	if strings.TrimSpace(rt.adminToken) == "" {
-		t.Setenv("PIP_ENV", "dev")
+		t.Setenv("OUVRIER_ENV", "dev")
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets/{id}"),

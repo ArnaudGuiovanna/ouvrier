@@ -26,7 +26,7 @@ func streamReplayPlans(t *testing.T) []runtimeplan.Plan {
 }
 
 func TestHTTPAdminStreamReplayRequiresAuth(t *testing.T) {
-	t.Setenv("PIP_ENV", "")
+	t.Setenv("OUVRIER_ENV", "")
 	dlq := newMemoryStreamDLQ()
 	handler, err := newAdminHandlerWithRuntime(streamReplayPlans(t), httpRuntime{
 		streamDLQ:  dlq,
@@ -60,7 +60,7 @@ func TestHTTPAdminStreamReplayDrainsDLQ(t *testing.T) {
 		t.Fatalf("seed Route returned error: %v", err)
 	}
 
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	handler, err := newAdminHandlerWithRuntime(plans, httpRuntime{
 		provider:    prov,
 		eventStream: stream,
@@ -90,7 +90,7 @@ func TestHTTPAdminStreamReplayDrainsDLQ(t *testing.T) {
 }
 
 func TestHTTPAdminStreamReplayUnknownStreamReturnsNotFound(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	handler, err := newAdminHandlerWithRuntime(streamReplayPlans(t), httpRuntime{streamDLQ: newMemoryStreamDLQ()})
 	if err != nil {
 		t.Fatalf("newAdminHandlerWithRuntime returned error: %v", err)

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
@@ -114,5 +115,5 @@ func providerRegistryFromEnv() (*provider.Registry, error) {
 }
 
 func adminTokenFromEnv() string {
-	return strings.TrimSpace(os.Getenv("PIP_ADMIN_TOKEN"))
+	return strings.TrimSpace(os.Getenv(envnames.AdminToken))
 }
