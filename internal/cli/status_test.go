@@ -120,8 +120,8 @@ func TestResolveAdminTokenRejectsLegacyEnv(t *testing.T) {
 	t.Setenv(envnames.AdminToken, "")
 	t.Setenv(envnames.LegacyAdminToken, "old-secret")
 	_, err := resolveAdminToken("")
-	if err == nil || !strings.Contains(err.Error(), envnames.AdminToken) {
-		t.Fatalf("expected migration error naming %s, got %v", envnames.AdminToken, err)
+	if err == nil || !strings.Contains(err.Error(), envnames.LegacyAdminToken) || !strings.Contains(err.Error(), envnames.AdminToken) {
+		t.Fatalf("expected migration error naming %s and %s, got %v", envnames.LegacyAdminToken, envnames.AdminToken, err)
 	}
 }
 
