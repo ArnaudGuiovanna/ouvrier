@@ -575,7 +575,7 @@ Environment:
 OUVRIER_STATE_BACKEND=sqlite  # sqlite or memory
 OUVRIER_STATE_PATH=.ouvrier/state.db
 OUVRIER_ADMIN_TOKEN=...
-OUVRIER_ENV=dev                  # enables unauthenticated admin only when no token is set
+OUVRIER_ENV=dev               # enables unauthenticated admin only when no token is set
 ```
 
 ## Testing Workers
