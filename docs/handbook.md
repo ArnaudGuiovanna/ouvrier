@@ -105,7 +105,7 @@ Run it:
 
 ```sh
 export ANTHROPIC_API_KEY=...
-export PIP_ENV=dev
+export OUVRIER_ENV=dev
 go run .
 ```
 
@@ -574,8 +574,8 @@ Environment:
 ```txt
 OUVRIER_STATE_BACKEND=sqlite  # sqlite or memory
 OUVRIER_STATE_PATH=.ouvrier/state.db
-PIP_ADMIN_TOKEN=...
-PIP_ENV=dev                  # enables unauthenticated admin only when no token is set
+OUVRIER_ADMIN_TOKEN=...
+OUVRIER_ENV=dev                  # enables unauthenticated admin only when no token is set
 ```
 
 ## Testing Workers
@@ -684,7 +684,7 @@ POST /admin/trigger             # returns exec_id/trace_id/session_id when sched
 GET  /dev
 ```
 
-Outside `PIP_ENV=dev`, set `PIP_ADMIN_TOKEN` and send
+Outside `OUVRIER_ENV=dev`, set `OUVRIER_ADMIN_TOKEN` and send
 `Authorization: Bearer <token>`. All admin output is redacted before it leaves
 the process.
 
@@ -692,7 +692,7 @@ Trigger a route through admin:
 
 ```sh
 curl -X POST http://localhost:8080/admin/trigger \
-  -H "Authorization: Bearer $PIP_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $OUVRIER_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"trigger":"http","method":"POST","path":"/tickets/T-123","body":{"message":"login broken"}}'
 ```
@@ -729,7 +729,7 @@ ouvrier deploy docker [--image IMAGE] [--tag TAG] [--push] [--force]
 ```
 
 `ouvrier dev` runs `go run .`, streams output, forwards shutdown signals, and
-sets `PIP_ADDR` when `--addr` is provided. Restart it after editing source
+sets `OUVRIER_ADDR` when `--addr` is provided. Restart it after editing source
 files.
 
 ## Build And Deploy
@@ -747,7 +747,7 @@ ouvrier deploy ssh \
   --host app@example.com \
   --path /opt/ouvrier/ticket-triage \
   --service ouvrier-ticket-triage \
-  --admin-token "$PIP_ADMIN_TOKEN"
+  --admin-token "$OUVRIER_ADMIN_TOKEN"
 ```
 
 The SSH deploy builds a static Linux binary, uploads the binary, `.env`, and
@@ -763,7 +763,7 @@ ouvrier deploy docker --image registry.example.com/ticket-triage --tag 0.1.0 --p
 
 ## Security Checklist
 
-- Set `PIP_ADMIN_TOKEN` anywhere the worker is reachable by other machines.
+- Set `OUVRIER_ADMIN_TOKEN` anywhere the worker is reachable by other machines.
 - Use `VerifySignature` for public webhook routes.
 - Use `IdempotencyKey` for retries from upstream systems.
 - Mark tools `ReadOnly`, `Idempotent`, or `SideEffecting` deliberately.
@@ -783,7 +783,7 @@ ouvrier deploy docker --image registry.example.com/ticket-triage --tag 0.1.0 --p
 | `worker_pool_full` | `WorkerPool` is saturated. | Raise the limit or retry later. |
 | `signature_missing` or `signature_invalid` | HMAC verification failed. | Check the signing secret, header, and raw body. |
 | `duplicate_idempotency_key` | The request was already reserved or completed. | Reuse the original execution result or send a new idempotency key. |
-| `admin_token_required` | Admin token is missing outside dev mode. | Set `PIP_ADMIN_TOKEN` and pass a bearer token. |
+| `admin_token_required` | Admin token is missing outside dev mode. | Set `OUVRIER_ADMIN_TOKEN` and pass a bearer token. |
 
 ## Reference Examples
 

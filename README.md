@@ -450,7 +450,7 @@ Converse request/response mapping against a fake HTTP doer.
 Runtime/admin configuration:
 
 ```sh
-PIP_ADMIN_TOKEN=
+OUVRIER_ADMIN_TOKEN=
 OUVRIER_STATE_BACKEND=sqlite
 OUVRIER_STATE_PATH=.ouvrier/state.db
 ```
@@ -459,7 +459,7 @@ Admin endpoints are mounted under `/admin/*` for HTTP, webhook, cron-only,
 stream-only, and mixed runtimes. `/admin/plans` and `/admin/capabilities`
 return machine-readable compiled worker capabilities, and `/admin/events`
 streams redacted events as JSONL or SSE for live IDE integrations. Set
-`PIP_ADMIN_TOKEN` outside local
+`OUVRIER_ADMIN_TOKEN` outside local
 development when exposing a worker.
 
 During local development, `ouvrier dev` auto-loads a `.env` file from the
@@ -522,7 +522,7 @@ ouvrier deploy docker [--dir .] [--image IMAGE] [--tag TAG] [--push]
 
 The introspection commands (`show`, `status`, `logs`, `trace`) read from the
 project filesystem (`pip.yaml`) or talk to a running worker through
-`/admin/*` using `PIP_ADMIN_TOKEN` for bearer auth. `ouvrier build`
+`/admin/*` using `OUVRIER_ADMIN_TOKEN` for bearer auth. `ouvrier build`
 compiles the worker; `--static` implies `CGO_ENABLED=0` with
 `-ldflags="-s -w"` and supports `--target os/arch` for cross-compilation
 (`modernc.org/sqlite` is pure Go, so static cross-builds work without a C
