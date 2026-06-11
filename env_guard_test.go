@@ -52,3 +52,19 @@ func TestCheckLegacyEnvIgnoresBlankValues(t *testing.T) {
 		t.Fatalf("blank legacy value must be ignored, got %v", err)
 	}
 }
+
+func TestRunRefusesLegacyEnv(t *testing.T) {
+	t.Setenv(envnames.LegacyAdminToken, "old-secret")
+	err := NewRunner().Run("127.0.0.1:0")
+	if err == nil || !strings.Contains(err.Error(), envnames.AdminToken) {
+		t.Fatalf("Run must refuse legacy env with migration hint, got %v", err)
+	}
+}
+
+func TestHandlerRefusesLegacyEnv(t *testing.T) {
+	t.Setenv(envnames.LegacyEnv, "dev")
+	_, err := Handler()
+	if err == nil || !strings.Contains(err.Error(), envnames.Env) {
+		t.Fatalf("Handler must refuse legacy env with migration hint, got %v", err)
+	}
+}
