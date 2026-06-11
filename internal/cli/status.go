@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"sort"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 )
 
 func (app *App) runStatusCommand(ctx context.Context, args []string) error {
@@ -19,7 +21,7 @@ func (app *App) runStatusCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	url := flags.String("url", defaultAdminURL, "worker base URL")
-	token := flags.String("token", "", "admin bearer token (defaults to $PIP_ADMIN_TOKEN)")
+	token := flags.String("token", "", "admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", ErrUsage, err)
 	}
@@ -27,7 +29,11 @@ func (app *App) runStatusCommand(ctx context.Context, args []string) error {
 		return fmt.Errorf("%w: status does not accept positional arguments", ErrUsage)
 	}
 
-	client := newAdminClient(*url, resolveAdminToken(*token))
+	adminToken, err := resolveAdminToken(*token)
+	if err != nil {
+		return err
+	}
+	client := newAdminClient(*url, adminToken)
 
 	var payload map[string]any
 	if err := client.getJSON(ctx, "/admin/status", &payload); err != nil {
@@ -38,11 +44,17 @@ func (app *App) runStatusCommand(ctx context.Context, args []string) error {
 	return nil
 }
 
-func resolveAdminToken(flagValue string) string {
+func resolveAdminToken(flagValue string) (string, error) {
 	if flagValue != "" {
-		return flagValue
+		return flagValue, nil
 	}
-	return os.Getenv("PIP_ADMIN_TOKEN")
+	if v := os.Getenv(envnames.AdminToken); v != "" {
+		return v, nil
+	}
+	if os.Getenv(envnames.LegacyAdminToken) != "" {
+		return "", fmt.Errorf("%s is no longer read; rename it to %s", envnames.LegacyAdminToken, envnames.AdminToken)
+	}
+	return "", nil
 }
 
 func printStatusSummary(w io.Writer, payload map[string]any) {
