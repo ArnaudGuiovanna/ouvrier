@@ -531,16 +531,20 @@ func TestLeasedCronEmitsLeaseEventsAndStampsFence(t *testing.T) {
 
 	// Steal the lease (tombstone + takeover at fence+1); the leader's next
 	// renewal must fail, emit cron_lease_lost, and drop it to follower.
-	current, err := store.Leases(context.Background())
-	if err != nil || len(current) != 1 {
-		t.Fatalf("Leases = %v err=%v, want exactly one", current, err)
-	}
-	if err := store.ReleaseLease(context.Background(), leaseName, current[0].Holder, current[0].Fence); err != nil {
-		t.Fatalf("ReleaseLease returned error: %v", err)
-	}
-	if _, acquiredByThief, err := store.AcquireLease(context.Background(), leaseName, "thief", time.Hour); err != nil || !acquiredByThief {
-		t.Fatalf("thief AcquireLease acquired=%v err=%v", acquiredByThief, err)
-	}
+	// Between the release and the thief's acquire the leader's background
+	// renewer can legally revive the tombstoned lease (holder and fence still
+	// match), so retry the release+acquire pair until the theft lands.
+	waitForCondition(t, 5*time.Second, "thief to steal the lease", func() bool {
+		current, err := store.Leases(context.Background())
+		if err != nil || len(current) != 1 {
+			return false
+		}
+		if err := store.ReleaseLease(context.Background(), leaseName, current[0].Holder, current[0].Fence); err != nil {
+			return false
+		}
+		_, acquiredByThief, err := store.AcquireLease(context.Background(), leaseName, "thief", time.Hour)
+		return err == nil && acquiredByThief
+	})
 
 	waitForCondition(t, 5*time.Second, "cron_lease_lost after takeover", func() bool {
 		return len(eventsOfKind(events.EventCronLeaseLost)) >= 1

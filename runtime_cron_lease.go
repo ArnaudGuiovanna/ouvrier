@@ -218,12 +218,13 @@ func sleepCronFollowerPoll(ctx context.Context, poll time.Duration) bool {
 // runCronLeaderLoop is the leader side: the v0.2 timer loop plus a
 // background renewer at TTL/3, a synchronous renew immediately before each
 // fire, and a per-tick idempotency reservation. It returns when leadership is
-// lost (drop back to follower) or the context ends (release the lease for
-// instant failover). In-flight runs are never cancelled on leadership loss;
-// missed ticks are never backfilled.
+// lost (drop back to follower) or the context ends. On every return the
+// deferred teardown stops the renewer, drains in-flight fires, and only then
+// releases the lease — so shutdown hands over instantly without a new leader
+// ever overlapping this one's fires. In-flight runs are never cancelled on
+// leadership loss; missed ticks are never backfilled.
 func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan, schedule cronSchedule, leaseName string, cfg cronLeaseConfig, lease state.Lease) {
 	renewCtx, stopRenewer := context.WithCancel(ctx)
-	defer stopRenewer()
 
 	// The fence is constant for the whole leadership term: renewals never
 	// change it, only a takeover does — and a takeover ends this term. The
@@ -253,15 +254,24 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 
 	workerPool := newCronWorkerPool(plan.Trigger.WorkerPool)
 	var wg sync.WaitGroup
-	defer wg.Wait()
 
-	shutdown := func() {
-		// Stop the renewer before releasing so a racing renewal cannot
-		// resurrect the tombstoned lease with our still-valid fence.
+	// Teardown runs in LIFO order on every return path:
+	//   1. stopRenewer + <-renewerDone — the renewer is fully gone, so a
+	//      racing renewal cannot resurrect the tombstoned lease with our
+	//      still-valid fence;
+	//   2. wg.Wait() — every in-flight fire finishes before the lease can
+	//      move, so a new leader never overlaps this leader's fires;
+	//   3. release — closure so it sees the latest lease/fence. On graceful
+	//      shutdown it tombstones the lease for instant failover; on
+	//      lost-leadership returns the lease was already taken over (the
+	//      fence advanced), so the release is a harmless fence-mismatch
+	//      no-op.
+	defer func() { releaseCronLeaseOnShutdown(cfg, leaseName, lease) }()
+	defer wg.Wait()
+	defer func() {
 		stopRenewer()
 		<-renewerDone
-		releaseCronLeaseOnShutdown(cfg, leaseName, lease)
-	}
+	}()
 
 	for {
 		next := schedule.Next(time.Now())
@@ -270,9 +280,9 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 			// so a second replica does not flap on a dead schedule.
 			select {
 			case <-ctx.Done():
-				shutdown()
 				return
 			case <-lost:
+				// Renewer already exited (it closed lost); defer wg.Wait() drains in-flight fires.
 				emitCronLeaseEvent(ctx, rt, events.EventCronLeaseLost, cronLeasePayload(leaseName, cfg.holder, lease))
 				return
 			}
@@ -281,10 +291,10 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			shutdown()
 			return
 		case <-lost:
 			timer.Stop()
+			// Renewer already exited (it closed lost); defer wg.Wait() drains in-flight fires.
 			emitCronLeaseEvent(ctx, rt, events.EventCronLeaseLost, cronLeasePayload(leaseName, cfg.holder, lease))
 			return
 		case <-timer.C:
@@ -293,7 +303,6 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 			renewed, ok, err := cfg.leases.RenewLease(ctx, leaseName, cfg.holder, lease.Fence, cfg.ttl)
 			if err != nil || !ok {
 				if ctx.Err() != nil {
-					shutdown()
 					return
 				}
 				emitCronLeaseEvent(ctx, rt, events.EventCronLeaseLost, cronLeasePayload(leaseName, cfg.holder, lease))
@@ -307,6 +316,12 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 			}
 			_, reserved, err := rt.stateStore.ReserveIdempotency(ctx, cronFireKey(leaseName, next), session.ExecID)
 			if err != nil || !reserved {
+				if err != nil && ctx.Err() != nil {
+					// Controlled shutdown, not a store failure: skip the
+					// misleading reserve_error event and let the deferred
+					// teardown release the lease.
+					return
+				}
 				payload := cronLeasePayload(leaseName, cfg.holder, lease)
 				payload["scheduled_at"] = next.UTC().Format(time.RFC3339Nano)
 				if err != nil {
@@ -319,7 +334,6 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 				continue
 			}
 			if !acquireCronWorker(ctx, workerPool) {
-				shutdown()
 				return
 			}
 			wg.Add(1)
@@ -336,8 +350,9 @@ func runCronLeaderLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 
 // releaseCronLeaseOnShutdown tombstones the lease on graceful shutdown so the
 // next replica takes over immediately instead of waiting out the TTL. The run
-// context is already cancelled, so it runs on its own short deadline;
-// failures are ignored — the TTL remains the backstop.
+// context may already be cancelled, so it runs on its own short deadline;
+// failures are ignored — the TTL remains the backstop. After a takeover the
+// fence no longer matches and the call is a no-op.
 func releaseCronLeaseOnShutdown(cfg cronLeaseConfig, leaseName string, lease state.Lease) {
 	releaseCtx, cancel := context.WithTimeout(context.Background(), cronLeaseReleaseTimeout)
 	defer cancel()
