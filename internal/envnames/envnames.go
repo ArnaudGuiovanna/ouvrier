@@ -9,6 +9,16 @@ const (
 	Addr       = "OUVRIER_ADDR"
 	LogLevel   = "OUVRIER_LOG_LEVEL"
 
+	// AdminAddr moves the admin surface (/admin/*, /metrics, and the dev-mode
+	// /dev viewer) off the public port onto a dedicated listener bound at this
+	// address (e.g. 127.0.0.1:9090); the public port then answers 404 for
+	// those routes. Unset preserves the v0.2 shared-port layout. MetricsPublic
+	// ("1") additionally keeps /metrics registered on the public port when the
+	// surface is split, for Prometheus scrapers that cannot reach the loopback
+	// admin listener; it changes nothing while AdminAddr is unset.
+	AdminAddr     = "OUVRIER_ADMIN_ADDR"
+	MetricsPublic = "OUVRIER_METRICS_PUBLIC"
+
 	StateBackend  = "OUVRIER_STATE_BACKEND"
 	StatePath     = "OUVRIER_STATE_PATH"
 	StateDSN      = "OUVRIER_STATE_DSN"

@@ -580,6 +580,8 @@ OUVRIER_DURABLE_RUNS=1        # opt-in step-checkpoint run journal (default off)
 OUVRIER_DURABLE_RETENTION=72h # how long failed/suspended run journals are kept (default 72h)
 OUVRIER_ADMIN_TOKEN=...
 OUVRIER_ENV=dev               # enables unauthenticated admin only when no token is set
+OUVRIER_ADMIN_ADDR=127.0.0.1:9090 # optional: move /admin/*, /metrics, /dev to a dedicated loopback listener
+OUVRIER_METRICS_PUBLIC=1      # optional: when split, keep /metrics also on the public port
 ```
 
 ### Schema Migrations And DML-Only Roles
@@ -715,6 +717,18 @@ GET  /dev
 Outside `OUVRIER_ENV=dev`, set `OUVRIER_ADMIN_TOKEN` and send
 `Authorization: Bearer <token>`. All admin output is redacted before it leaves
 the process.
+
+By default the admin surface shares the public port. Set `OUVRIER_ADMIN_ADDR`
+(e.g. `127.0.0.1:9090`) and `Run` serves `/admin/*`, `/metrics`, and `/dev` on
+a dedicated second listener instead; the public port answers 404 for them
+while trigger routes are unaffected. The admin bind must be loopback — a
+non-loopback `OUVRIER_ADMIN_ADDR` refuses startup unless
+`OUVRIER_ADMIN_INSECURE=1` overrides it. Token enforcement on the dedicated
+listener is identical. When split, `OUVRIER_METRICS_PUBLIC=1` keeps `/metrics`
+also on the public port (same bearer auth) for Prometheus scrapers that cannot
+reach the loopback admin listener. `ovr.Handler` ignores `OUVRIER_ADMIN_ADDR`
+and always returns the combined handler, so tests keep driving trigger and
+admin routes through one seam.
 
 Trigger a route through admin:
 

@@ -37,6 +37,14 @@ func WithProvider(p Provider) RunnerOption {
 // The handler uses an in-memory state store unless the Runner was built
 // WithStateStore. Configure a Provider with WithProvider to avoid live model
 // calls.
+//
+// Handler always returns the combined surface — trigger routes, /admin/*, and
+// /metrics on a single handler — regardless of OUVRIER_ADMIN_ADDR. The split
+// admin listener is a property of Run's network layout, not of this
+// in-process test seam: tests keep driving both trigger and admin routes
+// through the one handler, exactly as before the split existed. Only Run
+// starts a second listener (and removes admin routes from the public mux)
+// when OUVRIER_ADMIN_ADDR is set.
 func Handler(nodes ...Node) (http.Handler, error) {
 	return NewRunner().Handler(nodes...)
 }

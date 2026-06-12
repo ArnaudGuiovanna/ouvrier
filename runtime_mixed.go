@@ -36,14 +36,29 @@ func serveMixedPlans(addr string, rt httpRuntime, plans []runtimeplan.Plan) erro
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	runners := make([]func(context.Context) error, 0, 3)
-	handler, err := newHTTPHandlerFromRoutesAndPlans(groups.httpRoutes, plans, rt)
-	if err != nil {
-		return err
+	runners := make([]func(context.Context) error, 0, 4)
+	if adminAddr := adminAddrFromEnv(); adminAddr != "" {
+		publicHandler, adminHandler, err := newSplitHTTPHandlersFromRoutesAndPlans(groups.httpRoutes, plans, rt)
+		if err != nil {
+			return err
+		}
+		runners = append(runners,
+			func(ctx context.Context) error {
+				return serveHTTPWithContext(ctx, addr, publicHandler)
+			},
+			func(ctx context.Context) error {
+				return serveHTTPWithContext(ctx, adminAddr, adminHandler)
+			},
+		)
+	} else {
+		handler, err := newHTTPHandlerFromRoutesAndPlans(groups.httpRoutes, plans, rt)
+		if err != nil {
+			return err
+		}
+		runners = append(runners, func(ctx context.Context) error {
+			return serveHTTPWithContext(ctx, addr, handler)
+		})
 	}
-	runners = append(runners, func(ctx context.Context) error {
-		return serveHTTPWithContext(ctx, addr, handler)
-	})
 	if len(groups.cronPlans) > 0 {
 		cronPlans := append([]runtimeplan.Plan(nil), groups.cronPlans...)
 		schedules := append([]cronSchedule(nil), groups.cronSchedules...)
