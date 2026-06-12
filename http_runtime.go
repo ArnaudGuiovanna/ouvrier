@@ -145,6 +145,16 @@ func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtime
 
 	scope := planRunScope{parentSession: &pipelineSession}
 	if rt.durableRuns != nil && rt.stateStore != nil {
+		// Hold the run lease before the journal row exists so there is no
+		// instant at which recovery could mistake this live run for an
+		// orphan. The heartbeat renews at TTL/3 until the deferred release
+		// after finishPipelineExecution (or after the run parks suspended).
+		runLease, err := rt.acquireDurableRunLease(ctx, pipelineSession.ExecID)
+		if err != nil {
+			err = fmt.Errorf("durable run lease: %w", err)
+			return pipelineResult, errors.Join(err, rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err))
+		}
+		defer runLease.release()
 		// Journal the run before its first step so a crash at any point
 		// leaves a recoverable record. A failed journal write fails the run:
 		// the operator opted in to durability, silently running without it

@@ -26,6 +26,7 @@ func assertApprovalConformance(t *testing.T, newStore func(t *testing.T) Store) 
 			ToolKind:   "function",
 			Effect:     "side_effecting",
 			Reason:     "tool requires explicit approval",
+			ArgsHash:   "args:deadbeef",
 			Status:     ApprovalPending,
 		}
 	}
@@ -47,6 +48,48 @@ func assertApprovalConformance(t *testing.T, newStore func(t *testing.T) Store) 
 		}
 		if got.CreatedAt.IsZero() {
 			t.Fatal("Approval CreatedAt is zero, want a populated timestamp")
+		}
+		if got.ArgsHash != "args:deadbeef" {
+			t.Fatalf("Approval args hash = %q, want round-trip of sample", got.ArgsHash)
+		}
+	})
+
+	t.Run("ApprovalsForExecutionListsAllStatusesForOneExec", func(t *testing.T) {
+		store := newStore(t)
+		for _, id := range []string{"a-1", "a-2"} {
+			if err := store.SaveApproval(context.Background(), sample(id)); err != nil {
+				t.Fatalf("SaveApproval(%s) returned error: %v", id, err)
+			}
+		}
+		other := sample("a-other")
+		other.ExecID = "exec-2"
+		if err := store.SaveApproval(context.Background(), other); err != nil {
+			t.Fatalf("SaveApproval(other) returned error: %v", err)
+		}
+		if _, err := store.ResolveApproval(context.Background(), "a-1", ApprovalApproved, "ops"); err != nil {
+			t.Fatalf("ResolveApproval returned error: %v", err)
+		}
+
+		approvals, err := store.ApprovalsForExecution(context.Background(), "exec-1")
+		if err != nil {
+			t.Fatalf("ApprovalsForExecution returned error: %v", err)
+		}
+		if len(approvals) != 2 {
+			t.Fatalf("ApprovalsForExecution len = %d, want 2 (resolved rows included): %+v", len(approvals), approvals)
+		}
+		if approvals[0].ID != "a-1" || approvals[1].ID != "a-2" {
+			t.Fatalf("ApprovalsForExecution order = [%s %s], want creation order [a-1 a-2]", approvals[0].ID, approvals[1].ID)
+		}
+		if approvals[0].Status != ApprovalApproved {
+			t.Fatalf("ApprovalsForExecution a-1 status = %q, want approved", approvals[0].Status)
+		}
+		if approvals[0].ArgsHash != "args:deadbeef" {
+			t.Fatalf("ApprovalsForExecution a-1 args hash = %q, want preserved through resolution", approvals[0].ArgsHash)
+		}
+
+		none, err := store.ApprovalsForExecution(context.Background(), "exec-absent")
+		if err != nil || len(none) != 0 {
+			t.Fatalf("ApprovalsForExecution(absent) = %v, %v, want empty", none, err)
 		}
 	})
 

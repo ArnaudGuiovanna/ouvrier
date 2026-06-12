@@ -18,6 +18,7 @@ type MemoryStore struct {
 	sessions        map[string]runtimecore.Session
 	idempotency     map[string]string
 	events          []events.Event
+	eventIDs        map[uint64]struct{}
 	nextEventID     uint64
 	violations      []SchemaViolation
 	nextViolationID uint64
@@ -36,6 +37,7 @@ func NewMemoryStore() *MemoryStore {
 		executions:     make(map[string]Execution),
 		sessions:       make(map[string]runtimecore.Session),
 		idempotency:    make(map[string]string),
+		eventIDs:       make(map[uint64]struct{}),
 		memory:         make(map[string]map[string]MemoryRecord),
 		approvals:      make(map[string]PendingApproval),
 		approvalOrder:  make(map[string]uint64),
@@ -162,14 +164,22 @@ func (s *MemoryStore) AddEvent(ctx context.Context, event events.Event) (events.
 		s.nextEventID++
 		event.ID = s.nextEventID
 	} else {
-		if event.ID <= s.nextEventID {
-			return events.Event{}, errors.New("event ID must be greater than existing event IDs")
+		// Explicit IDs come from an EventStream allocator; concurrent
+		// emitters may persist them out of arrival order, so the invariant is
+		// uniqueness — never insertion-order monotonicity. A duplicate means
+		// a stale allocator is re-issuing already-persisted IDs and is
+		// rejected loudly.
+		if _, exists := s.eventIDs[event.ID]; exists {
+			return events.Event{}, errors.New("event ID already exists")
 		}
-		s.nextEventID = event.ID
+		if event.ID > s.nextEventID {
+			s.nextEventID = event.ID
+		}
 	}
 	if event.At.IsZero() {
 		event.At = time.Now().UTC()
 	}
+	s.eventIDs[event.ID] = struct{}{}
 	s.events = append(s.events, event)
 	return events.SanitizeEvent(event), nil
 }
@@ -348,6 +358,26 @@ func (s *MemoryStore) PendingApprovals(ctx context.Context) ([]PendingApproval, 
 		return s.approvalOrder[pending[i].ID] < s.approvalOrder[pending[j].ID]
 	})
 	return pending, nil
+}
+
+func (s *MemoryStore) ApprovalsForExecution(ctx context.Context, execID string) ([]PendingApproval, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	execID = strings.TrimSpace(execID)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	approvals := make([]PendingApproval, 0)
+	for _, approval := range s.approvals {
+		if approval.ExecID == execID {
+			approvals = append(approvals, approval)
+		}
+	}
+	sort.Slice(approvals, func(i, j int) bool {
+		return s.approvalOrder[approvals[i].ID] < s.approvalOrder[approvals[j].ID]
+	})
+	return approvals, nil
 }
 
 func (s *MemoryStore) ResolveApproval(ctx context.Context, id string, status ApprovalStatus, decidedBy string) (PendingApproval, error) {

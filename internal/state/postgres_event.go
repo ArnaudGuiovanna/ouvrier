@@ -44,14 +44,15 @@ func (s *PostgresStore) AddEvent(ctx context.Context, event events.Event) (event
 		}
 		event.ID = id
 	} else {
+		// Explicit IDs come from an EventStream allocator; concurrent
+		// emitters may persist them out of arrival order, so the invariant is
+		// uniqueness (the primary key) — never insertion-order monotonicity.
+		// The counter only ratchets up, keeping later auto-assigned IDs above
+		// every explicit ID ever inserted.
 		var id uint64
-		err := tx.QueryRowContext(ctx,
-			`UPDATE ouvrier_event_counter SET last_id = $1 WHERE last_id < $1 RETURNING last_id`,
-			event.ID).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return events.Event{}, errors.New("event ID must be greater than existing event IDs")
-		}
-		if err != nil {
+		if err := tx.QueryRowContext(ctx,
+			`UPDATE ouvrier_event_counter SET last_id = GREATEST(last_id, $1) RETURNING last_id`,
+			event.ID).Scan(&id); err != nil {
 			return events.Event{}, err
 		}
 	}
@@ -67,6 +68,11 @@ func (s *PostgresStore) AddEvent(ctx context.Context, event events.Event) (event
 		event.TraceID,
 		string(payload),
 	); err != nil {
+		if strings.Contains(err.Error(), "duplicate key") {
+			// A duplicate means a stale allocator is re-issuing
+			// already-persisted IDs; reject it loudly.
+			return events.Event{}, errors.New("event ID already exists")
+		}
 		return events.Event{}, err
 	}
 	if err := tx.Commit(); err != nil {

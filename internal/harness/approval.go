@@ -30,6 +30,7 @@ func (a approvalGateAdapter) RecordPendingApproval(ctx context.Context, req tool
 		ToolKind:   req.ToolKind,
 		Effect:     req.Effect,
 		Reason:     req.Reason,
+		ArgsHash:   req.ArgsHash,
 		Status:     state.ApprovalPending,
 	}); err != nil {
 		return "", err

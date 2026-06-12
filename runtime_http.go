@@ -96,6 +96,7 @@ func newHTTPHandlerFromRoutesAndPlans(routes []httpRoute, plans []runtimeplan.Pl
 	runtime = runtime.withAsyncGroup()
 	runtime.adminRoutes = routes
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
+	startDurableRunRecovery(runtime, plans)
 
 	mux := http.NewServeMux()
 	registerHTTPAdminRoutes(mux, runtime)
@@ -114,6 +115,7 @@ func newAdminHandlerWithRuntime(plans []runtimeplan.Plan, runtime httpRuntime) (
 	}
 	runtime = runtime.withAsyncGroup()
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
+	startDurableRunRecovery(runtime, plans)
 	mux := http.NewServeMux()
 	registerHTTPAdminRoutes(mux, runtime)
 	return newRuntimeHTTPHandler(mux, runtime.async), nil

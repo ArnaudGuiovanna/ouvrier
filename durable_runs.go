@@ -22,18 +22,49 @@ import (
 // pipeline execution so a crashed worker leaves enough state behind for
 // recovery (#40): one run_journal row at start, one checkpoint per completed
 // top-level pipe step (Parallel/Map as one unit), and a tool_intent row
-// bracketing every non-read tool call. This file is the write side only —
-// recovery, run leases, and the /admin/runs endpoints are out of scope.
+// bracketing every non-read tool call. This file holds the write side and the
+// configuration; the read side — run leases, the recovery loop, and the
+// /admin/runs endpoints — lives in durable_recovery.go.
 
 // defaultDurableRetention bounds how long failed/suspended run journals are
 // kept before the retention sweep prunes them.
 const defaultDurableRetention = 72 * time.Hour
+
+const (
+	// durableRunLeaseTTL is fixed by design, matching the cron lease TTL;
+	// tests shorten it through durableRunsConfig, never through env.
+	durableRunLeaseTTL = 30 * time.Second
+	// durableRecoveryScan is the recovery scan cadence before ±20% jitter.
+	durableRecoveryScan = 30 * time.Second
+	// durableRecoveryConcurrency caps concurrent run replays per replica.
+	durableRecoveryConcurrency = 2
+)
 
 // durableRunsConfig carries the durable-run settings for one runtime. A nil
 // config means the feature is off: zero journal writes, no behavior change.
 type durableRunsConfig struct {
 	retention time.Duration
 	health    *durableRunsHealth
+	// leaseTTL is the run-lease TTL heartbeated while a journaled run
+	// executes and claimed by recovery once expired.
+	leaseTTL time.Duration
+	// recovery enables the periodic recovery scan; nil keeps the journal
+	// write side (and lease heartbeats) without ever replaying runs, which is
+	// what most unit tests want.
+	recovery *durableRecoveryConfig
+}
+
+// durableRecoveryConfig tunes the recovery loop, mirroring cronLeaseConfig's
+// test-injectable shape.
+type durableRecoveryConfig struct {
+	// scan is the journal scan period before ±20% jitter.
+	scan time.Duration
+	// concurrency caps simultaneous replays (cron worker-pool pattern).
+	concurrency int
+}
+
+func newDurableRecoveryConfig() *durableRecoveryConfig {
+	return &durableRecoveryConfig{scan: durableRecoveryScan, concurrency: durableRecoveryConcurrency}
 }
 
 // durableRunsHealth aggregates prune failures for /admin/health. It is
@@ -69,7 +100,11 @@ func newDurableRunsConfig(retention time.Duration) *durableRunsConfig {
 	if retention <= 0 {
 		retention = defaultDurableRetention
 	}
-	return &durableRunsConfig{retention: retention, health: &durableRunsHealth{}}
+	return &durableRunsConfig{
+		retention: retention,
+		health:    &durableRunsHealth{},
+		leaseTTL:  durableRunLeaseTTL,
+	}
 }
 
 // durableRunsEnabledFromEnv parses the OUVRIER_DURABLE_RUNS opt-in flag.
@@ -126,7 +161,11 @@ func durableRunsConfigForStore(store state.Store) (*durableRunsConfig, error) {
 		return nil, fmt.Errorf("%s=1 is not supported with a custom WithStateStore: the run journal needs the built-in %s or %s state backend",
 			envnames.DurableRuns, state.BackendSQLite, state.BackendPostgres)
 	}
-	return newDurableRunsConfig(retention), nil
+	config := newDurableRunsConfig(retention)
+	// Env-configured runtimes recover interrupted runs; test runtimes opt in
+	// by setting recovery explicitly.
+	config.recovery = newDurableRecoveryConfig()
+	return config, nil
 }
 
 // durablePlanKey identifies a plan by its trigger, the same identity an

@@ -169,6 +169,9 @@ func TestPublicAPIParityCompiles(t *testing.T) {
 	_ = ovr.EventCronLeaseLost
 	_ = ovr.EventCronTickSkipped
 	_ = ovr.EventDurableRunPruneFailed
+	_ = ovr.EventRunRecovered
+	_ = ovr.EventRunAbandoned
+	_ = ovr.EventReplayIndeterminateTool
 	_ = ovr.EventSinkLogged
 	_ = ovr.WithSandbox
 	_ = ovr.WithSchemaRepairAttempts

@@ -148,6 +148,16 @@ var postgresMigrations = []postgresMigration{
 			)`,
 		},
 	},
+	{
+		// Durable-run recovery (#40): args_hash on approvals lets a recovered
+		// run auto-allow a replayed gated call against its already-approved
+		// record. Additive with a default so pre-existing rows stay valid;
+		// records written before this migration simply never match.
+		version: 4,
+		statements: []string{
+			`ALTER TABLE ouvrier_approvals ADD COLUMN args_hash TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 // migrate applies pending migrations inside one transaction, serialized by a

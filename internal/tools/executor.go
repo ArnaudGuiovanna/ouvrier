@@ -159,8 +159,12 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 		if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
 			return errorResult(call, err), nil
 		}
-		if err := reserveIdempotency(toolCtx, tool, call.Arguments); err != nil {
+		skip, err := reserveIdempotency(toolCtx, tool, call.Arguments)
+		if err != nil {
 			return errorResult(call, err), nil
+		}
+		if skip {
+			return duplicateIdempotentResult(call)
 		}
 		return e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
 			result, err := tool.handler.Execute(toolCtx, call)
@@ -174,8 +178,12 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
 		return errorResult(call, err), nil
 	}
-	if err := reserveIdempotency(toolCtx, tool, call.Arguments); err != nil {
+	skip, err := reserveIdempotency(toolCtx, tool, call.Arguments)
+	if err != nil {
 		return errorResult(call, err), nil
+	}
+	if skip {
+		return duplicateIdempotentResult(call)
 	}
 	args, err := buildCallArgs(toolCtx, tool.typ, tool.metadata, call.Arguments)
 	if err != nil {
@@ -487,6 +495,14 @@ func successResult(call provider.ToolCall, value any) (provider.ToolResult, erro
 		Name:       call.Name,
 		Content:    content,
 	}, nil
+}
+
+// duplicateIdempotentResult is the success answer for an idempotent call
+// whose reservation this execution already holds: the call was performed (or
+// is being deduped within the run), so the model gets a definite non-error
+// outcome instead of a misleading failure — the durable-run replay contract.
+func duplicateIdempotentResult(call provider.ToolCall) (provider.ToolResult, error) {
+	return successResult(call, "duplicate idempotent call skipped: already performed by this execution")
 }
 
 func errorResult(call provider.ToolCall, err error) provider.ToolResult {

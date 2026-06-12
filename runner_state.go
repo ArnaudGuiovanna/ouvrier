@@ -261,6 +261,14 @@ func (s publicStateStoreAdapter) ResolveApproval(ctx context.Context, id string,
 	return internalPendingApproval(resolved), err
 }
 
+// ApprovalsForExecution backs durable-run recovery, which is refused at
+// startup with a custom public StateStore; the public contract only lists
+// pending approvals, so this method exists to satisfy the internal Store
+// interface honestly.
+func (s publicStateStoreAdapter) ApprovalsForExecution(context.Context, string) ([]internalstate.PendingApproval, error) {
+	return nil, errors.New("listing approvals by execution is not supported by custom state stores; use the built-in sqlite or postgres backend")
+}
+
 // errDurableRunsUnsupported backs the durable-run Store methods on custom
 // public state stores. The startup guard refuses OUVRIER_DURABLE_RUNS=1 with
 // WithStateStore, so these methods are never reached in a configured runtime;

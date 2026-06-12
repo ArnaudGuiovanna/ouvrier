@@ -136,6 +136,20 @@ func (rt httpRuntime) startApprovedResume(approvalID string) bool {
 }
 
 func (rt httpRuntime) runApprovedResume(ctx context.Context, approvalID string, resume approvalResume) {
+	if rt.durableRuns != nil {
+		// Re-acquire the run lease for the resumed leg so durable-run
+		// recovery never replays this execution while the in-memory resume is
+		// live. The brief retry covers the suspend path's deferred release
+		// still being in flight; a steady failure means another holder (a
+		// recovery claim) owns the lease unexpired — then that holder replays
+		// the run with the approval fallback and resuming here would
+		// double-execute.
+		runLease, err := rt.acquireDurableRunLeaseWithRetry(ctx, resume.session.ExecID)
+		if err != nil {
+			return
+		}
+		defer runLease.release()
+	}
 	_ = rt.syncEventStreamWithStore(ctx)
 	rt.emitApprovalResumeEvent(ctx, approvalID, resume, events.EventExecutionResumed, map[string]any{
 		"approval_id": approvalID,

@@ -375,7 +375,7 @@ func TestPostgresStorePreservesEventIDsAndFiltersEventsSinceAcrossReopen(t *test
 	}
 }
 
-func TestPostgresStoreRejectsNonMonotonicExplicitEventIDsAcrossReopen(t *testing.T) {
+func TestPostgresStoreRejectsDuplicateExplicitEventIDsAcrossReopen(t *testing.T) {
 	dsn := postgresTestSchemaDSN(t)
 	store := openTestPostgresStore(t, dsn)
 	_, err := store.AddEvent(context.Background(), events.Event{
@@ -391,12 +391,22 @@ func TestPostgresStoreRejectsNonMonotonicExplicitEventIDsAcrossReopen(t *testing
 	}
 
 	reopened := openTestPostgresStore(t, dsn)
+	// Concurrent emitters can persist allocator-assigned IDs out of arrival
+	// order: a lower unique ID is valid.
 	if _, err := reopened.AddEvent(context.Background(), events.Event{
 		ID:     9,
 		Kind:   events.EventLLMCallCompleted,
 		ExecID: "exec_1",
+	}); err != nil {
+		t.Fatalf("AddEvent rejected out-of-order unique explicit ID: %v", err)
+	}
+	// A stale allocator re-issuing an already-persisted ID is rejected.
+	if _, err := reopened.AddEvent(context.Background(), events.Event{
+		ID:     10,
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
 	}); err == nil {
-		t.Fatal("AddEvent returned nil for non-monotonic explicit event ID")
+		t.Fatal("AddEvent returned nil for duplicate explicit event ID")
 	}
 	next, err := reopened.AddEvent(context.Background(), events.Event{
 		Kind:   events.EventLLMCallCompleted,
@@ -406,7 +416,7 @@ func TestPostgresStoreRejectsNonMonotonicExplicitEventIDsAcrossReopen(t *testing
 		t.Fatalf("AddEvent returned error after rejected ID: %v", err)
 	}
 	if next.ID != 11 {
-		t.Fatalf("next ID = %d, want 11", next.ID)
+		t.Fatalf("next ID = %d, want 11 (auto IDs continue above the max explicit ID)", next.ID)
 	}
 	recorded, err := reopened.EventsSince(context.Background(), "exec_1", 10)
 	if err != nil {

@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultSQLitePath   = ".ouvrier/state.db"
-	sqliteSchemaVersion = 6
+	sqliteSchemaVersion = 7
 )
 
 type SQLiteStore struct {
@@ -113,6 +113,12 @@ func (s *SQLiteStore) migrate(ctx context.Context) ([]int, error) {
 		}
 	}
 	if err := s.ensureColumn(ctx, "ouvrier_sessions", "max_wallclock_ns", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, fmt.Errorf("migrate sqlite state store: %w", err)
+	}
+	// Schema v7: args_hash on approvals (durable-run recovery approval
+	// fallback, #40). Additive and nullable-with-default so v6 databases and
+	// their pre-existing approval rows stay valid.
+	if err := s.ensureColumn(ctx, "ouvrier_approvals", "args_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, fmt.Errorf("migrate sqlite state store: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", sqliteSchemaVersion)); err != nil {
@@ -299,6 +305,7 @@ var sqliteSchemaStatements = []string{
 		tool_kind TEXT NOT NULL,
 		effect TEXT NOT NULL,
 		reason TEXT NOT NULL,
+		args_hash TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL,
 		created_at TEXT NOT NULL,
 		decided_at TEXT,

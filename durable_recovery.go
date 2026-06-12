@@ -1,0 +1,512 @@
+package ovr
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/harness"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tools"
+)
+
+// Durable-run recovery (#40), the read side of the journal written in
+// durable_runs.go. While a journaled run executes, its owner heartbeats the
+// fenced lease run:<exec_id> on the shared state.LeaseStore (same machinery
+// as cron leader-leases); the recovery loop scans the journal with jitter,
+// claims only expired leases, and applies the replay policy:
+//
+//   - plan_key missing or plan_hash mismatch (pipeline edited between
+//     deploys) => clean EventRunAbandoned, journal pruned;
+//   - sync reply/SSE terminal => EventRunAbandoned (the client is gone);
+//   - interrupted step with an open tool intent, or a completed
+//     side-effecting intent (no dedup exists for those) =>
+//     EventReplayIndeterminateTool, run marked failed, journal kept for the
+//     operator to inspect via GET /admin/runs?status=orphaned and force via
+//     POST /admin/runs/{execID}/recover;
+//   - otherwise replay from the last checkpoint: at-least-once for read-only
+//     work, with idempotent calls deduped by the same-exec ReserveIdempotency
+//     interpretation in internal/tools/idempotency.go.
+
+// durableRunLeaseName names the fenced lease that guards one durable run.
+func durableRunLeaseName(execID string) string {
+	return "run:" + execID
+}
+
+// durableRunLeaseHeartbeat owns one held run lease: a TTL/3 renewer keeps it
+// alive while the run (or its recovery replay) executes, and release()
+// tombstones it for instant takeover. Renewals run on their own context so a
+// canceled request cannot strand an unexpired lease until the TTL backstop.
+type durableRunLeaseHeartbeat struct {
+	leases state.LeaseStore
+	name   string
+	holder string
+	ttl    time.Duration
+	lease  state.Lease
+	stop   context.CancelFunc
+	done   chan struct{}
+}
+
+func startDurableRunLeaseHeartbeat(leases state.LeaseStore, name, holder string, ttl time.Duration, lease state.Lease) *durableRunLeaseHeartbeat {
+	renewCtx, stop := context.WithCancel(context.Background())
+	heartbeat := &durableRunLeaseHeartbeat{
+		leases: leases,
+		name:   name,
+		holder: holder,
+		ttl:    ttl,
+		lease:  lease,
+		stop:   stop,
+		done:   make(chan struct{}),
+	}
+	go func() {
+		defer close(heartbeat.done)
+		ticker := time.NewTicker(ttl / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				if _, renewed, err := leases.RenewLease(renewCtx, name, holder, lease.Fence, ttl); err != nil || !renewed {
+					// The lease was taken over (we were presumed dead) or the
+					// store failed. Mirroring the cron loop, the in-flight run
+					// is never cancelled; we simply stop renewing.
+					return
+				}
+			}
+		}
+	}()
+	return heartbeat
+}
+
+// release stops the renewer and tombstones the lease so the journal row stops
+// looking live the moment its run finishes or parks. After a takeover the
+// fence no longer matches and the release is a harmless no-op.
+func (h *durableRunLeaseHeartbeat) release() {
+	if h == nil {
+		return
+	}
+	h.stop()
+	<-h.done
+	releaseCtx, cancel := context.WithTimeout(context.Background(), cronLeaseReleaseTimeout)
+	defer cancel()
+	_ = h.leases.ReleaseLease(releaseCtx, h.name, h.holder, h.lease.Fence)
+}
+
+// durableRunLeaseTTLForRuntime resolves the run-lease TTL with the fixed
+// default as backstop.
+func (rt httpRuntime) durableRunLeaseTTLForRuntime() time.Duration {
+	if rt.durableRuns != nil && rt.durableRuns.leaseTTL > 0 {
+		return rt.durableRuns.leaseTTL
+	}
+	return durableRunLeaseTTL
+}
+
+// acquireDurableRunLease claims run:<execID> and starts its heartbeat. It
+// returns (nil, nil) when the store has no lease capability — journal-only
+// durability — and an error when the lease is held by another live holder,
+// which means someone else owns this run right now.
+func (rt httpRuntime) acquireDurableRunLease(ctx context.Context, execID string) (*durableRunLeaseHeartbeat, error) {
+	if rt.durableRuns == nil || rt.stateStore == nil {
+		return nil, nil
+	}
+	leases, ok := rt.stateStore.(state.LeaseStore)
+	if !ok {
+		return nil, nil
+	}
+	name := durableRunLeaseName(execID)
+	holder := cronReplicaID()
+	ttl := rt.durableRunLeaseTTLForRuntime()
+	lease, acquired, err := leases.AcquireLease(ctx, name, holder, ttl)
+	if err != nil {
+		return nil, fmt.Errorf("acquire durable run lease %s: %w", name, err)
+	}
+	if !acquired {
+		return nil, fmt.Errorf("durable run lease %s is held by %s until %s", name, lease.Holder, lease.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	return startDurableRunLeaseHeartbeat(leases, name, holder, ttl, lease), nil
+}
+
+// acquireDurableRunLeaseWithRetry retries acquisition briefly for the resumed
+// leg of a suspended run: the suspend path's deferred release may still be in
+// flight when the operator approves. A lease that stays held past the retry
+// budget belongs to a live holder and the caller must not proceed.
+func (rt httpRuntime) acquireDurableRunLeaseWithRetry(ctx context.Context, execID string) (*durableRunLeaseHeartbeat, error) {
+	const (
+		attempts = 40
+		backoff  = 50 * time.Millisecond
+	)
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		heartbeat, err := rt.acquireDurableRunLease(ctx, execID)
+		if err == nil {
+			return heartbeat, nil
+		}
+		lastErr = err
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+// startDurableRunRecovery launches the periodic recovery loop on the
+// runtime's async group when recovery is configured and the store can hold
+// leases. plans are the runtime's compiled plans, used to re-resolve each
+// journal row's pipeline by plan_key and verify its plan_hash.
+func startDurableRunRecovery(rt httpRuntime, plans []runtimeplan.Plan) {
+	if rt.durableRuns == nil || rt.durableRuns.recovery == nil || rt.stateStore == nil {
+		return
+	}
+	leases, ok := rt.stateStore.(state.LeaseStore)
+	if !ok {
+		return
+	}
+	recoveryPlans := append([]runtimeplan.Plan(nil), plans...)
+	rt.startAsync(func(ctx context.Context) {
+		rt.runDurableRecoveryLoop(ctx, leases, recoveryPlans)
+	})
+}
+
+// runDurableRecoveryLoop scans on startup and then every scan period with
+// ±20% jitter (the cron follower-poll pattern) until the runtime shuts down.
+func (rt httpRuntime) runDurableRecoveryLoop(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan) {
+	cfg := rt.durableRuns.recovery
+	scan := cfg.scan
+	if scan <= 0 {
+		scan = durableRecoveryScan
+	}
+	concurrency := cfg.concurrency
+	if concurrency <= 0 {
+		concurrency = durableRecoveryConcurrency
+	}
+	pool := newCronWorkerPool(concurrency)
+	for ctx.Err() == nil {
+		rt.recoverDurableRunsScan(ctx, leases, plans, pool)
+		if !sleepCronFollowerPoll(ctx, scan) {
+			return
+		}
+	}
+}
+
+// recoverDurableRunsScan performs one synchronous journal scan: claimable
+// rows are claimed via fenced lease takeover and replayed under the worker
+// pool; the scan returns once every replay it dispatched has finished.
+func (rt httpRuntime) recoverDurableRunsScan(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan, pool chan struct{}) {
+	_ = rt.syncEventStreamWithStore(ctx)
+	journals, err := rt.stateStore.RunJournals(ctx)
+	if err != nil {
+		return
+	}
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	for _, journal := range journals {
+		if ctx.Err() != nil {
+			return
+		}
+		execution, claimable, err := rt.durableRunClaimable(ctx, journal)
+		if err != nil || !claimable {
+			continue
+		}
+		if !acquireCronWorker(ctx, pool) {
+			return
+		}
+		// AcquireLease succeeds only when the run lease is absent, expired,
+		// or tombstoned: a slow-but-alive run heartbeating its lease is never
+		// stolen, and the fence takeover invalidates any zombie renewer.
+		lease, acquired, err := leases.AcquireLease(ctx, durableRunLeaseName(journal.ExecID), cronReplicaID(), rt.durableRunLeaseTTLForRuntime())
+		if err != nil || !acquired {
+			releaseCronWorker(pool)
+			continue
+		}
+		wg.Add(1)
+		go func(journal state.RunJournal, execution state.Execution, lease state.Lease) {
+			defer wg.Done()
+			defer releaseCronWorker(pool)
+			rt.recoverClaimedDurableRun(ctx, leases, plans, journal, execution, lease, false)
+		}(journal, execution, lease)
+	}
+}
+
+// durableRunClaimable reports whether a journal row is an interrupted run the
+// automatic loop may claim: its execution is still recorded as running (a
+// failed run — indeterminate or denied — is operator territory, a completed
+// one is awaiting retention) and it is not parked on a pending approval.
+func (rt httpRuntime) durableRunClaimable(ctx context.Context, journal state.RunJournal) (state.Execution, bool, error) {
+	execution, ok, err := rt.stateStore.Execution(ctx, journal.ExecID)
+	if err != nil || !ok {
+		return state.Execution{}, false, err
+	}
+	if execution.Status != state.ExecutionRunning {
+		return execution, false, nil
+	}
+	approvals, err := rt.stateStore.ApprovalsForExecution(ctx, journal.ExecID)
+	if err != nil {
+		return execution, false, err
+	}
+	for _, approval := range approvals {
+		if approval.Status == state.ApprovalPending {
+			// Suspended awaiting a human decision: not orphaned, replaying it
+			// would mint a duplicate approval. The scan picks the run up once
+			// the record is approved (cross-restart approval resume).
+			return execution, false, nil
+		}
+	}
+	return execution, true, nil
+}
+
+// recoverClaimedDurableRun applies the replay policy to one claimed run while
+// heartbeating its lease. force is the operator override from
+// POST /admin/runs/{execID}/recover: it skips the tool-intent fail-loud gate
+// (the operator has inspected the intents) but never the plan-identity or
+// client-gone checks.
+func (rt httpRuntime) recoverClaimedDurableRun(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan, journal state.RunJournal, execution state.Execution, lease state.Lease, force bool) {
+	heartbeat := startDurableRunLeaseHeartbeat(leases, durableRunLeaseName(journal.ExecID), cronReplicaID(), rt.durableRunLeaseTTLForRuntime(), lease)
+	defer heartbeat.release()
+
+	plan, ok := durablePlanForJournal(plans, journal)
+	if !ok {
+		rt.abandonDurableRun(ctx, journal, execution, "plan_missing")
+		return
+	}
+	if durablePlanHash(plan.Steps) != journal.PlanHash {
+		rt.abandonDurableRun(ctx, journal, execution, "plan_hash_mismatch")
+		return
+	}
+	if durableRunClientGone(plan) {
+		rt.abandonDurableRun(ctx, journal, execution, "client_gone")
+		return
+	}
+
+	checkpoints, err := rt.stateStore.RunCheckpoints(ctx, journal.ExecID)
+	if err != nil {
+		return
+	}
+	resumeIndex := 0
+	input := journal.Input
+	if len(checkpoints) > 0 {
+		last := checkpoints[len(checkpoints)-1]
+		resumeIndex = last.StepIndex + 1
+		input = last.Output
+	}
+	if !force {
+		intents, err := rt.stateStore.ToolIntents(ctx, journal.ExecID)
+		if err != nil {
+			return
+		}
+		if blocking, blocked := durableReplayBlockingIntent(intents, resumeIndex); blocked {
+			rt.markDurableRunIndeterminate(ctx, journal, execution, blocking)
+			return
+		}
+	}
+	rt.replayDurableRun(ctx, plan, journal, execution, resumeIndex, input, force)
+}
+
+// durablePlanForJournal re-resolves a journal row against the CURRENT
+// compiled plans: prefer an exact plan_key + plan_hash match (covers two
+// plans sharing one key), otherwise the first plan_key match so the caller's
+// hash check reports the mismatch.
+func durablePlanForJournal(plans []runtimeplan.Plan, journal state.RunJournal) (runtimeplan.Plan, bool) {
+	var keyMatch runtimeplan.Plan
+	found := false
+	for _, plan := range plans {
+		if durablePlanKey(plan) != journal.PlanKey {
+			continue
+		}
+		if durablePlanHash(plan.Steps) == journal.PlanHash {
+			return plan, true
+		}
+		if !found {
+			keyMatch = plan
+			found = true
+		}
+	}
+	return keyMatch, found
+}
+
+// durableRunClientGone reports whether the plan's terminal needs a live
+// client connection: synchronous Reply (SSE included) cannot deliver to a
+// caller that disappeared with the crashed process. Async replies, Push, and
+// Sink terminals deliver out-of-band and stay recoverable.
+func durableRunClientGone(plan runtimeplan.Plan) bool {
+	return plan.Terminal.Kind == runtimeplan.TerminalReply && (plan.Terminal.SSE || !plan.Terminal.Async)
+}
+
+// durableReplayBlockingIntent applies the side-effect replay policy to the
+// interrupted steps (every intent at or after resumeIndex; intents on
+// checkpointed steps are already covered by the checkpoint):
+//
+//   - an OPEN intent means the crash hit mid-call and the outcome is
+//     indeterminate — never auto-replay;
+//   - a COMPLETED side_effecting intent means the effect happened and has no
+//     dedup, so replaying the step would duplicate it — never auto-replay;
+//   - a COMPLETED idempotent intent is safe: its ReserveIdempotency key is
+//     held by this exec_id and re-execution is idempotent by contract.
+func durableReplayBlockingIntent(intents []state.ToolIntent, resumeIndex int) (state.ToolIntent, bool) {
+	for _, intent := range intents {
+		if intent.StepIndex < resumeIndex {
+			continue
+		}
+		if intent.CompletedAt.IsZero() {
+			return intent, true
+		}
+		if intent.Effect != string(policy.EffectIdempotent) {
+			return intent, true
+		}
+	}
+	return state.ToolIntent{}, false
+}
+
+// markDurableRunIndeterminate fails the run loudly and keeps its journal so
+// the operator can inspect the intents and force a replay.
+func (rt httpRuntime) markDurableRunIndeterminate(ctx context.Context, journal state.RunJournal, execution state.Execution, intent state.ToolIntent) {
+	rt.emitDurableRecoveryEvent(ctx, journal, execution, events.EventReplayIndeterminateTool, map[string]any{
+		"plan_key":     journal.PlanKey,
+		"tool":         intent.ToolName,
+		"tool_call_id": intent.ToolCallID,
+		"step_index":   intent.StepIndex,
+		"effect":       intent.Effect,
+		"idem_key":     intent.IdemKey,
+		"open":         intent.CompletedAt.IsZero(),
+	})
+	rt.failDurableRunExecution(ctx, execution)
+}
+
+// abandonDurableRun cleanly ends a run recovery cannot replay: event, failed
+// execution, journal pruned.
+func (rt httpRuntime) abandonDurableRun(ctx context.Context, journal state.RunJournal, execution state.Execution, reason string) {
+	rt.emitDurableRecoveryEvent(ctx, journal, execution, events.EventRunAbandoned, map[string]any{
+		"plan_key": journal.PlanKey,
+		"reason":   reason,
+	})
+	rt.failDurableRunExecution(ctx, execution)
+	if err := rt.stateStore.PruneRunJournal(ctx, journal.ExecID); err != nil {
+		rt.durableRuns.health.recordPruneFailure(err)
+	}
+}
+
+func (rt httpRuntime) failDurableRunExecution(ctx context.Context, execution state.Execution) {
+	if execution.Status != state.ExecutionRunning {
+		return
+	}
+	execution.Status = state.ExecutionFailed
+	execution.CompletedAt = time.Now().UTC()
+	_ = rt.stateStore.SaveExecution(ctx, execution)
+}
+
+// replayDurableRun re-enters execution from the last checkpoint: the
+// remaining steps run through the regular step loop with the durable journal
+// offset to the original plan indices (the same withBase machinery the
+// approval resume uses), then the terminal applies and the run finishes —
+// pruning the journal on success.
+func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Plan, journal state.RunJournal, execution state.Execution, resumeIndex int, input string, forced bool) {
+	session, err := runtimeplan.NewSession(httpPipelineSessionModel(plan),
+		runtimeplan.WithSessionIDs(journal.ExecID, "", execution.TraceID),
+		runtimeplan.WithSessionBudget(runtimeplan.Budget{
+			MaxIterations: harness.DefaultMaxIterations,
+			MaxTokens:     harness.DefaultMaxTokens,
+			MaxCostUSD:    harness.DefaultMaxCostUSD,
+			MaxWallClock:  harness.DefaultMaxWallClock,
+		}))
+	if err != nil {
+		return
+	}
+	if forced {
+		// The operator is replaying a run already marked failed; flip it back
+		// to running so the finish below records the replay's real outcome.
+		execution.Status = state.ExecutionRunning
+		execution.CompletedAt = time.Time{}
+		if err := rt.stateStore.SaveExecution(ctx, execution); err != nil {
+			return
+		}
+	}
+	if err := rt.stateStore.SaveSession(ctx, session); err != nil {
+		return
+	}
+	rt.emitDurableRecoveryEvent(ctx, journal, execution, events.EventRunRecovered, map[string]any{
+		"plan_key":          journal.PlanKey,
+		"trigger":           journal.TriggerKind,
+		"resumed_from_step": resumeIndex,
+		"forced":            forced,
+	})
+
+	replayCtx := rt.durableApprovalReplayContext(ctx, journal.ExecID)
+	scope := planRunScope{
+		parentSession: &session,
+		durable:       &durableStepJournal{store: rt.stateStore, execID: journal.ExecID, baseIndex: resumeIndex},
+	}
+	result := planRunResult{Output: input, Session: session, HasSession: true}
+	if resumeIndex < len(plan.Steps) {
+		remaining := append([]runtimeplan.Step(nil), plan.Steps[resumeIndex:]...)
+		stepResult, err := rt.runStepsResult(replayCtx, remaining, input, scope)
+		if !stepResult.HasSession {
+			stepResult.Session = session
+			stepResult.HasSession = true
+		}
+		if err != nil {
+			if rt.rememberSuspendedPlan(err, plan, session) {
+				// Re-suspended on a fresh gated call: the run parks again with
+				// its journal intact; the deferred lease release lets a later
+				// approval (or recovery after another crash) pick it up.
+				return
+			}
+			_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), session, plan, "failed", err)
+			return
+		}
+		result = stepResult
+	}
+	if err := rt.applyResumedTerminal(replayCtx, plan, result); err != nil {
+		_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), session, plan, "failed", err)
+		return
+	}
+	_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), session, plan, "completed", nil)
+}
+
+// durableApprovalReplayContext installs the cross-restart approval fallback:
+// a gated tool call replayed under this context is auto-allowed when an
+// approval record for this execution is already approved and its args_hash
+// matches the replayed call exactly. The in-memory resume registry stays the
+// fast path for live runs; this resolver only exists inside recovery replays.
+func (rt httpRuntime) durableApprovalReplayContext(ctx context.Context, execID string) context.Context {
+	store := rt.stateStore
+	return tools.ContextWithApprovedApprovalResolver(ctx, func(ctx context.Context, toolName, argsHash string) (string, bool) {
+		if argsHash == "" {
+			return "", false
+		}
+		approvals, err := store.ApprovalsForExecution(ctx, execID)
+		if err != nil {
+			return "", false
+		}
+		for _, approval := range approvals {
+			if approval.Status != state.ApprovalApproved {
+				continue
+			}
+			if approval.ToolName == toolName && approval.ArgsHash != "" && approval.ArgsHash == argsHash {
+				return approval.ID, true
+			}
+		}
+		return "", false
+	})
+}
+
+// emitDurableRecoveryEvent records one recovery lifecycle event against the
+// recovered execution's identifiers; emission failures never block recovery.
+func (rt httpRuntime) emitDurableRecoveryEvent(ctx context.Context, journal state.RunJournal, execution state.Execution, kind events.EventKind, payload map[string]any) {
+	if rt.stateStore == nil && rt.eventStream == nil {
+		return
+	}
+	_ = rt.appendRuntimeEvent(ctx, events.Event{
+		Kind:    kind,
+		ExecID:  journal.ExecID,
+		TraceID: execution.TraceID,
+		Payload: payload,
+	})
+}

@@ -36,31 +36,40 @@ func ContextWithIdempotencyStore(ctx context.Context, store idempotencyStore, ex
 	})
 }
 
-func reserveIdempotency(ctx context.Context, tool registeredTool, raw json.RawMessage) error {
+// reserveIdempotency reserves an idempotent tool call's key before execution.
+// It returns skip=true when the reservation is already held by THIS execution
+// — a durable-run replay (#40) or an in-run duplicate re-issuing the same
+// call — which the executor dedupes as a success instead of the historical
+// error: the work is already done under this exec id. A reservation held by a
+// different execution remains an error.
+func reserveIdempotency(ctx context.Context, tool registeredTool, raw json.RawMessage) (bool, error) {
 	if normalizeEffect(tool.metadata.Effect) != policy.EffectIdempotent {
-		return nil
+		return false, nil
 	}
 	expression := strings.TrimSpace(tool.metadata.IdempotencyKey)
 	if expression == "" {
-		return errors.New("idempotent tool requires an idempotency key")
+		return false, errors.New("idempotent tool requires an idempotency key")
 	}
 
 	reservation, ok := idempotencyFromContext(ctx)
 	if !ok {
-		return errors.New("idempotent tool requires an idempotency StateStore")
+		return false, errors.New("idempotent tool requires an idempotency StateStore")
 	}
 	key, err := idempotencyReservationKey(tool.name, expression, raw)
 	if err != nil {
-		return err
+		return false, err
 	}
 	existing, reserved, err := reservation.store.ReserveIdempotency(ctx, key, reservation.execID)
 	if err != nil {
-		return fmt.Errorf("reserve idempotency key: %w", err)
+		return false, fmt.Errorf("reserve idempotency key: %w", err)
 	}
 	if !reserved {
-		return fmt.Errorf("idempotency key already reserved for execution %s", existing)
+		if existing == reservation.execID {
+			return true, nil
+		}
+		return false, fmt.Errorf("idempotency key already reserved for execution %s", existing)
 	}
-	return nil
+	return false, nil
 }
 
 func idempotencyFromContext(ctx context.Context) (idempotencyContext, bool) {

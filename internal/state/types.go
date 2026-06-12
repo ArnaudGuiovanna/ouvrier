@@ -27,6 +27,11 @@ type Store interface {
 	SaveApproval(context.Context, PendingApproval) error
 	Approval(context.Context, string) (PendingApproval, bool, error)
 	PendingApprovals(context.Context) ([]PendingApproval, error)
+	// ApprovalsForExecution lists every approval recorded for one execution,
+	// any status, in creation order. Durable-run recovery (#40) uses it to
+	// skip runs parked on a pending approval and to auto-allow replayed tool
+	// calls whose approved record matches by tool name and args hash.
+	ApprovalsForExecution(context.Context, string) ([]PendingApproval, error)
 	ResolveApproval(context.Context, string, ApprovalStatus, string) (PendingApproval, error)
 
 	// Durable runs (step-checkpoint journal, tool intents, retention).
@@ -64,6 +69,10 @@ const (
 // execution until an operator approves or denies the gated tool call. The
 // Reason field is redaction-safe (run through the same credential scrubbing as
 // persisted events) and never carries tool arguments or skill bodies.
+// ArgsHash is a digest of the gated call's tool name and arguments (never the
+// raw arguments), recorded at suspend time so durable-run recovery can match
+// an approved record against the replayed call; it is empty on records written
+// before v0.3.
 type PendingApproval struct {
 	ID         string
 	ExecID     string
@@ -74,6 +83,7 @@ type PendingApproval struct {
 	ToolKind   string
 	Effect     string
 	Reason     string
+	ArgsHash   string
 	Status     ApprovalStatus
 	CreatedAt  time.Time
 	DecidedAt  time.Time

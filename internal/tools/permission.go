@@ -59,8 +59,22 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 			})
 			return provider.ToolResult{}, observeErr == nil, observeErr
 		}
+		// Durable-run recovery fallback (#40): a replayed run cannot match the
+		// suspended tool call id (the provider re-mints it), so an installed
+		// resolver matches the call by tool name + args hash against the
+		// already-approved record instead of suspending a second time.
+		if resolver, ok := approvedApprovalResolverFromContext(ctx); ok {
+			if approvalID, ok := resolver(ctx, action.ToolName, toolIntentIdemKey(tool, call)); ok {
+				decision := policy.Decision{Allowed: true, ApprovalID: approvalID, Reason: "approval approved before recovery"}
+				observeErr := observePermissionDecision(ctx, PermissionDecisionAudit{
+					Action:   action,
+					Decision: decision,
+				})
+				return provider.ToolResult{}, observeErr == nil, observeErr
+			}
+		}
 		if gate, approvalCtx, ok := approvalGateFromContext(ctx); ok {
-			return e.suspendForApproval(ctx, action, call, gate, approvalCtx)
+			return e.suspendForApproval(ctx, tool, action, call, gate, approvalCtx)
 		}
 	}
 	decision, err := permissionPolicy.Authorize(ctx, action)
@@ -102,7 +116,7 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 	return errorResult(call, fmt.Errorf("%w: %s", policy.ErrDenied, reason)), false, nil
 }
 
-func (e *Executor) suspendForApproval(ctx context.Context, action policy.Action, call provider.ToolCall, gate ApprovalGate, approvalCtx ApprovalContext) (provider.ToolResult, bool, error) {
+func (e *Executor) suspendForApproval(ctx context.Context, tool registeredTool, action policy.Action, call provider.ToolCall, gate ApprovalGate, approvalCtx ApprovalContext) (provider.ToolResult, bool, error) {
 	reason := "tool requires explicit approval"
 	approvalID, recordErr := gate.RecordPendingApproval(ctx, ApprovalRequest{
 		ExecID:     approvalCtx.ExecID,
@@ -113,6 +127,10 @@ func (e *Executor) suspendForApproval(ctx context.Context, action policy.Action,
 		ToolKind:   action.ToolKind,
 		Effect:     string(action.Effect),
 		Reason:     reason,
+		// The args hash recorded at suspend time is what the recovery
+		// resolver compares against on replay; both sides derive it from
+		// toolIntentIdemKey so the digests match exactly.
+		ArgsHash: toolIntentIdemKey(tool, call),
 	})
 	decision := policy.Decision{Allowed: false, Suspended: true, ApprovalID: approvalID, Reason: reason}
 	if recordErr != nil {

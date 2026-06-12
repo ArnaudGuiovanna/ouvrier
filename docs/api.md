@@ -297,6 +297,9 @@ ovr.EventCronLeaseAcquired
 ovr.EventCronLeaseLost
 ovr.EventCronTickSkipped
 ovr.EventDurableRunPruneFailed
+ovr.EventRunRecovered
+ovr.EventRunAbandoned
+ovr.EventReplayIndeterminateTool
 ovr.EventSinkLogged
 ```
 
@@ -330,6 +333,10 @@ GET  /admin/traces/<exec-id>
 POST /admin/trigger        # returns exec_id/trace_id/session_id when scheduled
 GET  /admin/approvals      # pending human-in-the-loop approvals
 POST /admin/approvals/<id> # approve or deny a suspended tool call
+GET  /admin/runs           # durable-run journal rows; ?status=orphaned filters to
+                           # interrupted runs no live run lease protects
+POST /admin/runs/<exec-id>/recover # operator-forced replay of a run the automatic
+                           # recovery refused (replay_indeterminate_tool path)
 POST /admin/streams/replay # replay the runtime-retained DLQ copy for a stream plan
 GET  /metrics              # Prometheus text exposition (admin token required)
 GET  /dev                  # dev-mode trace viewer (admin token required)
