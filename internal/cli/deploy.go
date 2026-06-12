@@ -2,14 +2,16 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 )
 
 // ErrDeploy is returned when a deploy subcommand cannot proceed (bad flags,
 // missing files, transport failures, or rollback after a failed health check).
-var ErrDeploy = errors.New("deploy error")
+// It is the deploy engine's sentinel so errors.Is works across the seam.
+var ErrDeploy = deploy.ErrDeploy
 
 func (app *App) runDeployCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 || isHelpFlag(args[0]) {

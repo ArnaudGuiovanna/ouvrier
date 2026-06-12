@@ -19,6 +19,7 @@ Commands:
   logs      List the last N traced executions of a running worker
   trace     Print the full event timeline for one execution
   deploy    Ship the project to a remote host (ssh) or build a container image (docker)
+  fleet     Inspect or prune the recorded deployments inventory (ls|rm)
   state     Manage the worker's durable state backend (migrate)
   version   Print the ouvrier CLI version
 
@@ -268,6 +269,45 @@ Options:
   -h, --help           Show this help message
 `
 
+const fleetHelp = `Inspect or prune the recorded deployments inventory.
+
+Usage: ouvrier fleet <ls|rm> [flags]
+
+The inventory at ~/.config/ouvrier/deployments.json records one entry per
+deployed worker and host. It is a disposable cache for tooling — the live
+/admin/health endpoint is truth — and never contains secrets. Override its
+location with OUVRIER_FLEET_PATH (full path) or OUVRIER_CONFIG_DIR.
+
+Subcommands:
+  ls   List recorded deployments
+  rm   Remove recorded deployments for a worker
+
+Run "ouvrier fleet <subcommand> --help" for details.
+`
+
+const fleetLsHelp = `List recorded deployments.
+
+Usage: ouvrier fleet ls
+
+Prints one line per recorded deployment (name, host, service, deploy time,
+result). An empty inventory is not an error.
+
+Options:
+  -h, --help   Show this help message
+`
+
+const fleetRmHelp = `Remove recorded deployments for a worker.
+
+Usage: ouvrier fleet rm <name> [flags]
+
+Removes the inventory entries for the named worker. This only edits the local
+inventory file; it never touches the remote host.
+
+Options:
+      --host string   Only remove the entry for this host
+  -h, --help          Show this help message
+`
+
 const stateHelp = `Manage the worker's durable state backend.
 
 Usage: ouvrier state <migrate> [flags]
@@ -367,6 +407,18 @@ func printDeploySSHHelp(w io.Writer) {
 
 func printDeployDockerHelp(w io.Writer) {
 	fmt.Fprint(w, deployDockerHelp)
+}
+
+func printFleetHelp(w io.Writer) {
+	fmt.Fprint(w, fleetHelp)
+}
+
+func printFleetLsHelp(w io.Writer) {
+	fmt.Fprint(w, fleetLsHelp)
+}
+
+func printFleetRmHelp(w io.Writer) {
+	fmt.Fprint(w, fleetRmHelp)
 }
 
 func printStateHelp(w io.Writer) {

@@ -27,6 +27,15 @@ const (
 	DurableRuns      = "OUVRIER_DURABLE_RUNS"
 	DurableRetention = "OUVRIER_DURABLE_RETENTION"
 
+	// DeployEnvFile overrides which dotenv file `ouvrier deploy` ships,
+	// taking precedence over .env.<env> and .env (same as --env-file).
+	DeployEnvFile = "OUVRIER_DEPLOY_ENV_FILE"
+	// ConfigDir overrides the user-level config directory (default
+	// ~/.config/ouvrier); FleetPath overrides the full path of the
+	// deployments inventory (default <config dir>/deployments.json).
+	ConfigDir = "OUVRIER_CONFIG_DIR"
+	FleetPath = "OUVRIER_FLEET_PATH"
+
 	LegacyEnv        = "PIP_ENV"
 	LegacyAdminToken = "PIP_ADMIN_TOKEN"
 	LegacyAddr       = "PIP_ADDR"

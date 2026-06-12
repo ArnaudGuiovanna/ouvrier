@@ -74,7 +74,8 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 		`"admin_url": "http://127.0.0.1:8080"`,
 	})
 	assertFileContains(t, filepath.Join(project.Dir, ".gitignore"), []string{
-		".env",
+		".env*",
+		"!.env.example",
 		"bin/",
 	})
 

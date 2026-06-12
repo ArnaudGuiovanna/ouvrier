@@ -515,6 +515,8 @@ ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
 ouvrier deploy ssh --host HOST [--dir .]
 ouvrier deploy docker [--dir .] [--image IMAGE] [--tag TAG] [--push]
+ouvrier fleet ls
+ouvrier fleet rm <name> [--host HOST]
 ```
 
 `ouvrier new` opens the Bubble Tea v2 project wizard. The wizard and
@@ -531,7 +533,10 @@ toolchain).
 `ouvrier deploy ssh` ships a static binary, `.env`, `skills/` runtime assets
 when present, and a systemd unit with health-check rollback. `ouvrier deploy
 docker` renders and builds a distroless container image that includes `skills/`
-when present.
+when present. `ouvrier fleet` lists or prunes the recorded deployments
+inventory at `~/.config/ouvrier/deployments.json` (override with
+`OUVRIER_FLEET_PATH` or `OUVRIER_CONFIG_DIR`); it is a secret-free cache for
+tooling — live `/admin/health` is truth.
 
 ## Reference Examples
 
