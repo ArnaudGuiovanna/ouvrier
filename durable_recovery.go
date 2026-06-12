@@ -3,6 +3,7 @@ package ovr
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -189,8 +190,14 @@ func (rt httpRuntime) runDurableRecoveryLoop(ctx context.Context, leases state.L
 		concurrency = durableRecoveryConcurrency
 	}
 	pool := newCronWorkerPool(concurrency)
+	// The event-stream sync is a full events scan; running it on every cycle
+	// is wasted work because handler startup already synced and recovery is
+	// this stream's only other writer. The first scan re-syncs once to cover
+	// runtimes wired without the handler path, then later cycles skip it.
+	syncEvents := true
 	for ctx.Err() == nil {
-		rt.recoverDurableRunsScan(ctx, leases, plans, pool)
+		rt.recoverDurableRunsScan(ctx, leases, plans, pool, syncEvents)
+		syncEvents = false
 		if !sleepCronFollowerPoll(ctx, scan) {
 			return
 		}
@@ -200,8 +207,12 @@ func (rt httpRuntime) runDurableRecoveryLoop(ctx context.Context, leases state.L
 // recoverDurableRunsScan performs one synchronous journal scan: claimable
 // rows are claimed via fenced lease takeover and replayed under the worker
 // pool; the scan returns once every replay it dispatched has finished.
-func (rt httpRuntime) recoverDurableRunsScan(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan, pool chan struct{}) {
-	_ = rt.syncEventStreamWithStore(ctx)
+// syncEvents asks for the (full-scan) event-stream ID sync first; the
+// periodic loop requests it only on its first cycle.
+func (rt httpRuntime) recoverDurableRunsScan(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan, pool chan struct{}, syncEvents bool) {
+	if syncEvents {
+		_ = rt.syncEventStreamWithStore(ctx)
+	}
 	journals, err := rt.stateStore.RunJournals(ctx)
 	if err != nil {
 		return
@@ -283,6 +294,16 @@ func (rt httpRuntime) durableRunHasPendingApproval(ctx context.Context, execID s
 func (rt httpRuntime) recoverClaimedDurableRun(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan, journal state.RunJournal, execution state.Execution, lease state.Lease, force bool) {
 	heartbeat := startDurableRunLeaseHeartbeat(leases, durableRunLeaseName(journal.ExecID), cronReplicaID(), rt.durableRunLeaseTTLForRuntime(), lease)
 	defer heartbeat.release()
+
+	// Re-check pending approvals now that the lease is ours: an operator
+	// approving in the scan→claim gap parks the run on a fresh pending record,
+	// and replaying it here would mint a duplicate approval. On pending (or a
+	// store error that leaves it unknown) skip the replay; the deferred
+	// release tombstones the claim so the approval resume — or the next scan —
+	// takes over instantly.
+	if pending, err := rt.durableRunHasPendingApproval(ctx, journal.ExecID); err != nil || pending {
+		return
+	}
 
 	plan, ok := durablePlanForJournal(plans, journal)
 	if !ok {
@@ -451,6 +472,11 @@ func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Pla
 	})
 
 	replayCtx := rt.durableApprovalReplayContext(ctx, journal.ExecID)
+	// Known v0.3 limitation: the replay starts with a fresh budget ledger (no
+	// budgetLedger on the scope) and the default session budgets above, so
+	// cross-step budget progress accrued before the crash — tokens, cost,
+	// iterations, wall clock — is not restored. A replayed run can therefore
+	// spend up to a full budget again on its remaining steps.
 	scope := planRunScope{
 		parentSession: &session,
 		durable:       &durableStepJournal{store: rt.stateStore, execID: journal.ExecID, baseIndex: resumeIndex},
@@ -487,14 +513,21 @@ func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Pla
 // approval record for this execution is already approved and its args_hash
 // matches the replayed call exactly. The in-memory resume registry stays the
 // fast path for live runs; this resolver only exists inside recovery replays.
+//
+// The approvals are loaded once here: approved records are immutable for the
+// lifetime of the replay, so every gated call scans the cached slice instead
+// of re-querying the store. If the load fails the resolver always misses —
+// gated calls re-park on a fresh approval rather than silently treating a
+// transient store error as "no approvals" — and one log line records the
+// fallback.
 func (rt httpRuntime) durableApprovalReplayContext(ctx context.Context, execID string) context.Context {
-	store := rt.stateStore
-	return tools.ContextWithApprovedApprovalResolver(ctx, func(ctx context.Context, toolName, argsHash string) (string, bool) {
+	approvals, err := rt.stateStore.ApprovalsForExecution(ctx, execID)
+	if err != nil {
+		log.Printf("ouvrier: durable recovery exec_id=%s: loading approvals for replay failed (%v); replayed gated calls will re-park on fresh approvals", execID, err)
+		approvals = nil
+	}
+	return tools.ContextWithApprovedApprovalResolver(ctx, func(_ context.Context, toolName, argsHash string) (string, bool) {
 		if argsHash == "" {
-			return "", false
-		}
-		approvals, err := store.ApprovalsForExecution(ctx, execID)
-		if err != nil {
 			return "", false
 		}
 		for _, approval := range approvals {
@@ -512,6 +545,9 @@ func (rt httpRuntime) durableApprovalReplayContext(ctx context.Context, execID s
 // emitDurableRecoveryEvent records one recovery lifecycle event against the
 // recovered execution's identifiers; emission failures never block recovery.
 func (rt httpRuntime) emitDurableRecoveryEvent(ctx context.Context, journal state.RunJournal, execution state.Execution, kind events.EventKind, payload map[string]any) {
+	// Skip only when BOTH sinks are absent (nothing to write to); with either
+	// one present we still emit — appendRuntimeEvent handles each nil sink on
+	// its own. This is deliberately &&, not ||.
 	if rt.stateStore == nil && rt.eventStream == nil {
 		return
 	}

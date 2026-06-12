@@ -86,7 +86,9 @@ func runDurableRecoveryScanNow(t *testing.T, rt httpRuntime, plans ...runtimepla
 	if !ok {
 		t.Fatal("state store has no lease capability")
 	}
-	rt.recoverDurableRunsScan(context.Background(), leases, plans, newCronWorkerPool(2))
+	// syncEvents=true mirrors the loop's first scan: manual test scans always
+	// re-sync the event stream so seeded store events keep IDs monotonic.
+	rt.recoverDurableRunsScan(context.Background(), leases, plans, newCronWorkerPool(2), true)
 }
 
 func newDurableRecoveryEventStream(t *testing.T) *events.EventStream {
@@ -840,7 +842,7 @@ func TestDurableRecoveryLoopRecoversWithoutManualScan(t *testing.T) {
 		provider:    scripted,
 		stateStore:  store,
 		eventStream: newDurableRecoveryEventStream(t),
-		durableRuns: newDurableRecoveryTestConfig(25 * time.Millisecond),
+		durableRuns: newDurableRecoveryTestConfig(50 * time.Millisecond),
 	})
 	if err != nil {
 		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
