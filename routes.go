@@ -3,6 +3,7 @@ package ovr
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,6 +180,17 @@ func (rt httpRuntime) serveAdminHealth(w http.ResponseWriter, req *http.Request)
 		}
 		response.Executions = len(executions)
 		response.RecentExecutions = recentAdminExecutions(executions, parseAdminTraceLimit(req.URL.Query().Get("last")))
+	}
+	if source, ok := rt.stateStore.(interface{ DBStats() sql.DBStats }); ok {
+		stats := source.DBStats()
+		response.StateDB = &adminStateDBResponse{
+			MaxOpenConnections: stats.MaxOpenConnections,
+			OpenConnections:    stats.OpenConnections,
+			InUse:              stats.InUse,
+			Idle:               stats.Idle,
+			WaitCount:          stats.WaitCount,
+			WaitDurationMS:     stats.WaitDuration.Milliseconds(),
+		}
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -1186,6 +1198,18 @@ type adminHealthResponse struct {
 	EventStream      bool                     `json:"event_stream"`
 	Executions       int                      `json:"executions,omitempty"`
 	RecentExecutions []adminExecutionResponse `json:"recent_executions,omitempty"`
+	StateDB          *adminStateDBResponse    `json:"state_db,omitempty"`
+}
+
+// adminStateDBResponse reports connection-pool statistics for state backends
+// that expose them (currently only Postgres).
+type adminStateDBResponse struct {
+	MaxOpenConnections int   `json:"max_open_connections"`
+	OpenConnections    int   `json:"open_connections"`
+	InUse              int   `json:"in_use"`
+	Idle               int   `json:"idle"`
+	WaitCount          int64 `json:"wait_count"`
+	WaitDurationMS     int64 `json:"wait_duration_ms"`
 }
 
 type adminStatusResponse struct {

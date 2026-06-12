@@ -1,0 +1,163 @@
+package state
+
+import (
+	"context"
+	"fmt"
+)
+
+// postgresMigration is one ordered, additive schema step. Applied versions are
+// recorded in ouvrier_schema_migrations and never re-run.
+type postgresMigration struct {
+	version    int
+	statements []string
+}
+
+// postgresMigrations is the ordered Postgres schema history. v0.3.x
+// migrations stay additive-only.
+var postgresMigrations = []postgresMigration{
+	{
+		version: 1,
+		statements: []string{
+			`CREATE TABLE ouvrier_executions (
+				exec_id TEXT PRIMARY KEY,
+				trace_id TEXT NOT NULL,
+				status TEXT NOT NULL,
+				started_at TIMESTAMPTZ NOT NULL,
+				completed_at TIMESTAMPTZ
+			)`,
+			`CREATE TABLE ouvrier_sessions (
+				session_id TEXT PRIMARY KEY,
+				exec_id TEXT NOT NULL,
+				parent_session_id TEXT NOT NULL,
+				trace_id TEXT NOT NULL,
+				model TEXT NOT NULL,
+				started_at TIMESTAMPTZ NOT NULL,
+				max_iterations BIGINT NOT NULL,
+				max_tokens BIGINT NOT NULL,
+				max_cost_usd DOUBLE PRECISION NOT NULL,
+				max_wallclock_ns BIGINT NOT NULL DEFAULT 0
+			)`,
+			`CREATE TABLE ouvrier_idempotency_keys (
+				key TEXT PRIMARY KEY,
+				exec_id TEXT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL
+			)`,
+			// Event payloads stay TEXT (not JSONB): persisted JSON must
+			// round-trip byte-for-byte.
+			`CREATE TABLE ouvrier_events (
+				id BIGINT PRIMARY KEY,
+				at TIMESTAMPTZ NOT NULL,
+				kind TEXT NOT NULL,
+				exec_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				trace_id TEXT NOT NULL,
+				payload TEXT NOT NULL
+			)`,
+			`CREATE INDEX idx_ouvrier_events_exec_id ON ouvrier_events(exec_id, id)`,
+			// Single-row counter serializing event ID assignment across
+			// replicas; seeded from MAX(id) so adopting an existing events
+			// table keeps IDs monotonic.
+			`CREATE TABLE ouvrier_event_counter (
+				singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+				last_id BIGINT NOT NULL
+			)`,
+			`INSERT INTO ouvrier_event_counter (singleton, last_id)
+				SELECT TRUE, COALESCE(MAX(id), 0) FROM ouvrier_events`,
+			`CREATE TABLE ouvrier_schema_violations (
+				id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+				at TIMESTAMPTZ NOT NULL,
+				exec_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				schema_name TEXT NOT NULL,
+				error TEXT NOT NULL
+			)`,
+			`CREATE TABLE ouvrier_memory (
+				scope TEXT NOT NULL,
+				key TEXT NOT NULL,
+				value TEXT NOT NULL,
+				updated_at TIMESTAMPTZ NOT NULL,
+				PRIMARY KEY (scope, key)
+			)`,
+			`CREATE TABLE ouvrier_approvals (
+				seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+				id TEXT NOT NULL UNIQUE,
+				exec_id TEXT NOT NULL,
+				session_id TEXT NOT NULL,
+				trace_id TEXT NOT NULL,
+				tool_name TEXT NOT NULL,
+				tool_call_id TEXT NOT NULL,
+				tool_kind TEXT NOT NULL,
+				effect TEXT NOT NULL,
+				reason TEXT NOT NULL,
+				status TEXT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL,
+				decided_at TIMESTAMPTZ,
+				decided_by TEXT NOT NULL
+			)`,
+			`CREATE INDEX idx_ouvrier_approvals_status ON ouvrier_approvals(status, seq)`,
+		},
+	},
+}
+
+// migrate applies pending migrations inside one transaction, serialized by a
+// transaction-scoped advisory lock so concurrent replicas starting against the
+// same database (and schema) cannot race the DDL.
+func (s *PostgresStore) migrate(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("postgres state store: begin migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext('ouvrier_state_migrations'))`); err != nil {
+		return fmt.Errorf("postgres state store: acquire migration lock: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ouvrier_schema_migrations (
+		version BIGINT PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`); err != nil {
+		return fmt.Errorf("postgres state store: ensure migrations table: %w", err)
+	}
+
+	applied := map[int]bool{}
+	rows, err := tx.QueryContext(ctx, `SELECT version FROM ouvrier_schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("postgres state store: read applied migrations: %w", err)
+	}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			rows.Close()
+			return fmt.Errorf("postgres state store: scan applied migration: %w", err)
+		}
+		applied[version] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("postgres state store: read applied migrations: %w", err)
+	}
+	rows.Close()
+
+	for _, migration := range postgresMigrations {
+		if applied[migration.version] {
+			continue
+		}
+		for _, statement := range migration.statements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("postgres state store: apply migration %d: %w", migration.version, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO ouvrier_schema_migrations (version) VALUES ($1)`, migration.version); err != nil {
+			return fmt.Errorf("postgres state store: record migration %d: %w", migration.version, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("postgres state store: commit migrations: %w", err)
+	}
+	return nil
+}

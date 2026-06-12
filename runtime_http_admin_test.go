@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,83 @@ func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {
 	decodeAdminJSON(t, rec, &body)
 	if body.Status != "ok" || !body.StateStore || !body.EventStream {
 		t.Fatalf("body = %+v, want ok with store and stream", body)
+	}
+}
+
+// dbStatsStateStore wraps a Store with the DBStats method that the Postgres
+// backend exposes, so the /admin/health pool-stats section can be tested
+// without a live database.
+type dbStatsStateStore struct {
+	state.Store
+	stats sql.DBStats
+}
+
+func (s dbStatsStateStore) DBStats() sql.DBStats { return s.stats }
+
+func TestHTTPAdminHealthReportsStateDBStatsWhenBackendExposesThem(t *testing.T) {
+	t.Setenv("OUVRIER_ENV", "dev")
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	store := dbStatsStateStore{
+		Store: state.NewMemoryStore(),
+		stats: sql.DBStats{
+			MaxOpenConnections: 10,
+			OpenConnections:    3,
+			InUse:              1,
+			Idle:               2,
+			WaitCount:          4,
+			WaitDuration:       1500 * time.Millisecond,
+		},
+	}
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: store, eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/health", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body struct {
+		StateDB *struct {
+			MaxOpenConnections int   `json:"max_open_connections"`
+			OpenConnections    int   `json:"open_connections"`
+			InUse              int   `json:"in_use"`
+			Idle               int   `json:"idle"`
+			WaitCount          int64 `json:"wait_count"`
+			WaitDurationMS     int64 `json:"wait_duration_ms"`
+		} `json:"state_db"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.StateDB == nil {
+		t.Fatal("state_db missing from health response for stats-exposing store")
+	}
+	if body.StateDB.MaxOpenConnections != 10 || body.StateDB.OpenConnections != 3 ||
+		body.StateDB.InUse != 1 || body.StateDB.Idle != 2 ||
+		body.StateDB.WaitCount != 4 || body.StateDB.WaitDurationMS != 1500 {
+		t.Fatalf("state_db = %+v, want the wrapped pool stats", *body.StateDB)
+	}
+}
+
+func TestHTTPAdminHealthOmitsStateDBForBackendsWithoutPoolStats(t *testing.T) {
+	t.Setenv("OUVRIER_ENV", "dev")
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	handler := newTestAdminHTTPHandler(t, httpRuntime{stateStore: state.NewMemoryStore(), eventStream: stream})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/health", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var body map[string]any
+	decodeAdminJSON(t, rec, &body)
+	if _, ok := body["state_db"]; ok {
+		t.Fatalf("state_db present for memory store: %v", body["state_db"])
 	}
 }
 

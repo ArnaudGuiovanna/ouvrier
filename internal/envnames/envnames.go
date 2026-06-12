@@ -9,6 +9,11 @@ const (
 	Addr       = "OUVRIER_ADDR"
 	LogLevel   = "OUVRIER_LOG_LEVEL"
 
+	StateBackend  = "OUVRIER_STATE_BACKEND"
+	StatePath     = "OUVRIER_STATE_PATH"
+	StateDSN      = "OUVRIER_STATE_DSN"
+	StateMaxConns = "OUVRIER_STATE_MAX_CONNS"
+
 	LegacyEnv        = "PIP_ENV"
 	LegacyAdminToken = "PIP_ADMIN_TOKEN"
 	LegacyAddr       = "PIP_ADDR"
