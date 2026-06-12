@@ -27,6 +27,31 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 }
 
 func NewSQLiteStoreWithContext(ctx context.Context, path string) (*SQLiteStore, error) {
+	return newSQLiteStore(ctx, path, MigrateAuto)
+}
+
+func newSQLiteStore(ctx context.Context, path string, migrateMode string) (*SQLiteStore, error) {
+	store, err := openSQLiteStore(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if migrateMode == MigrateOff {
+		if err := store.verifySchema(ctx); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		return store, nil
+	}
+	if _, err := store.migrate(ctx); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// openSQLiteStore opens and configures the database without touching the
+// schema, so callers decide whether to migrate or only verify.
+func openSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
 	ctx, err := activeContext(ctx)
 	if err != nil {
 		return nil, err
@@ -46,10 +71,6 @@ func NewSQLiteStoreWithContext(ctx context.Context, path string) (*SQLiteStore, 
 
 	store := &SQLiteStore{db: db}
 	if err := store.configure(ctx); err != nil {
-		_ = store.Close()
-		return nil, err
-	}
-	if err := store.migrate(ctx); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -77,20 +98,57 @@ func (s *SQLiteStore) configure(ctx context.Context) error {
 	return nil
 }
 
-func (s *SQLiteStore) migrate(ctx context.Context) error {
+// migrate applies the idempotent schema statements and stamps PRAGMA
+// user_version. It returns the schema versions newly crossed by this run
+// (empty when the database was already current), so `ouvrier state migrate`
+// can report what it did.
+func (s *SQLiteStore) migrate(ctx context.Context) ([]int, error) {
+	before, err := s.schemaVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, stmt := range sqliteSchemaStatements {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate sqlite state store: %w", err)
+			return nil, fmt.Errorf("migrate sqlite state store: %w", err)
 		}
 	}
 	if err := s.ensureColumn(ctx, "ouvrier_sessions", "max_wallclock_ns", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return fmt.Errorf("migrate sqlite state store: %w", err)
+		return nil, fmt.Errorf("migrate sqlite state store: %w", err)
 	}
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", sqliteSchemaVersion))
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", sqliteSchemaVersion)); err != nil {
+		return nil, fmt.Errorf("set sqlite state schema version: %w", err)
+	}
+	var applied []int
+	for version := before + 1; version <= sqliteSchemaVersion; version++ {
+		applied = append(applied, version)
+	}
+	return applied, nil
+}
+
+// verifySchema checks PRAGMA user_version against the version this binary
+// expects, without ever running DDL. It backs OUVRIER_STATE_MIGRATE=off.
+func (s *SQLiteStore) verifySchema(ctx context.Context) error {
+	version, err := s.schemaVersion(ctx)
 	if err != nil {
-		return fmt.Errorf("set sqlite state schema version: %w", err)
+		return err
+	}
+	switch {
+	case version < sqliteSchemaVersion:
+		return fmt.Errorf("sqlite state store: schema version %d, want %d; run \"ouvrier state migrate\" to apply pending migrations (%s=%s never runs DDL)",
+			version, sqliteSchemaVersion, EnvStateMigrate, MigrateOff)
+	case version > sqliteSchemaVersion:
+		return fmt.Errorf("sqlite state store: schema version %d is newer than this binary supports (%d); upgrade the worker",
+			version, sqliteSchemaVersion)
 	}
 	return nil
+}
+
+func (s *SQLiteStore) schemaVersion(ctx context.Context) (int, error) {
+	var version int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return 0, fmt.Errorf("read sqlite state schema version: %w", err)
+	}
+	return version, nil
 }
 
 func (s *SQLiteStore) ensureColumn(ctx context.Context, table, column, definition string) error {

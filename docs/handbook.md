@@ -572,11 +572,37 @@ events, and schema violations. By default, `Run` uses SQLite at
 Environment:
 
 ```txt
-OUVRIER_STATE_BACKEND=sqlite  # sqlite or memory
+OUVRIER_STATE_BACKEND=sqlite  # sqlite, postgres, or memory
 OUVRIER_STATE_PATH=.ouvrier/state.db
+OUVRIER_STATE_DSN=...         # postgres connection string; secret, never logged
+OUVRIER_STATE_MIGRATE=auto    # auto (default) applies schema migrations at startup; off only verifies
 OUVRIER_ADMIN_TOKEN=...
 OUVRIER_ENV=dev               # enables unauthenticated admin only when no token is set
 ```
+
+### Schema Migrations And DML-Only Roles
+
+With the default `OUVRIER_STATE_MIGRATE=auto`, the worker applies pending
+schema migrations at startup. Postgres migrations run inside one transaction
+serialized by an advisory lock, so concurrent replicas starting against the
+same database cannot race the DDL.
+
+Hardened production deployments often give the worker a DML-only database
+role. Set `OUVRIER_STATE_MIGRATE=off` for those workers: startup then only
+verifies the schema version and refuses to start while migrations are
+pending — it never runs DDL. Apply migrations explicitly with a DDL-capable
+role instead:
+
+```sh
+OUVRIER_STATE_BACKEND=postgres OUVRIER_STATE_DSN=... ouvrier state migrate
+```
+
+`ouvrier state migrate` prints each schema version it applies, is a no-op
+when the schema is already current, and is safe to run concurrently thanks to
+the same advisory lock. It works for SQLite too (`OUVRIER_STATE_PATH`), where
+it stamps `PRAGMA user_version`. Ouvrier v0.3.x migrations are additive-only
+— new tables, columns, and indexes, never destructive changes — so a freshly
+migrated schema keeps serving the previous binary during a rolling deploy.
 
 ## Testing Workers
 
@@ -726,6 +752,7 @@ ouvrier logs [--url URL] [--token TOKEN] [--last N]
 ouvrier trace <exec-id> [--url URL] [--token TOKEN]
 ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME]
 ouvrier deploy docker [--image IMAGE] [--tag TAG] [--push] [--force]
+ouvrier state migrate
 ```
 
 `ouvrier dev` runs `go run .`, streams output, forwards shutdown signals, and

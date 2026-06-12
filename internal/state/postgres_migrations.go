@@ -101,11 +101,13 @@ var postgresMigrations = []postgresMigration{
 
 // migrate applies pending migrations inside one transaction, serialized by a
 // transaction-scoped advisory lock so concurrent replicas starting against the
-// same database (and schema) cannot race the DDL.
-func (s *PostgresStore) migrate(ctx context.Context) error {
+// same database (and schema) cannot race the DDL. It returns the versions
+// applied by this call (empty when the schema was already current), so
+// `ouvrier state migrate` can report what it did.
+func (s *PostgresStore) migrate(ctx context.Context) ([]int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("postgres state store: begin migration: %w", err)
+		return nil, fmt.Errorf("postgres state store: begin migration: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback()
@@ -113,51 +115,107 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	if _, err := tx.ExecContext(ctx,
 		`SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext('ouvrier_state_migrations'))`); err != nil {
-		return fmt.Errorf("postgres state store: acquire migration lock: %w", err)
+		return nil, fmt.Errorf("postgres state store: acquire migration lock: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ouvrier_schema_migrations (
 		version BIGINT PRIMARY KEY,
 		applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`); err != nil {
-		return fmt.Errorf("postgres state store: ensure migrations table: %w", err)
+		return nil, fmt.Errorf("postgres state store: ensure migrations table: %w", err)
 	}
 
 	applied := map[int]bool{}
 	rows, err := tx.QueryContext(ctx, `SELECT version FROM ouvrier_schema_migrations`)
 	if err != nil {
-		return fmt.Errorf("postgres state store: read applied migrations: %w", err)
+		return nil, fmt.Errorf("postgres state store: read applied migrations: %w", err)
 	}
 	for rows.Next() {
 		var version int
 		if err := rows.Scan(&version); err != nil {
 			rows.Close()
-			return fmt.Errorf("postgres state store: scan applied migration: %w", err)
+			return nil, fmt.Errorf("postgres state store: scan applied migration: %w", err)
 		}
 		applied[version] = true
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return fmt.Errorf("postgres state store: read applied migrations: %w", err)
+		return nil, fmt.Errorf("postgres state store: read applied migrations: %w", err)
 	}
 	rows.Close()
 
+	var appliedNow []int
 	for _, migration := range postgresMigrations {
 		if applied[migration.version] {
 			continue
 		}
 		for _, statement := range migration.statements {
 			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("postgres state store: apply migration %d: %w", migration.version, err)
+				return nil, fmt.Errorf("postgres state store: apply migration %d: %w", migration.version, err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO ouvrier_schema_migrations (version) VALUES ($1)`, migration.version); err != nil {
-			return fmt.Errorf("postgres state store: record migration %d: %w", migration.version, err)
+			return nil, fmt.Errorf("postgres state store: record migration %d: %w", migration.version, err)
 		}
+		appliedNow = append(appliedNow, migration.version)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("postgres state store: commit migrations: %w", err)
+		return nil, fmt.Errorf("postgres state store: commit migrations: %w", err)
+	}
+	return appliedNow, nil
+}
+
+// verifySchema checks that every known migration is recorded as applied,
+// without ever creating or mutating schema objects (not even the migrations
+// table). It backs OUVRIER_STATE_MIGRATE=off for DML-only roles.
+func (s *PostgresStore) verifySchema(ctx context.Context) error {
+	pending, err := s.pendingMigrations(ctx)
+	if err != nil {
+		return err
+	}
+	if len(pending) > 0 {
+		return fmt.Errorf("postgres state store: %d schema migration(s) pending starting at version %d; run \"ouvrier state migrate\" with a DDL-capable role (%s=%s never runs DDL)",
+			len(pending), pending[0], EnvStateMigrate, MigrateOff)
 	}
 	return nil
+}
+
+// pendingMigrations returns the versions in postgresMigrations not yet
+// recorded in ouvrier_schema_migrations. A missing migrations table means
+// nothing has been applied. to_regclass resolves via search_path, matching
+// where the migrations would run.
+func (s *PostgresStore) pendingMigrations(ctx context.Context) ([]int, error) {
+	var tableExists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT to_regclass('ouvrier_schema_migrations') IS NOT NULL`).Scan(&tableExists); err != nil {
+		return nil, fmt.Errorf("postgres state store: check migrations table: %w", err)
+	}
+
+	applied := map[int]bool{}
+	if tableExists {
+		rows, err := s.db.QueryContext(ctx, `SELECT version FROM ouvrier_schema_migrations`)
+		if err != nil {
+			return nil, fmt.Errorf("postgres state store: read applied migrations: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var version int
+			if err := rows.Scan(&version); err != nil {
+				return nil, fmt.Errorf("postgres state store: scan applied migration: %w", err)
+			}
+			applied[version] = true
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("postgres state store: read applied migrations: %w", err)
+		}
+	}
+
+	var pending []int
+	for _, migration := range postgresMigrations {
+		if !applied[migration.version] {
+			pending = append(pending, migration.version)
+		}
+	}
+	return pending, nil
 }

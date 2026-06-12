@@ -33,23 +33,41 @@ type PostgresStore struct {
 	db *sql.DB
 }
 
-// NewPostgresStoreFromEnv builds a PostgresStore from OUVRIER_STATE_DSN and
-// OUVRIER_STATE_MAX_CONNS. A missing DSN is a startup error naming both
-// configuration variables.
+// NewPostgresStoreFromEnv builds a PostgresStore from OUVRIER_STATE_DSN,
+// OUVRIER_STATE_MAX_CONNS, and OUVRIER_STATE_MIGRATE. A missing DSN is a
+// startup error naming both configuration variables.
 func NewPostgresStoreFromEnv() (*PostgresStore, error) {
+	migrateMode, err := migrateModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return newPostgresStoreFromEnv(migrateMode)
+}
+
+func newPostgresStoreFromEnv(migrateMode string) (*PostgresStore, error) {
+	dsn, maxConns, err := postgresConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return newPostgresStore(context.Background(), dsn, maxConns, migrateMode)
+}
+
+// postgresConfigFromEnv reads and validates OUVRIER_STATE_DSN and
+// OUVRIER_STATE_MAX_CONNS.
+func postgresConfigFromEnv() (string, int, error) {
 	dsn := strings.TrimSpace(os.Getenv(EnvStateDSN))
 	if dsn == "" {
-		return nil, fmt.Errorf("postgres state store: %s is required when %s=%s", EnvStateDSN, EnvStateBackend, BackendPostgres)
+		return "", 0, fmt.Errorf("postgres state store: %s is required when %s=%s", EnvStateDSN, EnvStateBackend, BackendPostgres)
 	}
 	maxConns := postgresDefaultMaxOpenConns
 	if raw := strings.TrimSpace(os.Getenv(EnvStateMaxConns)); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 {
-			return nil, fmt.Errorf("postgres state store: %s must be a positive integer, got %q", EnvStateMaxConns, raw)
+			return "", 0, fmt.Errorf("postgres state store: %s must be a positive integer, got %q", EnvStateMaxConns, raw)
 		}
 		maxConns = parsed
 	}
-	return newPostgresStore(context.Background(), dsn, maxConns)
+	return dsn, maxConns, nil
 }
 
 func NewPostgresStore(dsn string) (*PostgresStore, error) {
@@ -57,10 +75,31 @@ func NewPostgresStore(dsn string) (*PostgresStore, error) {
 }
 
 func NewPostgresStoreWithContext(ctx context.Context, dsn string) (*PostgresStore, error) {
-	return newPostgresStore(ctx, dsn, postgresDefaultMaxOpenConns)
+	return newPostgresStore(ctx, dsn, postgresDefaultMaxOpenConns, MigrateAuto)
 }
 
-func newPostgresStore(ctx context.Context, dsn string, maxOpenConns int) (*PostgresStore, error) {
+func newPostgresStore(ctx context.Context, dsn string, maxOpenConns int, migrateMode string) (*PostgresStore, error) {
+	store, err := openPostgresStore(ctx, dsn, maxOpenConns)
+	if err != nil {
+		return nil, err
+	}
+	if migrateMode == MigrateOff {
+		if err := store.verifySchema(ctx); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		return store, nil
+	}
+	if _, err := store.migrate(ctx); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// openPostgresStore builds the connection pool and pings it without touching
+// the schema, so callers decide whether to migrate or only verify.
+func openPostgresStore(ctx context.Context, dsn string, maxOpenConns int) (*PostgresStore, error) {
 	ctx, err := activeContext(ctx)
 	if err != nil {
 		return nil, err
@@ -94,10 +133,6 @@ func newPostgresStore(ctx context.Context, dsn string, maxOpenConns int) (*Postg
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("postgres state store: ping: %w", err)
-	}
-	if err := store.migrate(ctx); err != nil {
-		_ = store.Close()
-		return nil, err
 	}
 	return store, nil
 }

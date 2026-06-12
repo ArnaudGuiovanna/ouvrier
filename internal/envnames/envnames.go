@@ -13,6 +13,7 @@ const (
 	StatePath     = "OUVRIER_STATE_PATH"
 	StateDSN      = "OUVRIER_STATE_DSN"
 	StateMaxConns = "OUVRIER_STATE_MAX_CONNS"
+	StateMigrate  = "OUVRIER_STATE_MIGRATE"
 
 	LegacyEnv        = "PIP_ENV"
 	LegacyAdminToken = "PIP_ADMIN_TOKEN"
