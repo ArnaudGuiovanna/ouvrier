@@ -168,6 +168,26 @@ func (rt httpRuntime) serveAdminRunRecover(w http.ResponseWriter, req *http.Requ
 		return
 	}
 
+	// Refusals before claiming the lease. A run parked on a pending approval
+	// is suspended, not orphaned: a forced replay would mint a duplicate
+	// approval (the same gate durableRunClaimable applies to the automatic
+	// scan).
+	pending, err := rt.durableRunHasPendingApproval(req.Context(), execID)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	if pending {
+		writeJSONStatus(w, http.StatusConflict, "approval_pending")
+		return
+	}
+	// A journal row that survived a prune failure must never flip a completed
+	// run back to running.
+	if execution.Status == state.ExecutionCompleted {
+		writeJSONStatus(w, http.StatusConflict, "run_completed")
+		return
+	}
+
 	// The operator-forced replay still runs under a claimed run lease: a live
 	// run (or an in-flight automatic recovery) holding the lease wins.
 	lease, acquired, err := leases.AcquireLease(req.Context(), durableRunLeaseName(execID), cronReplicaID(), rt.durableRunLeaseTTLForRuntime())

@@ -248,19 +248,31 @@ func (rt httpRuntime) durableRunClaimable(ctx context.Context, journal state.Run
 	if execution.Status != state.ExecutionRunning {
 		return execution, false, nil
 	}
-	approvals, err := rt.stateStore.ApprovalsForExecution(ctx, journal.ExecID)
-	if err != nil {
+	parked, err := rt.durableRunHasPendingApproval(ctx, journal.ExecID)
+	if err != nil || parked {
+		// Suspended awaiting a human decision: not orphaned, replaying it
+		// would mint a duplicate approval. The scan picks the run up once the
+		// record is approved (cross-restart approval resume).
 		return execution, false, err
+	}
+	return execution, true, nil
+}
+
+// durableRunHasPendingApproval reports whether the run is parked on a pending
+// human approval. Both the automatic scan and the operator-forced
+// POST /admin/runs/{execID}/recover must refuse such a run: replaying it
+// would mint a duplicate approval.
+func (rt httpRuntime) durableRunHasPendingApproval(ctx context.Context, execID string) (bool, error) {
+	approvals, err := rt.stateStore.ApprovalsForExecution(ctx, execID)
+	if err != nil {
+		return false, err
 	}
 	for _, approval := range approvals {
 		if approval.Status == state.ApprovalPending {
-			// Suspended awaiting a human decision: not orphaned, replaying it
-			// would mint a duplicate approval. The scan picks the run up once
-			// the record is approved (cross-restart approval resume).
-			return execution, false, nil
+			return true, nil
 		}
 	}
-	return execution, true, nil
+	return false, nil
 }
 
 // recoverClaimedDurableRun applies the replay policy to one claimed run while

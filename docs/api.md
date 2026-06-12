@@ -342,6 +342,14 @@ GET  /metrics              # Prometheus text exposition (admin token required)
 GET  /dev                  # dev-mode trace viewer (admin token required)
 ```
 
+`POST /admin/runs/<exec-id>/recover` refuses with `409 Conflict` when the run
+cannot be force-replayed: `run_active` (a live run lease protects it — the run
+is still heartbeating, or an automatic recovery is in flight),
+`approval_pending` (the run is parked on a pending human approval; a forced
+replay would mint a duplicate approval), or `run_completed` (the execution
+already completed; a journal row that survived a prune failure must never flip
+a completed run back to running).
+
 Use the `ouvrier status` / `ouvrier logs` / `ouvrier trace` CLI to consume
 them from the terminal.
 

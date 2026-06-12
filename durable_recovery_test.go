@@ -295,12 +295,80 @@ func TestDurableRecoveryFailsLoudOnOpenWriteIntentAndOperatorRecovers(t *testing
 		t.Fatalf("POST recover status = %d body=%s, want %d", recoverRec.Code, recoverRec.Body.String(), http.StatusAccepted)
 	}
 
-	waitForCondition(t, 5*time.Second, "forced replay completes and prunes the journal", func() bool {
-		_, ok, err := store.RunJournal(context.Background(), execID)
-		return err == nil && !ok
+	// finishPipelineExecution prunes the journal BEFORE saving the completed
+	// execution, so poll on the status (the last write of the replay) and only
+	// then assert the prune — polling on the prune races the final
+	// SaveExecution.
+	waitForCondition(t, 5*time.Second, "forced replay completes the execution", func() bool {
+		execution, ok, err := store.Execution(context.Background(), execID)
+		return err == nil && ok && execution.Status == state.ExecutionCompleted
 	})
-	if status := durableExecutionStatus(t, store, execID); status != state.ExecutionCompleted {
-		t.Fatalf("execution status = %q, want completed after forced replay", status)
+	if _, ok, err := store.RunJournal(context.Background(), execID); err != nil || ok {
+		t.Fatalf("journal ok=%v err=%v, want pruned after forced replay", ok, err)
+	}
+}
+
+// TestDurableRecoveryFailsLoudOnCompletedSideEffectingIntent covers the other
+// half of the fail-loud policy: a COMPLETED side-effecting intent on the
+// interrupted step means the effect already happened and has no dedup, so an
+// auto-replay would duplicate it — the scan must mark the run
+// replay_indeterminate_tool, exactly like the open-intent case.
+func TestDurableRecoveryFailsLoudOnCompletedSideEffectingIntent(t *testing.T) {
+	store := newDurableTestStore(t)
+	nodes := []Node{
+		From("POST /tickets"),
+		Pipe("step zero", Model("durable/c0")),
+		Pipe("write step",
+			Model("durable/c1"),
+			Tool("send_email", func(ctx context.Context) error { return nil }, SideEffecting("email")),
+		),
+		Reply(Accepted()),
+	}
+	plan := compileDurableTestPlan(t, nodes)
+
+	const execID = "exec_recover_completed_intent"
+	seedInterruptedDurableRun(t, store, plan, execID, "trace_recover_completed_intent", `{"title":"broken"}`)
+	seedDurableCheckpoint(t, store, execID, 0, `{"step":"zero"}`)
+	// Killed AFTER the write tool returned but BEFORE the step checkpointed:
+	// the intent is completed, but replaying the step would send the email
+	// twice.
+	if err := store.BeginToolIntent(context.Background(), state.ToolIntent{
+		ExecID: execID, ToolCallID: "call_email_1", StepIndex: 1,
+		ToolName: "send_email", Effect: string(policy.EffectSideEffecting), IdemKey: "args:abc",
+	}); err != nil {
+		t.Fatalf("seed BeginToolIntent returned error: %v", err)
+	}
+	if err := store.CompleteToolIntent(context.Background(), execID, "call_email_1"); err != nil {
+		t.Fatalf("seed CompleteToolIntent returned error: %v", err)
+	}
+
+	scripted := &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
+		t.Errorf("scan called model %q, want no auto-replay over a completed side-effecting intent", model)
+		return endTurn(`{"status":"duplicated"}`)
+	}}
+	rt := httpRuntime{
+		provider:    scripted,
+		stateStore:  store,
+		eventStream: newDurableRecoveryEventStream(t),
+		durableRuns: newDurableRecoveryTestConfig(time.Minute),
+	}
+	runDurableRecoveryScanNow(t, rt, plan)
+
+	if status := durableExecutionStatus(t, store, execID); status != state.ExecutionFailed {
+		t.Fatalf("execution status = %q, want failed-loud on completed side-effecting intent", status)
+	}
+	indeterminate := recoveryEventsOfKind(t, store, execID, events.EventReplayIndeterminateTool)
+	if len(indeterminate) != 1 {
+		t.Fatalf("replay_indeterminate_tool events = %+v, want exactly one", indeterminate)
+	}
+	if tool, _ := indeterminate[0].Payload["tool"].(string); tool != "send_email" {
+		t.Fatalf("indeterminate payload tool = %v, want send_email", indeterminate[0].Payload)
+	}
+	if open, ok := indeterminate[0].Payload["open"].(bool); !ok || open {
+		t.Fatalf("indeterminate payload open = %v, want false (the intent completed)", indeterminate[0].Payload)
+	}
+	if _, ok, err := store.RunJournal(context.Background(), execID); err != nil || !ok {
+		t.Fatalf("journal after indeterminate marking ok=%v err=%v, want kept for the operator", ok, err)
 	}
 }
 
@@ -852,5 +920,100 @@ func TestAdminRunsEndpointsRequireAuthAndValidateInput(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/runs/exec_absent/recover", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated recover status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestAdminRunsRecoverRefusesActiveParkedAndCompletedRuns covers the recover
+// endpoint's refusals: 409 run_active while a live run lease protects the
+// run, 409 approval_pending for a run parked on a pending approval (a forced
+// replay would mint a duplicate), and 409 run_completed for a completed
+// execution whose journal row survived a prune failure.
+func TestAdminRunsRecoverRefusesActiveParkedAndCompletedRuns(t *testing.T) {
+	store := newDurableTestStore(t)
+	nodes := []Node{
+		From("POST /tickets"),
+		Pipe("only step", Model("durable/refuse")),
+		Reply(Accepted()),
+	}
+	plan := compileDurableTestPlan(t, nodes)
+	handler, err := newHTTPHandlerWithRuntime(nodes, httpRuntime{
+		provider: &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
+			t.Errorf("refused recover called model %q, want no replay", model)
+			return endTurn(`{"status":"replayed"}`)
+		}},
+		stateStore:  store,
+		eventStream: newDurableRecoveryEventStream(t),
+		adminToken:  "secret",
+		durableRuns: newDurableRunsConfig(0),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+	postRecover := func(t *testing.T, execID string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/runs/"+execID+"/recover", nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	assertConflict := func(t *testing.T, rec *httptest.ResponseRecorder, code string) {
+		t.Helper()
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("recover status = %d body=%s, want %d", rec.Code, rec.Body.String(), http.StatusConflict)
+		}
+		var response httpStatusResponse
+		decodeAdminJSON(t, rec, &response)
+		if response.Status != code {
+			t.Fatalf("recover refusal code = %q, want %q", response.Status, code)
+		}
+	}
+
+	// A live lease (the run is still heartbeating on another replica, or an
+	// automatic recovery is in flight) wins over the operator.
+	const liveExecID = "exec_recover_live"
+	seedInterruptedDurableRun(t, store, plan, liveExecID, "trace_recover_live", `{"title":"live"}`)
+	if _, acquired, err := store.AcquireLease(context.Background(), durableRunLeaseName(liveExecID), "replica-live", 30*time.Second); err != nil || !acquired {
+		t.Fatalf("AcquireLease acquired=%v err=%v, want the live run holding its lease", acquired, err)
+	}
+	assertConflict(t, postRecover(t, liveExecID), "run_active")
+	if status := durableExecutionStatus(t, store, liveExecID); status != state.ExecutionRunning {
+		t.Fatalf("live run status = %q, want untouched running", status)
+	}
+
+	// A run parked on a pending approval is suspended, not orphaned: forcing
+	// a replay would mint a duplicate approval.
+	const parkedExecID = "exec_recover_parked"
+	seedInterruptedDurableRun(t, store, plan, parkedExecID, "trace_recover_parked", `{"title":"parked"}`)
+	if err := store.SaveApproval(context.Background(), state.PendingApproval{
+		ID: "appr_recover_parked", ExecID: parkedExecID, ToolName: "wire_payment",
+		ToolCallID: "call_wire_1", Status: state.ApprovalPending,
+	}); err != nil {
+		t.Fatalf("SaveApproval returned error: %v", err)
+	}
+	assertConflict(t, postRecover(t, parkedExecID), "approval_pending")
+	if status := durableExecutionStatus(t, store, parkedExecID); status != state.ExecutionRunning {
+		t.Fatalf("parked run status = %q, want untouched running", status)
+	}
+	if _, ok, err := store.RunJournal(context.Background(), parkedExecID); err != nil || !ok {
+		t.Fatalf("parked journal ok=%v err=%v, want kept", ok, err)
+	}
+
+	// A journal row that survived a prune failure must never flip its
+	// completed run back to running.
+	const completedExecID = "exec_recover_completed"
+	seedInterruptedDurableRun(t, store, plan, completedExecID, "trace_recover_completed", `{"title":"done"}`)
+	if err := store.SaveExecution(context.Background(), state.Execution{
+		ExecID:      completedExecID,
+		TraceID:     "trace_recover_completed",
+		Status:      state.ExecutionCompleted,
+		StartedAt:   time.Now().UTC().Add(-time.Minute),
+		CompletedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveExecution returned error: %v", err)
+	}
+	assertConflict(t, postRecover(t, completedExecID), "run_completed")
+	if status := durableExecutionStatus(t, store, completedExecID); status != state.ExecutionCompleted {
+		t.Fatalf("completed run status = %q, want still completed", status)
 	}
 }
