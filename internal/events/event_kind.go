@@ -58,6 +58,8 @@ const (
 	EventCronLeaseLost     EventKind = "cron_lease_lost"
 	EventCronTickSkipped   EventKind = "cron_tick_skipped"
 
+	EventDurableRunPruneFailed EventKind = "durable_run_prune_failed"
+
 	EventSinkLogged EventKind = "sink_logged"
 )
 

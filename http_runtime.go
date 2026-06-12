@@ -46,6 +46,9 @@ type httpRuntime struct {
 	// cronLease is set per fire by the leased cron loop so the fire's
 	// pipeline events carry the leadership lease name, holder, and fence.
 	cronLease *cronLeaseStamp
+	// durableRuns enables the step-checkpoint run journal
+	// (OUVRIER_DURABLE_RUNS=1); nil means off — zero journal writes.
+	durableRuns *durableRunsConfig
 }
 
 func defaultHTTPRuntime() httpRuntime {
@@ -71,10 +74,19 @@ func defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 		return httpRuntime{}, nil, err
 	}
 	rt.stateStore = store
-	if err := seedHTTPEventStreamFromStore(&rt, store); err != nil {
+	closeStore := func() {
 		if closer, ok := store.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
+	}
+	durable, err := durableRunsConfigForStore(store)
+	if err != nil {
+		closeStore()
+		return httpRuntime{}, nil, err
+	}
+	rt.durableRuns = durable
+	if err := seedHTTPEventStreamFromStore(&rt, store); err != nil {
+		closeStore()
 		return httpRuntime{}, nil, err
 	}
 	return rt, func() error {
@@ -131,7 +143,26 @@ func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtime
 		return pipelineResult, err
 	}
 
-	result, err := rt.runStepsResult(ctx, plan.Steps, input, planRunScope{parentSession: &pipelineSession})
+	scope := planRunScope{parentSession: &pipelineSession}
+	if rt.durableRuns != nil && rt.stateStore != nil {
+		// Journal the run before its first step so a crash at any point
+		// leaves a recoverable record. A failed journal write fails the run:
+		// the operator opted in to durability, silently running without it
+		// would be a lie.
+		if err := rt.stateStore.SaveRunJournal(ctx, state.RunJournal{
+			ExecID:      pipelineSession.ExecID,
+			PlanKey:     durablePlanKey(plan),
+			PlanHash:    durablePlanHash(plan.Steps),
+			TriggerKind: string(plan.Trigger.Kind),
+			Input:       input,
+		}); err != nil {
+			err = fmt.Errorf("durable run journal: %w", err)
+			return pipelineResult, errors.Join(err, rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err))
+		}
+		scope.durable = &durableStepJournal{store: rt.stateStore, execID: pipelineSession.ExecID}
+	}
+
+	result, err := rt.runStepsResult(ctx, plan.Steps, input, scope)
 	if !result.HasSession {
 		result.Session = pipelineSession
 		result.HasSession = true
@@ -224,6 +255,7 @@ func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runti
 	if rt.stateStore == nil {
 		return emitErr
 	}
+	rt.pruneDurableRunJournal(finishCtx, session, status)
 	return errors.Join(emitErr, rt.stateStore.SaveExecution(finishCtx, state.Execution{
 		ExecID:      session.ExecID,
 		TraceID:     session.TraceID,
@@ -233,6 +265,35 @@ func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runti
 	}))
 }
 
+// pruneDurableRunJournal applies durable-run retention when an execution
+// finishes: a successful run's journal rows are pruned immediately, and the
+// retention sweep removes failed/suspended journals older than
+// OUVRIER_DURABLE_RETENTION. Prune failures never fail the (already
+// finished) run; they emit durable_run_prune_failed and surface in
+// /admin/health.
+func (rt httpRuntime) pruneDurableRunJournal(ctx context.Context, session runtimeplan.Session, status string) {
+	if rt.durableRuns == nil || rt.stateStore == nil {
+		return
+	}
+	if status == "completed" {
+		if err := rt.stateStore.PruneRunJournal(ctx, session.ExecID); err != nil {
+			rt.recordDurablePruneFailure(ctx, session, "completed_run", err)
+		}
+	}
+	cutoff := time.Now().UTC().Add(-rt.durableRuns.retention)
+	if _, err := rt.stateStore.PruneRunJournalsBefore(ctx, cutoff); err != nil {
+		rt.recordDurablePruneFailure(ctx, session, "retention", err)
+	}
+}
+
+func (rt httpRuntime) recordDurablePruneFailure(ctx context.Context, session runtimeplan.Session, scope string, err error) {
+	rt.durableRuns.health.recordPruneFailure(err)
+	_ = rt.emitSessionEvent(ctx, session, events.EventDurableRunPruneFailed, map[string]any{
+		"scope": scope,
+		"error": err.Error(),
+	})
+}
+
 func runtimeCancellationError(err error) bool {
 	return errors.Is(err, context.Canceled)
 }
@@ -240,6 +301,11 @@ func runtimeCancellationError(err error) bool {
 type planRunScope struct {
 	parentSession *runtimeplan.Session
 	budgetLedger  *harness.BudgetLedger
+	// durable is non-nil only in the top-level step loop of a journaled run:
+	// it checkpoints completed top-level steps and installs the tool intent
+	// recorder. Parallel/Map strip it before running sub-branches (they
+	// checkpoint as one unit) and subagents build their own scope without it.
+	durable *durableStepJournal
 }
 
 type planRunResult struct {
@@ -274,9 +340,15 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 
 	current := input
 	for stepIndex, step := range steps {
+		// stepCtx carries the durable tool-intent recorder for this top-level
+		// step; with durable runs off it is exactly ctx.
+		stepCtx := scope.durable.intentContext(ctx, stepIndex)
 		if step.Kind == runtimeplan.StepParallel {
-			stepResult, err := rt.runParallelStepResult(ctx, step, current, scope)
+			stepResult, err := rt.runParallelStepResult(stepCtx, step, current, scope)
 			if err != nil {
+				return stepResult, err
+			}
+			if err := scope.durable.checkpoint(ctx, stepIndex, stepResult.Output); err != nil {
 				return stepResult, err
 			}
 			current = stepResult.Output
@@ -284,8 +356,11 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			continue
 		}
 		if step.Kind == runtimeplan.StepMap {
-			stepResult, err := rt.runMapStepResult(ctx, step, current, scope)
+			stepResult, err := rt.runMapStepResult(stepCtx, step, current, scope)
 			if err != nil {
+				return stepResult, err
+			}
+			if err := scope.durable.checkpoint(ctx, stepIndex, stepResult.Output); err != nil {
 				return stepResult, err
 			}
 			current = stepResult.Output
@@ -369,7 +444,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			_ = closeMCP()
 			return result, err
 		}
-		out, err := h.Run(ctx, current)
+		out, err := h.Run(stepCtx, current)
 		result.Session = out.Session
 		result.HasSession = out.Session.SessionID != ""
 		closeErr := closeMCP()
@@ -377,8 +452,9 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			result.Output = out.Text
 			if suspended, ok := harness.SuspendedRun(err); ok {
 				remainingSteps := append([]runtimeplan.Step(nil), steps[stepIndex+1:]...)
+				suspendedStepIndex := stepIndex
 				resume := func(resumeCtx context.Context) (planRunResult, error) {
-					resumed, resumeErr := suspended.Resume(resumeCtx)
+					resumed, resumeErr := suspended.Resume(scope.durable.intentContext(resumeCtx, suspendedStepIndex))
 					resumedResult := planRunResult{
 						Output:     resumed.Text,
 						Session:    resumed.Session,
@@ -390,10 +466,18 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 					if resumed.Status != harness.StatusCompleted {
 						return resumedResult, fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, resumed.Status)
 					}
+					if err := scope.durable.checkpoint(resumeCtx, suspendedStepIndex, resumed.Text); err != nil {
+						return resumedResult, err
+					}
 					if len(remainingSteps) == 0 {
 						return resumedResult, nil
 					}
-					restResult, restErr := rt.runStepsResult(resumeCtx, remainingSteps, resumed.Text, scope)
+					// Remaining steps run in a fresh local loop: offset the
+					// checkpoint base so (exec_id, step_index) stays aligned
+					// with the original plan.
+					restScope := scope
+					restScope.durable = scope.durable.withBase(suspendedStepIndex + 1)
+					restResult, restErr := rt.runStepsResult(resumeCtx, remainingSteps, resumed.Text, restScope)
 					if !restResult.HasSession && resumedResult.HasSession {
 						restResult.Session = resumedResult.Session
 						restResult.HasSession = true
@@ -410,6 +494,10 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		if out.Status != harness.StatusCompleted {
 			result.Output = out.Text
 			return result, fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, out.Status)
+		}
+		if err := scope.durable.checkpoint(ctx, stepIndex, out.Text); err != nil {
+			result.Output = out.Text
+			return result, err
 		}
 		current = out.Text
 		result.Output = current

@@ -113,6 +113,41 @@ var postgresMigrations = []postgresMigration{
 			)`,
 		},
 	},
+	{
+		// Durable runs (OUVRIER_DURABLE_RUNS=1): step-checkpoint journal and
+		// tool intents. Journal input and checkpoint output are redacted
+		// before they reach the database; tool intents are metadata only.
+		version: 3,
+		statements: []string{
+			`CREATE TABLE ouvrier_run_journal (
+				exec_id TEXT PRIMARY KEY,
+				plan_key TEXT NOT NULL,
+				plan_hash TEXT NOT NULL,
+				trigger_kind TEXT NOT NULL,
+				input TEXT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL
+			)`,
+			`CREATE INDEX idx_ouvrier_run_journal_created_at ON ouvrier_run_journal(created_at)`,
+			`CREATE TABLE ouvrier_run_checkpoints (
+				exec_id TEXT NOT NULL,
+				step_index BIGINT NOT NULL,
+				output TEXT NOT NULL,
+				completed_at TIMESTAMPTZ NOT NULL,
+				PRIMARY KEY (exec_id, step_index)
+			)`,
+			`CREATE TABLE ouvrier_tool_intents (
+				exec_id TEXT NOT NULL,
+				tool_call_id TEXT NOT NULL,
+				step_index BIGINT NOT NULL,
+				tool_name TEXT NOT NULL,
+				effect TEXT NOT NULL,
+				idem_key TEXT NOT NULL,
+				started_at TIMESTAMPTZ NOT NULL,
+				completed_at TIMESTAMPTZ,
+				PRIMARY KEY (exec_id, tool_call_id)
+			)`,
+		},
+	},
 }
 
 // migrate applies pending migrations inside one transaction, serialized by a

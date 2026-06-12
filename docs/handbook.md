@@ -576,6 +576,8 @@ OUVRIER_STATE_BACKEND=sqlite  # sqlite, postgres, or memory
 OUVRIER_STATE_PATH=.ouvrier/state.db
 OUVRIER_STATE_DSN=...         # postgres connection string; secret, never logged
 OUVRIER_STATE_MIGRATE=auto    # auto (default) applies schema migrations at startup; off only verifies
+OUVRIER_DURABLE_RUNS=1        # opt-in step-checkpoint run journal (default off); refuses the memory backend
+OUVRIER_DURABLE_RETENTION=72h # how long failed/suspended run journals are kept (default 72h)
 OUVRIER_ADMIN_TOKEN=...
 OUVRIER_ENV=dev               # enables unauthenticated admin only when no token is set
 ```

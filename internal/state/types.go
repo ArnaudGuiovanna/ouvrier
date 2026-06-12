@@ -28,6 +28,27 @@ type Store interface {
 	Approval(context.Context, string) (PendingApproval, bool, error)
 	PendingApprovals(context.Context) ([]PendingApproval, error)
 	ResolveApproval(context.Context, string, ApprovalStatus, string) (PendingApproval, error)
+
+	// Durable runs (step-checkpoint journal, tool intents, retention).
+	// SaveRunJournal and SaveRunCheckpoint upsert on their primary keys
+	// ((exec_id) and (exec_id, step_index)); BeginToolIntent upserts on
+	// (exec_id, tool_call_id) and re-opens the intent (completed_at NULL).
+	// CompleteToolIntent stamps completed_at and errors when no intent row
+	// exists. RunCheckpoints orders by step index, ToolIntents by started_at
+	// then tool call id, RunJournals by created_at then exec id.
+	// PruneRunJournal deletes one execution's journal, checkpoints, and
+	// intents; PruneRunJournalsBefore deletes every journal created before
+	// the cutoff (cascading the same way) and returns the pruned exec ids.
+	SaveRunJournal(context.Context, RunJournal) error
+	RunJournal(context.Context, string) (RunJournal, bool, error)
+	RunJournals(context.Context) ([]RunJournal, error)
+	SaveRunCheckpoint(context.Context, RunCheckpoint) error
+	RunCheckpoints(context.Context, string) ([]RunCheckpoint, error)
+	BeginToolIntent(context.Context, ToolIntent) error
+	CompleteToolIntent(context.Context, string, string) error
+	ToolIntents(context.Context, string) ([]ToolIntent, error)
+	PruneRunJournal(context.Context, string) error
+	PruneRunJournalsBefore(context.Context, time.Time) ([]string, error)
 }
 
 // ApprovalStatus is the lifecycle state of a human-in-the-loop approval.

@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultSQLitePath   = ".ouvrier/state.db"
-	sqliteSchemaVersion = 5
+	sqliteSchemaVersion = 6
 )
 
 type SQLiteStore struct {
@@ -315,5 +315,35 @@ var sqliteSchemaStatements = []string{
 		acquired_at TEXT NOT NULL,
 		renewed_at TEXT NOT NULL,
 		expires_at TEXT NOT NULL
+	)`,
+	// Schema v6: durable runs — step-checkpoint journal and tool intents
+	// (OUVRIER_DURABLE_RUNS=1). Journal input and checkpoint output are
+	// redacted before they reach disk; tool intents are metadata only.
+	`CREATE TABLE IF NOT EXISTS ouvrier_run_journal (
+		exec_id TEXT PRIMARY KEY,
+		plan_key TEXT NOT NULL,
+		plan_hash TEXT NOT NULL,
+		trigger_kind TEXT NOT NULL,
+		input TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ouvrier_run_journal_created_at ON ouvrier_run_journal(created_at)`,
+	`CREATE TABLE IF NOT EXISTS ouvrier_run_checkpoints (
+		exec_id TEXT NOT NULL,
+		step_index INTEGER NOT NULL,
+		output TEXT NOT NULL,
+		completed_at TEXT NOT NULL,
+		PRIMARY KEY (exec_id, step_index)
+	)`,
+	`CREATE TABLE IF NOT EXISTS ouvrier_tool_intents (
+		exec_id TEXT NOT NULL,
+		tool_call_id TEXT NOT NULL,
+		step_index INTEGER NOT NULL,
+		tool_name TEXT NOT NULL,
+		effect TEXT NOT NULL,
+		idem_key TEXT NOT NULL,
+		started_at TEXT NOT NULL,
+		completed_at TEXT,
+		PRIMARY KEY (exec_id, tool_call_id)
 	)`,
 }

@@ -162,7 +162,7 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 		if err := reserveIdempotency(toolCtx, tool, call.Arguments); err != nil {
 			return errorResult(call, err), nil
 		}
-		return e.executeWithRetry(toolCtx, tool, call, func() (provider.ToolResult, error) {
+		return e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
 			result, err := tool.handler.Execute(toolCtx, call)
 			if err != nil {
 				return provider.ToolResult{}, toolExecutionFailure{err: err}
@@ -181,9 +181,32 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 	if err != nil {
 		return errorResult(call, err), nil
 	}
-	return e.executeWithRetry(toolCtx, tool, call, func() (provider.ToolResult, error) {
+	return e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
 		return toolResultFromValues(call, tool.fn.Call(args))
 	})
+}
+
+// executeWithIntent brackets a non-read tool invocation with the durable-run
+// tool intent: the row is written before the tool body runs and completed
+// once the call returns a definite outcome (success or a tool error result).
+// When err != nil the outcome is indeterminate (e.g. the context was
+// canceled mid-call) and the intent intentionally stays open for recovery to
+// inspect. With no recorder installed or a read-only tool this is exactly
+// executeWithRetry.
+func (e *Executor) executeWithIntent(ctx context.Context, tool registeredTool, call provider.ToolCall, invoke func() (provider.ToolResult, error)) (provider.ToolResult, error) {
+	completeIntent, err := beginToolIntent(ctx, tool, call)
+	if err != nil {
+		return errorResult(call, err), nil
+	}
+	result, err := e.executeWithRetry(ctx, tool, call, invoke)
+	if err == nil && completeIntent != nil {
+		if completeErr := completeIntent(ctx); completeErr != nil {
+			// Failing to persist the completion would leave a lie at rest
+			// (an open intent for a finished call); fail loudly instead.
+			return provider.ToolResult{}, completeErr
+		}
+	}
+	return result, err
 }
 
 func (e *Executor) executeWithRetry(ctx context.Context, tool registeredTool, call provider.ToolCall, invoke func() (provider.ToolResult, error)) (provider.ToolResult, error) {

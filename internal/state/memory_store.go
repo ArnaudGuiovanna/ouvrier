@@ -26,17 +26,23 @@ type MemoryStore struct {
 	approvalSeq     uint64
 	approvalOrder   map[string]uint64
 	leases          map[string]Lease
+	runJournals     map[string]RunJournal
+	runCheckpoints  map[string]map[int]RunCheckpoint
+	toolIntents     map[string]map[string]ToolIntent
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		executions:    make(map[string]Execution),
-		sessions:      make(map[string]runtimecore.Session),
-		idempotency:   make(map[string]string),
-		memory:        make(map[string]map[string]MemoryRecord),
-		approvals:     make(map[string]PendingApproval),
-		approvalOrder: make(map[string]uint64),
-		leases:        make(map[string]Lease),
+		executions:     make(map[string]Execution),
+		sessions:       make(map[string]runtimecore.Session),
+		idempotency:    make(map[string]string),
+		memory:         make(map[string]map[string]MemoryRecord),
+		approvals:      make(map[string]PendingApproval),
+		approvalOrder:  make(map[string]uint64),
+		leases:         make(map[string]Lease),
+		runJournals:    make(map[string]RunJournal),
+		runCheckpoints: make(map[string]map[int]RunCheckpoint),
+		toolIntents:    make(map[string]map[string]ToolIntent),
 	}
 }
 

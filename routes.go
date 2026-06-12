@@ -198,7 +198,38 @@ func (rt httpRuntime) serveAdminHealth(w http.ResponseWriter, req *http.Request)
 		return
 	}
 	response.CronLeases = cronLeases
+	durableRuns, err := adminDurableRuns(req.Context(), rt)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	response.DurableRuns = durableRuns
 	writeJSON(w, http.StatusOK, response)
+}
+
+// adminDurableRuns reports the durable-run journal posture when
+// OUVRIER_DURABLE_RUNS is on, in the same additive spirit as the cron_leases
+// section: retained journal count plus prune-failure observability.
+func adminDurableRuns(ctx context.Context, rt httpRuntime) (*adminDurableRunsResponse, error) {
+	if rt.durableRuns == nil || rt.stateStore == nil {
+		return nil, nil
+	}
+	journals, err := rt.stateStore.RunJournals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	failures, lastError, lastErrorAt := rt.durableRuns.health.snapshot()
+	response := &adminDurableRunsResponse{
+		Enabled:        true,
+		Retention:      rt.durableRuns.retention.String(),
+		Journals:       len(journals),
+		PruneFailures:  failures,
+		LastPruneError: lastError,
+	}
+	if !lastErrorAt.IsZero() {
+		response.LastPruneErrorAt = lastErrorAt.UTC().Format(time.RFC3339Nano)
+	}
+	return response, nil
 }
 
 // adminCronLeases lists the cron leader-leases stored on lease-capable
@@ -1234,13 +1265,26 @@ func adminExposureWarning(addr, adminToken string) string {
 }
 
 type adminHealthResponse struct {
-	Status           string                   `json:"status"`
-	StateStore       bool                     `json:"state_store"`
-	EventStream      bool                     `json:"event_stream"`
-	Executions       int                      `json:"executions,omitempty"`
-	RecentExecutions []adminExecutionResponse `json:"recent_executions,omitempty"`
-	StateDB          *adminStateDBResponse    `json:"state_db,omitempty"`
-	CronLeases       []adminCronLeaseResponse `json:"cron_leases,omitempty"`
+	Status           string                    `json:"status"`
+	StateStore       bool                      `json:"state_store"`
+	EventStream      bool                      `json:"event_stream"`
+	Executions       int                       `json:"executions,omitempty"`
+	RecentExecutions []adminExecutionResponse  `json:"recent_executions,omitempty"`
+	StateDB          *adminStateDBResponse     `json:"state_db,omitempty"`
+	CronLeases       []adminCronLeaseResponse  `json:"cron_leases,omitempty"`
+	DurableRuns      *adminDurableRunsResponse `json:"durable_runs,omitempty"`
+}
+
+// adminDurableRunsResponse reports the durable-run journal posture when
+// OUVRIER_DURABLE_RUNS is on: retained journal rows (failed/suspended/
+// in-flight runs) and prune-failure observability.
+type adminDurableRunsResponse struct {
+	Enabled          bool   `json:"enabled"`
+	Retention        string `json:"retention"`
+	Journals         int    `json:"journals"`
+	PruneFailures    uint64 `json:"prune_failures"`
+	LastPruneError   string `json:"last_prune_error,omitempty"`
+	LastPruneErrorAt string `json:"last_prune_error_at,omitempty"`
 }
 
 // adminCronLeaseResponse reports one cron leader-lease row for lease-capable
