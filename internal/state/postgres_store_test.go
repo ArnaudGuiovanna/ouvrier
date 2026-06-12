@@ -75,15 +75,54 @@ func postgresTestSchemaDSN(t *testing.T) string {
 		_ = admin.Close()
 	})
 
-	separator := "?"
+	return appendSearchPath(dsn, schema)
+}
+
+// appendSearchPath scopes a Postgres DSN to the given schema. It handles the
+// three DSN forms: URL with an existing query string (append with "&"), URL
+// without one (append with "?"), and libpq keyword/value form (append with a
+// space).
+func appendSearchPath(dsn, schema string) string {
+	separator := " " // keyword/value DSN form
 	if strings.Contains(dsn, "://") {
 		if strings.Contains(dsn, "?") {
 			separator = "&"
+		} else {
+			separator = "?"
 		}
-	} else {
-		separator = " " // keyword/value DSN form
 	}
 	return dsn + separator + "search_path=" + schema
+}
+
+func TestAppendSearchPathHandlesAllDSNForms(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{
+			name: "url with existing query",
+			dsn:  "postgres://u:p@127.0.0.1:5432/db?sslmode=disable",
+			want: "postgres://u:p@127.0.0.1:5432/db?sslmode=disable&search_path=s1",
+		},
+		{
+			name: "url without query",
+			dsn:  "postgres://u:p@127.0.0.1:5432/db",
+			want: "postgres://u:p@127.0.0.1:5432/db?search_path=s1",
+		},
+		{
+			name: "keyword value form",
+			dsn:  "host=127.0.0.1 port=5432 dbname=db user=u",
+			want: "host=127.0.0.1 port=5432 dbname=db user=u search_path=s1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := appendSearchPath(tt.dsn, "s1"); got != tt.want {
+				t.Fatalf("appendSearchPath(%q) = %q, want %q", tt.dsn, got, tt.want)
+			}
+		})
+	}
 }
 
 func openTestPostgresStore(t *testing.T, dsn string) *PostgresStore {
