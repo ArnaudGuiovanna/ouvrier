@@ -20,6 +20,7 @@ type sshConfig struct {
 	Service    string // systemd unit name; defaults to ouvrier-<name>
 	HealthURL  string // path or full URL; defaults to /admin/health
 	AdminToken string // masked in logs/output
+	Identity   string // optional ssh identity file (-i) for agent-less CI
 }
 
 func (app *App) runDeploySSHCommand(ctx context.Context, args []string) error {
@@ -41,6 +42,7 @@ func (app *App) runDeploySSHCommand(ctx context.Context, args []string) error {
 		Service:    cfg.Service,
 		HealthURL:  cfg.HealthURL,
 		AdminToken: cfg.AdminToken,
+		Identity:   cfg.Identity,
 	}, deploy.ProgressWriter{Out: app.out, Err: app.errOut})
 }
 
@@ -140,6 +142,16 @@ func parseDeploySSHFlags(args []string) (sshConfig, error) {
 			i += advance
 		case strings.HasPrefix(arg, "--admin-token="):
 			cfg.AdminToken = strings.TrimPrefix(arg, "--admin-token=")
+			i++
+		case arg == "--identity":
+			value, advance, err := flagValue(args, i, "--identity")
+			if err != nil {
+				return sshConfig{}, err
+			}
+			cfg.Identity = value
+			i += advance
+		case strings.HasPrefix(arg, "--identity="):
+			cfg.Identity = strings.TrimPrefix(arg, "--identity=")
 			i++
 		default:
 			return sshConfig{}, fmt.Errorf("%w: deploy ssh does not accept argument %q", ErrUsage, arg)

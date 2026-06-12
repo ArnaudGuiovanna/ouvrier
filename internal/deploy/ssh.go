@@ -26,6 +26,7 @@ type Opts struct {
 	Service    string // systemd unit name; defaults to ouvrier-<name>
 	HealthURL  string // path or full URL; defaults to /admin/health
 	AdminToken string // masked in logs/output
+	Identity   string // optional ssh identity file (-i) for agent-less CI
 
 	// GoRun is the `go build` seam; nil means DefaultGoRunner.
 	GoRun GoRunner
@@ -67,6 +68,12 @@ type ConnectOpts struct {
 	Host string
 	User string
 	Port int
+	// Identity is an optional ssh identity file passed as -i to ssh and scp.
+	Identity string
+	// KnownHosts is the pinned host-key file passed as
+	// -o UserKnownHostsFile=... to ssh and scp. Host keys are always checked
+	// strictly; an empty value falls back to the user's default known_hosts.
+	KnownHosts string
 }
 
 // userHost renders the host portion in user@host form. Empty user yields
@@ -112,6 +119,17 @@ func deploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 		ssh = defaultRemoteRunner{}
 	}
 
+	// 0. Host-key pinning gate: the target must already be trusted via the
+	//    committed ouvrier.known_hosts at the project root. This runs before
+	//    the build and before any remote command so an untrusted host fails
+	//    fast, and a changed-key ssh failure later is remapped to a hard
+	//    error naming `ouvrier server trust --rotate`.
+	knownHosts, pinnedHost, err := requirePinnedHost(opts.Dir, opts.Host, opts.Port)
+	if err != nil {
+		return err
+	}
+	ssh = &pinnedRunner{inner: ssh, host: pinnedHost}
+
 	// 1. Build a static linux/amd64 binary the deploy can ship.
 	br, err := StaticBuild(ctx, opts.Dir, progress.Out, progress.Err, goRun)
 	if err != nil {
@@ -133,7 +151,13 @@ func deploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	// ".service".
 	serviceName := strings.TrimSuffix(service, ".service")
 
-	connect := ConnectOpts{Host: opts.Host, User: opts.User, Port: opts.Port}
+	connect := ConnectOpts{
+		Host:       opts.Host,
+		User:       opts.User,
+		Port:       opts.Port,
+		Identity:   opts.Identity,
+		KnownHosts: knownHosts,
+	}
 
 	// 3. Require a local .env to avoid blank deploys.
 	localEnv := filepath.Join(br.Dir, ".env")
@@ -361,6 +385,79 @@ WantedBy=multi-user.target
 `, p.Name, user, p.InstallPath, p.InstallPath, p.InstallPath, p.Name)
 }
 
+// requirePinnedHost enforces host-key pinning: the committed
+// ouvrier.known_hosts at the project root must already hold an entry for the
+// deploy target. It returns the absolute known_hosts path and the canonical
+// hostname used for pinning.
+func requirePinnedHost(dir, host string, port int) (string, string, error) {
+	knownHosts, err := filepath.Abs(filepath.Join(dir, KnownHostsFile))
+	if err != nil {
+		return "", "", fmt.Errorf("%w: resolve %s: %w", ErrDeploy, KnownHostsFile, err)
+	}
+	pinnedHost := KnownHostsHostname(host, port)
+	trusted, err := HostTrusted(knownHosts, pinnedHost)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: %w", ErrDeploy, err)
+	}
+	if !trusted {
+		return "", "", fmt.Errorf(
+			"%w: host %s is not pinned in %s; run `ouvrier server trust %s` and commit the file",
+			ErrDeploy, pinnedHost, knownHosts, trustCommandHost(host, port),
+		)
+	}
+	return knownHosts, pinnedHost, nil
+}
+
+// trustCommandHost renders the `ouvrier server trust` invocation that would
+// pin the deploy target, including --port when non-default.
+func trustCommandHost(host string, port int) string {
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	if port != 0 && port != 22 {
+		return fmt.Sprintf("%s --port %d", host, port)
+	}
+	return host
+}
+
+// pinnedRunner decorates a RemoteRunner so a host-key verification failure —
+// the server's key changed since it was pinned — surfaces as a hard error
+// naming `ouvrier server trust --rotate` instead of a raw ssh failure.
+type pinnedRunner struct {
+	inner RemoteRunner
+	host  string
+}
+
+func (r *pinnedRunner) SSH(ctx context.Context, opts ConnectOpts, command string) (string, error) {
+	stdout, err := r.inner.SSH(ctx, opts, command)
+	return stdout, remapHostKeyErr(err, r.host)
+}
+
+func (r *pinnedRunner) SCP(ctx context.Context, opts ConnectOpts, localPath, remotePath string) error {
+	return remapHostKeyErr(r.inner.SCP(ctx, opts, localPath, remotePath), r.host)
+}
+
+func (r *pinnedRunner) SCPData(ctx context.Context, opts ConnectOpts, data []byte, remotePath string) error {
+	return remapHostKeyErr(r.inner.SCPData(ctx, opts, data, remotePath), r.host)
+}
+
+// remapHostKeyErr turns OpenSSH's host-key verification failures into a hard
+// error telling the operator to re-pin deliberately.
+func remapHostKeyErr(err error, host string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "Host key verification failed") ||
+		strings.Contains(msg, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		return fmt.Errorf(
+			"%w: host key for %s no longer matches the pinned entry in %s; if the server was reinstalled on purpose, run `ouvrier server trust --rotate %s` and commit the file: %w",
+			ErrDeploy, host, KnownHostsFile, host, err,
+		)
+	}
+	return err
+}
+
 // shellQuote returns a single-quoted POSIX shell literal. Inner single quotes
 // are encoded using the standard '\” trick. This is safer than relying on
 // the caller to pick characters compatible with bare ssh strings.
@@ -405,20 +502,37 @@ func (defaultRemoteRunner) SCPData(ctx context.Context, opts ConnectOpts, data [
 }
 
 func sshBaseArgs(opts ConnectOpts) []string {
-	args := make([]string, 0, 4)
+	args := make([]string, 0, 16)
 	if opts.Port != 0 {
 		args = append(args, "-p", fmt.Sprintf("%d", opts.Port))
 	}
-	args = append(args, "-o", "BatchMode=yes")
-	return args
+	return append(args, connectionHardeningArgs(opts)...)
 }
 
 func scpBaseArgs(opts ConnectOpts) []string {
-	args := make([]string, 0, 4)
+	args := make([]string, 0, 16)
 	if opts.Port != 0 {
 		args = append(args, "-P", fmt.Sprintf("%d", opts.Port))
 	}
-	args = append(args, "-o", "BatchMode=yes")
+	return append(args, connectionHardeningArgs(opts)...)
+}
+
+// connectionHardeningArgs are the non-negotiable ssh/scp options shared by
+// every remote invocation: strict pinned host-key checking and no interactive
+// or password-based authentication path, ever.
+func connectionHardeningArgs(opts ConnectOpts) []string {
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+	}
+	if opts.KnownHosts != "" {
+		args = append(args, "-o", "UserKnownHostsFile="+opts.KnownHosts)
+	}
+	if opts.Identity != "" {
+		args = append(args, "-i", opts.Identity)
+	}
 	return args
 }
 

@@ -752,7 +752,8 @@ ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
 ouvrier status [--url URL] [--token TOKEN]
 ouvrier logs [--url URL] [--token TOKEN] [--last N]
 ouvrier trace <exec-id> [--url URL] [--token TOKEN]
-ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME]
+ouvrier server trust HOST [--fingerprint SHA256:...] [--rotate] [--port 22] [--dir .]
+ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME] [--identity FILE]
 ouvrier deploy docker [--image IMAGE] [--tag TAG] [--push] [--force]
 ouvrier state migrate
 ```
@@ -768,6 +769,26 @@ Build locally:
 ```sh
 ouvrier build --static --target linux/amd64 --output ./bin/worker
 ```
+
+Pin the server's SSH host keys before the first deploy. `ouvrier server
+trust` runs `ssh-keyscan`, shows the SHA256 fingerprint (the ed25519 key when
+the server offers one, otherwise the first scanned key), and writes every
+scanned key line to a committed `ouvrier.known_hosts` at the project root —
+host public keys are not secrets, so committing them shares the trust
+decision with the team and CI:
+
+```sh
+ouvrier server trust app.example.com            # interactive confirm
+ouvrier server trust app.example.com \
+  --fingerprint SHA256:f/+IMT34E8qsxk2X...      # non-interactive (CI)
+git add ouvrier.known_hosts && git commit -m "trust app.example.com"
+```
+
+Every deploy then runs ssh/scp with `-o UserKnownHostsFile=ouvrier.known_hosts
+-o StrictHostKeyChecking=yes -o BatchMode=yes` and password authentication
+disabled. Deploying to an unpinned host fails before any remote command; a
+changed host key is a hard error — re-pin deliberately with
+`ouvrier server trust --rotate HOST`.
 
 Deploy over SSH:
 

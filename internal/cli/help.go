@@ -19,6 +19,7 @@ Commands:
   logs      List the last N traced executions of a running worker
   trace     Print the full event timeline for one execution
   deploy    Ship the project to a remote host (ssh) or build a container image (docker)
+  server    Manage trusted deploy hosts (trust pins SSH host keys)
   fleet     Inspect or prune the recorded deployments inventory (ls|rm)
   state     Manage the worker's durable state backend (migrate)
   version   Print the ouvrier CLI version
@@ -245,7 +246,15 @@ Options:
       --dir string          Project directory containing pip.yaml (default ".")
       --health-url string   Health endpoint path or full URL (default "/admin/health")
       --admin-token string  Admin bearer token forwarded to the health probe (masked in logs)
+      --identity string     SSH identity file passed as -i to ssh/scp (agent-less CI)
   -h, --help                Show this help message
+
+The target host must first be pinned with "ouvrier server trust <host>": every
+ssh/scp invocation runs with -o UserKnownHostsFile=ouvrier.known_hosts
+-o StrictHostKeyChecking=yes -o BatchMode=yes and password/keyboard-interactive
+authentication disabled. A deploy against an unpinned host fails before any
+remote command, and a changed host key is a hard error pointing at
+"ouvrier server trust --rotate".
 
 A local .env in --dir is required. Secrets are never written to the local
 logs and the --admin-token value is masked in any printed output.
@@ -267,6 +276,45 @@ Options:
       --force          Overwrite an existing Dockerfile
       --dir string     Project directory containing pip.yaml (default ".")
   -h, --help           Show this help message
+`
+
+const serverHelp = `Manage trusted deploy hosts.
+
+Usage: ouvrier server <trust> [flags]
+
+Subcommands:
+  trust   Pin a host's SSH public keys into the committed ouvrier.known_hosts
+
+Run "ouvrier server <subcommand> --help" for details.
+`
+
+const serverTrustHelp = `Pin a remote host's SSH public keys into ouvrier.known_hosts.
+
+Usage: ouvrier server trust <host> [flags]
+
+Runs ssh-keyscan against the host, displays the SHA256 key fingerprint, and
+after confirmation appends every scanned key line to ouvrier.known_hosts at
+the project root. Host public keys are not secrets: commit the file so the
+trust decision is shared by the whole team and CI, and every
+"ouvrier deploy ssh" verifies the host against it (StrictHostKeyChecking=yes).
+
+The fingerprint shown and checked by --fingerprint is the host's ed25519 key
+when it offers one, otherwise the first scanned key; all scanned key types
+are pinned either way. Verify it out-of-band (e.g. "ssh-keygen -lf
+/etc/ssh/ssh_host_ed25519_key.pub" on the server console).
+
+Trusting an already-pinned host with the same key is a no-op. If the host's
+key has changed, the command refuses unless --rotate is given, which replaces
+the pinned entries with the fresh scan.
+
+Options:
+      --fingerprint string  Expected SHA256 fingerprint (with or without the
+                            "SHA256:" prefix) for non-interactive use (CI);
+                            a mismatch aborts and writes nothing
+      --rotate              Replace existing pinned keys for this host
+      --port int            SSH port; non-default ports pin "[host]:port"
+      --dir string          Project root holding ouvrier.known_hosts (default ".")
+  -h, --help                Show this help message
 `
 
 const fleetHelp = `Inspect or prune the recorded deployments inventory.
@@ -407,6 +455,14 @@ func printDeploySSHHelp(w io.Writer) {
 
 func printDeployDockerHelp(w io.Writer) {
 	fmt.Fprint(w, deployDockerHelp)
+}
+
+func printServerHelp(w io.Writer) {
+	fmt.Fprint(w, serverHelp)
+}
+
+func printServerTrustHelp(w io.Writer) {
+	fmt.Fprint(w, serverTrustHelp)
 }
 
 func printFleetHelp(w io.Writer) {

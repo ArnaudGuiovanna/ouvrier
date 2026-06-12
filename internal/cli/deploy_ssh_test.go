@@ -28,6 +28,7 @@ func TestParseDeploySSHFlagsAcceptsAllOptions(t *testing.T) {
 		"--health-url", "/health",
 		"--admin-token", "shh",
 		"--dir", "/tmp/proj",
+		"--identity", "/keys/ci_ed25519",
 	})
 	if err != nil {
 		t.Fatalf("parseDeploySSHFlags() error = %v", err)
@@ -36,6 +37,7 @@ func TestParseDeploySSHFlagsAcceptsAllOptions(t *testing.T) {
 		Host: "ops@server", User: "deploy", Port: 2222,
 		Path: "/srv/app", Service: "demo.service",
 		HealthURL: "/health", AdminToken: "shh", Dir: "/tmp/proj",
+		Identity: "/keys/ci_ed25519",
 	}
 	if cfg != want {
 		t.Fatalf("parseDeploySSHFlags() = %+v, want %+v", cfg, want)

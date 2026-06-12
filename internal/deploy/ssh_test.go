@@ -20,9 +20,13 @@ type fakeRemote struct {
 	sshCommands []string
 	scpUploads  []scpUpload
 	scpDataKeys []scpDataUpload
+	lastConnect ConnectOpts
 
 	failSSHContaining   string
 	failSCPRemoteSuffix string
+	// sshErr overrides the default injected SSH failure, so tests can mimic
+	// specific ssh stderr shapes (e.g. host key verification failures).
+	sshErr error
 	// echoCommandInError makes injected SSH failures embed the full remote
 	// command in the error, mimicking the shape the old defaultRemoteRunner
 	// produced (ssh <args...>: exit status N (stderr=...)).
@@ -39,11 +43,15 @@ type scpDataUpload struct {
 	Data   []byte
 }
 
-func (f *fakeRemote) SSH(_ context.Context, _ ConnectOpts, command string) (string, error) {
+func (f *fakeRemote) SSH(_ context.Context, opts ConnectOpts, command string) (string, error) {
 	f.mu.Lock()
 	f.sshCommands = append(f.sshCommands, command)
+	f.lastConnect = opts
 	f.mu.Unlock()
 	if f.failSSHContaining != "" && strings.Contains(command, f.failSSHContaining) {
+		if f.sshErr != nil {
+			return "", f.sshErr
+		}
 		if f.echoCommandInError {
 			return "", fmt.Errorf("ssh -o BatchMode=yes h %s: exit status 22 (stderr=curl: (22) The requested URL returned error: 401)", command)
 		}
@@ -52,9 +60,10 @@ func (f *fakeRemote) SSH(_ context.Context, _ ConnectOpts, command string) (stri
 	return "", nil
 }
 
-func (f *fakeRemote) SCP(_ context.Context, _ ConnectOpts, localPath, remotePath string) error {
+func (f *fakeRemote) SCP(_ context.Context, opts ConnectOpts, localPath, remotePath string) error {
 	f.mu.Lock()
 	f.scpUploads = append(f.scpUploads, scpUpload{Local: localPath, Remote: remotePath})
+	f.lastConnect = opts
 	f.mu.Unlock()
 	if f.failSCPRemoteSuffix != "" && strings.HasSuffix(remotePath, f.failSCPRemoteSuffix) {
 		return errors.New("scp injected failure")
@@ -83,7 +92,22 @@ func writeDeployFixture(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("ANTHROPIC_API_KEY=test\n"), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
+	// Deploys hard-fail against unpinned hosts; pin the hostnames the tests
+	// in this file deploy to.
+	pinHost(t, dir, "h", "server.example.com")
 	return dir
+}
+
+// pinHost appends ouvrier.known_hosts entries for the given hostnames, the
+// way `ouvrier server trust` would.
+func pinHost(t *testing.T, dir string, hosts ...string) {
+	t.Helper()
+	for _, host := range hosts {
+		keys := []HostKey{{Hosts: host, Type: "ssh-ed25519", Key: fixtureEd25519Key}}
+		if _, err := UpdateKnownHosts(filepath.Join(dir, KnownHostsFile), host, keys, false); err != nil {
+			t.Fatalf("pin host %s: %v", host, err)
+		}
+	}
 }
 
 // stubGoRunner pretends to be `go build` by writing a sentinel byte to the
@@ -120,6 +144,7 @@ func TestDeploySSHRequiresEnvFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
 		t.Fatalf("write pip.yaml: %v", err)
 	}
+	pinHost(t, dir, "h")
 	opts := Opts{Dir: dir, Host: "h", HealthURL: "/admin/health", GoRun: stubGoRunner(t), Runner: &fakeRemote{}}
 	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
 	if !errors.Is(err, ErrDeploy) {
@@ -127,6 +152,136 @@ func TestDeploySSHRequiresEnvFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ".env") {
 		t.Fatalf("DeploySSH() error = %v, want .env message", err)
+	}
+}
+
+// Acceptance: deploy against an untrusted host fails fast — before the build
+// and before any remote command — naming `ouvrier server trust`.
+func TestDeploySSHFailsFastWhenHostNotTrusted(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
+		t.Fatalf("write pip.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("A=b\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	remote := &fakeRemote{}
+	built := false
+	goRun := func(_ context.Context, _ string, _ []string, _ []string, _, _ io.Writer) error {
+		built = true
+		return errors.New("must not build against untrusted host")
+	}
+	opts := Opts{Dir: dir, Host: "untrusted.example.com", GoRun: goRun, Runner: remote}
+	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
+	if !errors.Is(err, ErrDeploy) {
+		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
+	}
+	if !strings.Contains(err.Error(), "ouvrier server trust untrusted.example.com") {
+		t.Fatalf("DeploySSH() error = %v, want `ouvrier server trust <host>` hint", err)
+	}
+	if built {
+		t.Fatal("DeploySSH() built the binary before the trust gate")
+	}
+	if len(remote.sshCommands) != 0 || len(remote.scpUploads) != 0 || len(remote.scpDataKeys) != 0 {
+		t.Fatalf("DeploySSH() ran remote commands against untrusted host: ssh=%v scp=%v", remote.sshCommands, remote.scpUploads)
+	}
+}
+
+// A host pinned only under a different port token must also fail fast: ssh
+// would look up "[host]:2222", not "host".
+func TestDeploySSHTrustGateUsesPortQualifiedHostname(t *testing.T) {
+	dir := writeDeployFixture(t)
+	remote := &fakeRemote{}
+	opts := Opts{Dir: dir, Host: "h", Port: 2222, GoRun: stubGoRunner(t), Runner: remote}
+	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
+	if !errors.Is(err, ErrDeploy) {
+		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
+	}
+	if !strings.Contains(err.Error(), "[h]:2222") || !strings.Contains(err.Error(), "ouvrier server trust h --port 2222") {
+		t.Fatalf("DeploySSH() error = %v, want port-qualified trust hint", err)
+	}
+
+	pinHost(t, dir, "[h]:2222")
+	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("DeploySSH() with pinned [h]:2222 error = %v", err)
+	}
+}
+
+// A changed host key (ssh's "Host key verification failed") is remapped to a
+// hard error naming `ouvrier server trust --rotate`.
+func TestDeploySSHRemapsChangedHostKeyToRotate(t *testing.T) {
+	dir := writeDeployFixture(t)
+	remote := &fakeRemote{failSSHContaining: "mkdir", sshErr: errors.New("ssh: exit status 255 (stderr=Host key verification failed.)")}
+	opts := Opts{Dir: dir, Host: "h", GoRun: stubGoRunner(t), Runner: remote}
+	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
+	if !errors.Is(err, ErrDeploy) {
+		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
+	}
+	if !strings.Contains(err.Error(), "ouvrier server trust --rotate h") {
+		t.Fatalf("DeploySSH() error = %v, want `ouvrier server trust --rotate <host>` hint", err)
+	}
+}
+
+// The runner seam receives the identity file and pinned known_hosts path on
+// every ssh and scp invocation.
+func TestDeploySSHPlumbsIdentityAndKnownHosts(t *testing.T) {
+	dir := writeDeployFixture(t)
+	remote := &fakeRemote{}
+	opts := Opts{Dir: dir, Host: "h", Identity: "/keys/ci_ed25519", GoRun: stubGoRunner(t), Runner: remote}
+	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("DeploySSH() error = %v", err)
+	}
+	if remote.lastConnect.Identity != "/keys/ci_ed25519" {
+		t.Fatalf("ConnectOpts.Identity = %q, want /keys/ci_ed25519", remote.lastConnect.Identity)
+	}
+	if remote.lastConnect.KnownHosts != filepath.Join(dir, KnownHostsFile) {
+		t.Fatalf("ConnectOpts.KnownHosts = %q, want %s", remote.lastConnect.KnownHosts, filepath.Join(dir, KnownHostsFile))
+	}
+}
+
+// Acceptance: no password-auth path exists in any ssh/scp invocation — the
+// flag assertion on the runner seam's argv builders.
+func TestSSHAndSCPArgsHardenAuthentication(t *testing.T) {
+	connect := ConnectOpts{
+		Host:       "h",
+		Port:       2222,
+		Identity:   "/keys/ci_ed25519",
+		KnownHosts: "/proj/ouvrier.known_hosts",
+	}
+	for name, args := range map[string][]string{
+		"ssh": sshBaseArgs(connect),
+		"scp": scpBaseArgs(connect),
+	} {
+		joined := " " + strings.Join(args, " ") + " "
+		for _, want := range []string{
+			"-o BatchMode=yes",
+			"-o StrictHostKeyChecking=yes",
+			"-o PasswordAuthentication=no",
+			"-o KbdInteractiveAuthentication=no",
+			"-o UserKnownHostsFile=/proj/ouvrier.known_hosts",
+			"-i /keys/ci_ed25519",
+		} {
+			if !strings.Contains(joined, " "+want+" ") {
+				t.Fatalf("%s args missing %q: %v", name, want, args)
+			}
+		}
+		for _, banned := range []string{
+			"PasswordAuthentication=yes",
+			"KbdInteractiveAuthentication=yes",
+			"StrictHostKeyChecking=no",
+			"StrictHostKeyChecking=accept-new",
+			"BatchMode=no",
+		} {
+			if strings.Contains(joined, banned) {
+				t.Fatalf("%s args contain banned option %q: %v", name, banned, args)
+			}
+		}
+	}
+	if !strings.Contains(strings.Join(sshBaseArgs(connect), " "), "-p 2222") {
+		t.Fatalf("ssh args missing -p 2222: %v", sshBaseArgs(connect))
+	}
+	if !strings.Contains(strings.Join(scpBaseArgs(connect), " "), "-P 2222") {
+		t.Fatalf("scp args missing -P 2222: %v", scpBaseArgs(connect))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
@@ -28,6 +29,9 @@ type App struct {
 	out     io.Writer
 	errOut  io.Writer
 	runNew  RunNewFunc
+	// keyscan is the ssh-keyscan seam used by `ouvrier server trust`; tests
+	// substitute canned scan output. Nil means deploy.DefaultKeyscan.
+	keyscan deploy.KeyscanRunner
 }
 
 type Option func(*App)
@@ -107,6 +111,8 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runTraceCommand(ctx, args[1:])
 	case "deploy":
 		return app.runDeployCommand(ctx, args[1:])
+	case "server":
+		return app.runServerCommand(ctx, args[1:])
 	case "fleet":
 		return app.runFleetCommand(ctx, args[1:])
 	case "state":
