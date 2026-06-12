@@ -371,18 +371,37 @@ func TestExecutorSkipsDuplicateIdempotentToolCall(t *testing.T) {
 	if first.IsError {
 		t.Fatalf("first IsError = true, content=%s", first.Content)
 	}
+	// A duplicate under the SAME execution (an in-run repeat or a durable-run
+	// replay, #40) is deduped as success: the reservation proves this exec
+	// already performed the call.
 	second, err := executor.Execute(ctx, call)
 	if err != nil {
 		t.Fatalf("second Execute returned error: %v", err)
 	}
-	if !second.IsError {
-		t.Fatalf("second IsError = false, want duplicate idempotency error")
+	if second.IsError {
+		t.Fatalf("second IsError = true, want same-exec duplicate treated as success; content=%s", second.Content)
 	}
 	if called != 1 {
 		t.Fatalf("called = %d, want exactly one tool execution", called)
 	}
-	if !strings.Contains(string(second.Content), "idempotency key") {
-		t.Fatalf("second content = %s, want idempotency error", second.Content)
+	if !strings.Contains(string(second.Content), "duplicate idempotent call skipped") {
+		t.Fatalf("second content = %s, want dedup notice", second.Content)
+	}
+
+	// The same key from a DIFFERENT execution stays a hard duplicate error.
+	otherCtx := ContextWithIdempotencyStore(context.Background(), store, "exec_2")
+	third, err := executor.Execute(otherCtx, call)
+	if err != nil {
+		t.Fatalf("third Execute returned error: %v", err)
+	}
+	if !third.IsError {
+		t.Fatalf("third IsError = false, want cross-exec duplicate idempotency error")
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want cross-exec duplicate skipped", called)
+	}
+	if !strings.Contains(string(third.Content), "idempotency key") {
+		t.Fatalf("third content = %s, want idempotency error", third.Content)
 	}
 }
 
@@ -467,8 +486,8 @@ func TestExecutorRetriesTransientIdempotentToolErrorAfterSingleReservation(t *te
 	if err != nil {
 		t.Fatalf("second Execute returned error: %v", err)
 	}
-	if !second.IsError {
-		t.Fatal("second IsError = false, want duplicate idempotency error")
+	if second.IsError {
+		t.Fatalf("second IsError = true, want same-exec duplicate treated as success; content=%s", second.Content)
 	}
 	if called != 2 {
 		t.Fatalf("called = %d, want duplicate call skipped after reservation", called)

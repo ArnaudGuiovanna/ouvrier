@@ -495,11 +495,13 @@ func TestRunSkipsDuplicateIdempotentToolCall(t *testing.T) {
 	if firstResult == nil || firstResult.IsError {
 		t.Fatalf("first tool result = %+v, want success", firstResult)
 	}
-	if secondResult == nil || !secondResult.IsError {
-		t.Fatalf("second tool result = %+v, want duplicate idempotency error", secondResult)
+	// The duplicate is held by the same execution, so it dedupes as a
+	// success (#40): the side effect already happened under this exec id.
+	if secondResult == nil || secondResult.IsError {
+		t.Fatalf("second tool result = %+v, want same-exec duplicate treated as success", secondResult)
 	}
-	if !strings.Contains(string(secondResult.Content), "idempotency key") {
-		t.Fatalf("second content = %s, want idempotency error", secondResult.Content)
+	if !strings.Contains(string(secondResult.Content), "duplicate idempotent call skipped") {
+		t.Fatalf("second content = %s, want dedup notice", secondResult.Content)
 	}
 }
 

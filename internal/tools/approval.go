@@ -15,7 +15,11 @@ type ApprovalContext struct {
 
 // ApprovalRequest is the redaction-safe description of a gated tool call that an
 // ApprovalGate persists when an execution is suspended for human review. It
-// never carries tool arguments or skill bodies.
+// never carries tool arguments or skill bodies; ArgsHash is the same
+// tool-name + arguments digest recorded on tool intents (matching
+// idempotency.go's hashing for idempotent tools), so durable-run recovery can
+// match an approved record against the replayed call without storing raw
+// arguments.
 type ApprovalRequest struct {
 	ExecID     string
 	SessionID  string
@@ -25,6 +29,7 @@ type ApprovalRequest struct {
 	ToolKind   string
 	Effect     string
 	Reason     string
+	ArgsHash   string
 }
 
 // ApprovalGate persists a pending approval and returns its identifier. It is the
@@ -108,4 +113,34 @@ func approvedApprovalFromContext(ctx context.Context, toolCallID string) (string
 		return "", false
 	}
 	return value.approvalID, true
+}
+
+// ApprovedApprovalResolver is the durable-run recovery fallback for approval
+// resumes: given a gated tool call's name and args hash it reports the id of
+// an already-approved record covering that exact call, or false. The in-memory
+// ContextWithApprovedApproval path stays the fast path for live resumes;
+// resolvers are only installed while replaying a recovered run, where tool
+// call ids are re-minted by the provider and cannot be matched directly.
+type ApprovedApprovalResolver func(ctx context.Context, toolName, argsHash string) (string, bool)
+
+type approvedApprovalResolverContextKey struct{}
+
+// ContextWithApprovedApprovalResolver installs the recovery approval resolver
+// for the duration of a replayed run.
+func ContextWithApprovedApprovalResolver(ctx context.Context, resolver ApprovedApprovalResolver) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if resolver == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, approvedApprovalResolverContextKey{}, resolver)
+}
+
+func approvedApprovalResolverFromContext(ctx context.Context) (ApprovedApprovalResolver, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	resolver, ok := ctx.Value(approvedApprovalResolverContextKey{}).(ApprovedApprovalResolver)
+	return resolver, ok && resolver != nil
 }

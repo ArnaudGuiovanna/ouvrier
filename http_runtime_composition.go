@@ -22,6 +22,11 @@ type compositionOutcome struct {
 }
 
 func (rt httpRuntime) runParallelStepResult(ctx context.Context, step runtimeplan.Step, input string, scope planRunScope) (planRunResult, error) {
+	// Parallel checkpoints as one unit at its own top-level index; branch
+	// steps never checkpoint individually (sub-branch checkpoints are out of
+	// scope). Tool intents still flow through ctx with the parallel step's
+	// index.
+	scope.durable = nil
 	runs := make([]compositionRun, 0, len(step.Branches))
 	for _, branch := range step.Branches {
 		runs = append(runs, compositionRun{pipeline: branch, input: input})
@@ -41,6 +46,8 @@ func (rt httpRuntime) runParallelStepResult(ctx context.Context, step runtimepla
 }
 
 func (rt httpRuntime) runMapStepResult(ctx context.Context, step runtimeplan.Step, input string, scope planRunScope) (planRunResult, error) {
+	// Map checkpoints as one unit at its own top-level index, like Parallel.
+	scope.durable = nil
 	items, err := mapInputItems(input)
 	if err != nil {
 		return planRunResult{Output: input}, err

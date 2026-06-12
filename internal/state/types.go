@@ -27,7 +27,33 @@ type Store interface {
 	SaveApproval(context.Context, PendingApproval) error
 	Approval(context.Context, string) (PendingApproval, bool, error)
 	PendingApprovals(context.Context) ([]PendingApproval, error)
+	// ApprovalsForExecution lists every approval recorded for one execution,
+	// any status, in creation order. Durable-run recovery (#40) uses it to
+	// skip runs parked on a pending approval and to auto-allow replayed tool
+	// calls whose approved record matches by tool name and args hash.
+	ApprovalsForExecution(context.Context, string) ([]PendingApproval, error)
 	ResolveApproval(context.Context, string, ApprovalStatus, string) (PendingApproval, error)
+
+	// Durable runs (step-checkpoint journal, tool intents, retention).
+	// SaveRunJournal and SaveRunCheckpoint upsert on their primary keys
+	// ((exec_id) and (exec_id, step_index)); BeginToolIntent upserts on
+	// (exec_id, tool_call_id) and re-opens the intent (completed_at NULL).
+	// CompleteToolIntent stamps completed_at and errors when no intent row
+	// exists. RunCheckpoints orders by step index, ToolIntents by started_at
+	// then tool call id, RunJournals by created_at then exec id.
+	// PruneRunJournal deletes one execution's journal, checkpoints, and
+	// intents; PruneRunJournalsBefore deletes every journal created before
+	// the cutoff (cascading the same way) and returns the pruned exec ids.
+	SaveRunJournal(context.Context, RunJournal) error
+	RunJournal(context.Context, string) (RunJournal, bool, error)
+	RunJournals(context.Context) ([]RunJournal, error)
+	SaveRunCheckpoint(context.Context, RunCheckpoint) error
+	RunCheckpoints(context.Context, string) ([]RunCheckpoint, error)
+	BeginToolIntent(context.Context, ToolIntent) error
+	CompleteToolIntent(context.Context, string, string) error
+	ToolIntents(context.Context, string) ([]ToolIntent, error)
+	PruneRunJournal(context.Context, string) error
+	PruneRunJournalsBefore(context.Context, time.Time) ([]string, error)
 }
 
 // ApprovalStatus is the lifecycle state of a human-in-the-loop approval.
@@ -43,6 +69,10 @@ const (
 // execution until an operator approves or denies the gated tool call. The
 // Reason field is redaction-safe (run through the same credential scrubbing as
 // persisted events) and never carries tool arguments or skill bodies.
+// ArgsHash is a digest of the gated call's tool name and arguments (never the
+// raw arguments), recorded at suspend time so durable-run recovery can match
+// an approved record against the replayed call; it is empty on records written
+// before v0.3.
 type PendingApproval struct {
 	ID         string
 	ExecID     string
@@ -53,6 +83,7 @@ type PendingApproval struct {
 	ToolKind   string
 	Effect     string
 	Reason     string
+	ArgsHash   string
 	Status     ApprovalStatus
 	CreatedAt  time.Time
 	DecidedAt  time.Time

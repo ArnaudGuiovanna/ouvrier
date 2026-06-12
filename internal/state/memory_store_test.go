@@ -187,7 +187,7 @@ func TestMemoryStorePreservesEventIDsAndFiltersEventsSince(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreRejectsNonMonotonicExplicitEventIDs(t *testing.T) {
+func TestMemoryStoreRejectsDuplicateExplicitEventIDs(t *testing.T) {
 	store := NewMemoryStore()
 
 	_, err := store.AddEvent(context.Background(), events.Event{
@@ -198,12 +198,22 @@ func TestMemoryStoreRejectsNonMonotonicExplicitEventIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEvent returned error: %v", err)
 	}
+	// Concurrent emitters can persist allocator-assigned IDs out of arrival
+	// order: a lower unique ID is valid.
 	if _, err := store.AddEvent(context.Background(), events.Event{
 		ID:     9,
 		Kind:   events.EventLLMCallCompleted,
 		ExecID: "exec_1",
+	}); err != nil {
+		t.Fatalf("AddEvent rejected out-of-order unique explicit ID: %v", err)
+	}
+	// A stale allocator re-issuing an already-persisted ID is rejected.
+	if _, err := store.AddEvent(context.Background(), events.Event{
+		ID:     10,
+		Kind:   events.EventLLMCallCompleted,
+		ExecID: "exec_1",
 	}); err == nil {
-		t.Fatal("AddEvent returned nil for non-monotonic explicit event ID")
+		t.Fatal("AddEvent returned nil for duplicate explicit event ID")
 	}
 	next, err := store.AddEvent(context.Background(), events.Event{
 		Kind:   events.EventLLMCallCompleted,
@@ -213,7 +223,7 @@ func TestMemoryStoreRejectsNonMonotonicExplicitEventIDs(t *testing.T) {
 		t.Fatalf("AddEvent returned error after rejected ID: %v", err)
 	}
 	if next.ID != 11 {
-		t.Fatalf("next ID = %d, want 11", next.ID)
+		t.Fatalf("next ID = %d, want 11 (auto IDs continue above the max explicit ID)", next.ID)
 	}
 	recorded, err := store.EventsSince(context.Background(), "exec_1", 10)
 	if err != nil {
