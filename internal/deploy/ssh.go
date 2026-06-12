@@ -82,6 +82,13 @@ func (o ConnectOpts) userHost() string {
 // upload binary and .env, install the systemd unit, restart the service, and
 // health-check, rolling back to the previous binary on failure.
 func DeploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
+	// Defense in depth: whatever layer produced the error (including a runner
+	// that embeds the remote command, which carries the admin token in an
+	// Authorization header), the rendered message never contains the token.
+	return maskTokenErr(deploySSH(ctx, opts, progress), opts.AdminToken)
+}
+
+func deploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -120,6 +127,11 @@ func DeploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	if service == "" {
 		service = "ouvrier-" + br.ProjectName
 	}
+	// Canonicalize the unit name: operators may pass --service demo.service.
+	// Strip the suffix once so the unit path on disk, the install target in
+	// /etc/systemd/system, and systemctl restart all agree on a single
+	// ".service".
+	serviceName := strings.TrimSuffix(service, ".service")
 
 	connect := ConnectOpts{Host: opts.Host, User: opts.User, Port: opts.Port}
 
@@ -165,10 +177,10 @@ func DeploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	}
 
 	// 8. Render and upload the systemd unit, then daemon-reload.
-	unitPath := remotePath + "/" + service + ".service"
+	unitPath := remotePath + "/" + serviceName + ".service"
 	unit := renderSystemdUnit(systemdUnitParams{
 		Name:        br.ProjectName,
-		Service:     service,
+		Service:     serviceName,
 		InstallPath: remotePath,
 		User:        opts.User,
 	})
@@ -178,7 +190,7 @@ func DeploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	}
 	systemdLink := fmt.Sprintf(
 		"sudo install -m 0644 %s /etc/systemd/system/%s.service && sudo systemctl daemon-reload",
-		shellQuote(unitPath), shellQuote(service),
+		shellQuote(unitPath), shellQuote(serviceName),
 	)
 	if _, err := ssh.SSH(ctx, connect, systemdLink); err != nil {
 		return fmt.Errorf("%w: install systemd unit: %w", ErrDeploy, err)
@@ -198,18 +210,18 @@ func DeploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 		return fmt.Errorf("%w: promote binary: %w", ErrDeploy, err)
 	}
 
-	restartCmd := fmt.Sprintf("sudo systemctl restart %s", shellQuote(service))
+	restartCmd := fmt.Sprintf("sudo systemctl restart %s", shellQuote(serviceName))
 	if _, err := ssh.SSH(ctx, connect, restartCmd); err != nil {
-		return rollbackBinary(ctx, ssh, connect, remoteBin, remoteBinPrev, service, fmt.Errorf("%w: systemctl restart failed: %w", ErrDeploy, err), out)
+		return rollbackBinary(ctx, ssh, connect, remoteBin, remoteBinPrev, serviceName, opts.AdminToken, fmt.Errorf("%w: systemctl restart failed: %w", ErrDeploy, err), out)
 	}
 
 	// 10. Health check on the remote host.
 	healthCmd := buildHealthCheckCommand(opts.HealthURL, opts.AdminToken)
 	if _, err := ssh.SSH(ctx, connect, healthCmd); err != nil {
-		return rollbackBinary(ctx, ssh, connect, remoteBin, remoteBinPrev, service, fmt.Errorf("%w: health check failed: %w", ErrDeploy, err), out)
+		return rollbackBinary(ctx, ssh, connect, remoteBin, remoteBinPrev, serviceName, opts.AdminToken, fmt.Errorf("%w: health check failed: %w", ErrDeploy, err), out)
 	}
 
-	fmt.Fprintf(out, "deployed %s to %s:%s (service=%s)\n", br.ProjectName, connect.userHost(), remotePath, service)
+	fmt.Fprintf(out, "deployed %s to %s:%s (service=%s)\n", br.ProjectName, connect.userHost(), remotePath, serviceName)
 	return nil
 }
 
@@ -258,8 +270,10 @@ func uploadRuntimeAssets(ctx context.Context, ssh RemoteRunner, connect ConnectO
 	})
 }
 
-func rollbackBinary(ctx context.Context, ssh RemoteRunner, connect ConnectOpts, remoteBin, remoteBinPrev, service string, cause error, out io.Writer) error {
-	fmt.Fprintf(out, "deploy failed: %v; rolling back\n", cause)
+func rollbackBinary(ctx context.Context, ssh RemoteRunner, connect ConnectOpts, remoteBin, remoteBinPrev, service, adminToken string, cause error, out io.Writer) error {
+	// The cause may wrap remote-command output; mask the admin token before
+	// anything reaches operator terminals or CI logs.
+	fmt.Fprintf(out, "deploy failed: %s; rolling back\n", maskToken(cause.Error(), adminToken))
 	rollback := fmt.Sprintf(
 		"if [ -f %s ]; then mv %s %s && sudo systemctl restart %s; fi",
 		shellQuote(remoteBinPrev), shellQuote(remoteBinPrev), shellQuote(remoteBin), shellQuote(service),
@@ -268,6 +282,34 @@ func rollbackBinary(ctx context.Context, ssh RemoteRunner, connect ConnectOpts, 
 		return fmt.Errorf("%w (rollback also failed: %v)", cause, rbErr)
 	}
 	return cause
+}
+
+// maskToken returns s with every occurrence of token replaced by "***" so
+// the admin token never reaches operator terminals or CI logs.
+func maskToken(s, token string) string {
+	if token == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, token, "***")
+}
+
+// maskedError renders its wrapped error with the admin token masked while
+// keeping the chain intact, so errors.Is(err, ErrDeploy) still works.
+type maskedError struct {
+	err   error
+	token string
+}
+
+func (e *maskedError) Error() string { return maskToken(e.err.Error(), e.token) }
+func (e *maskedError) Unwrap() error { return e.err }
+
+// maskTokenErr wraps err so its message never contains token. It returns err
+// unchanged when there is nothing to mask.
+func maskTokenErr(err error, token string) error {
+	if err == nil || token == "" || !strings.Contains(err.Error(), token) {
+		return err
+	}
+	return &maskedError{err: err, token: token}
 }
 
 // buildHealthCheckCommand renders the remote curl that probes the worker's
@@ -388,7 +430,11 @@ func runHostCommand(ctx context.Context, name string, args []string) (string, st
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return stdout.String(), stderr.String(), fmt.Errorf("%s %s: %w (stderr=%s)", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		// Deliberately omit the command arguments: for ssh they include the
+		// full remote command, which can carry secrets such as the admin
+		// bearer token used by the health check. Program name, exit status,
+		// and stderr are enough to diagnose failures.
+		return stdout.String(), stderr.String(), fmt.Errorf("%s: %w (stderr=%s)", name, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), stderr.String(), nil
 }

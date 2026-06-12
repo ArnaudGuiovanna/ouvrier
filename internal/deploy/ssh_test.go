@@ -23,6 +23,10 @@ type fakeRemote struct {
 
 	failSSHContaining   string
 	failSCPRemoteSuffix string
+	// echoCommandInError makes injected SSH failures embed the full remote
+	// command in the error, mimicking the shape the old defaultRemoteRunner
+	// produced (ssh <args...>: exit status N (stderr=...)).
+	echoCommandInError bool
 }
 
 type scpUpload struct {
@@ -40,6 +44,9 @@ func (f *fakeRemote) SSH(_ context.Context, _ ConnectOpts, command string) (stri
 	f.sshCommands = append(f.sshCommands, command)
 	f.mu.Unlock()
 	if f.failSSHContaining != "" && strings.Contains(command, f.failSSHContaining) {
+		if f.echoCommandInError {
+			return "", fmt.Errorf("ssh -o BatchMode=yes h %s: exit status 22 (stderr=curl: (22) The requested URL returned error: 401)", command)
+		}
 		return "", errors.New("ssh injected failure")
 	}
 	return "", nil
@@ -156,8 +163,13 @@ func TestDeploySSHHappyPath(t *testing.T) {
 	if len(remote.scpDataKeys) != 1 {
 		t.Fatalf("scp data uploads = %d, want 1: %+v", len(remote.scpDataKeys), remote.scpDataKeys)
 	}
-	if !strings.HasSuffix(remote.scpDataKeys[0].Remote, "/demo.service.service") {
-		t.Fatalf("systemd unit upload remote = %q, want demo.service.service", remote.scpDataKeys[0].Remote)
+	// --service demo.service is canonicalized: the unit file gets exactly one
+	// .service suffix, never demo.service.service.
+	if !strings.HasSuffix(remote.scpDataKeys[0].Remote, "/demo.service") {
+		t.Fatalf("systemd unit upload remote = %q, want demo.service", remote.scpDataKeys[0].Remote)
+	}
+	if strings.HasSuffix(remote.scpDataKeys[0].Remote, ".service.service") {
+		t.Fatalf("systemd unit upload remote = %q, double .service suffix", remote.scpDataKeys[0].Remote)
 	}
 	unitText := string(remote.scpDataKeys[0].Data)
 	for _, want := range []string{
@@ -180,9 +192,9 @@ func TestDeploySSHHappyPath(t *testing.T) {
 	for _, want := range []string{
 		"mkdir -p '/opt/demo'/bin",
 		"chmod 0600 '/opt/demo/.env'",
-		"sudo install -m 0644 '/opt/demo/demo.service.service' /etc/systemd/system/'demo.service'.service",
+		"sudo install -m 0644 '/opt/demo/demo.service' /etc/systemd/system/'demo'.service",
 		"sudo systemctl daemon-reload",
-		"sudo systemctl restart 'demo.service'",
+		"sudo systemctl restart 'demo'",
 		"curl -fsS --max-time 5 'http://127.0.0.1:8080/admin/health'",
 	} {
 		if !strings.Contains(joined, want) {
@@ -319,6 +331,50 @@ func TestDeploySSHMasksAdminTokenInLogs(t *testing.T) {
 	}
 }
 
+// TestDeploySSHMasksAdminTokenOnHealthFailure is the failure-path companion:
+// the runner fails the health check with an error that embeds the full remote
+// command (the shape the old defaultRemoteRunner produced), which carries
+// "Authorization: Bearer <token>". The token must never reach the progress
+// writers nor the returned error message.
+func TestDeploySSHMasksAdminTokenOnHealthFailure(t *testing.T) {
+	dir := writeDeployFixture(t)
+	remote := &fakeRemote{
+		failSSHContaining:  "curl -fsS --max-time 5",
+		echoCommandInError: true,
+	}
+	opts := Opts{
+		Dir:        dir,
+		Host:       "h",
+		Path:       "/opt/demo",
+		Service:    "demo.service",
+		HealthURL:  "/admin/health",
+		AdminToken: "super-secret-token",
+		GoRun:      stubGoRunner(t),
+		Runner:     remote,
+	}
+	var out, errOut bytes.Buffer
+	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &out, Err: &errOut})
+	if !errors.Is(err, ErrDeploy) {
+		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
+	}
+	if !strings.Contains(err.Error(), "health check failed") {
+		t.Fatalf("DeploySSH() error = %v, want health check failure", err)
+	}
+	if strings.Contains(err.Error(), "super-secret-token") {
+		t.Fatalf("admin token leaked into returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "super-secret-token") {
+		t.Fatalf("admin token leaked into stdout: %s", out.String())
+	}
+	if strings.Contains(errOut.String(), "super-secret-token") {
+		t.Fatalf("admin token leaked into stderr: %s", errOut.String())
+	}
+	// The rollback message should still tell the operator what failed.
+	if !strings.Contains(out.String(), "deploy failed:") || !strings.Contains(out.String(), "rolling back") {
+		t.Fatalf("missing rollback progress line in stdout: %s", out.String())
+	}
+}
+
 func TestDeploySSHHealthURLFullURLOverride(t *testing.T) {
 	dir := writeDeployFixture(t)
 	remote := &fakeRemote{}
@@ -387,10 +443,6 @@ func TestStubGoRunnerWritesBinary(t *testing.T) {
 	}
 }
 
-// Make sure systemd unit names are not double-suffixed if --service already
-// ends in .service. The current implementation always adds .service when
-// constructing the unit path on disk; document the limitation here so a
-// future PR can revisit.
 func TestRenderSystemdUnitDefaultUser(t *testing.T) {
 	unit := renderSystemdUnit(systemdUnitParams{
 		Name: "demo", Service: "demo.service",
