@@ -23,8 +23,8 @@ func (s *SQLiteStore) SaveApproval(ctx context.Context, approval PendingApproval
 
 	_, err = s.db.ExecContext(ctx, `INSERT INTO ouvrier_approvals (
 		id, exec_id, session_id, trace_id, tool_name, tool_call_id, tool_kind,
-		effect, reason, status, created_at, decided_at, decided_by
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		effect, reason, args_hash, status, created_at, decided_at, decided_by
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		exec_id = excluded.exec_id,
 		session_id = excluded.session_id,
@@ -34,12 +34,13 @@ func (s *SQLiteStore) SaveApproval(ctx context.Context, approval PendingApproval
 		tool_kind = excluded.tool_kind,
 		effect = excluded.effect,
 		reason = excluded.reason,
+		args_hash = excluded.args_hash,
 		status = excluded.status,
 		decided_at = excluded.decided_at,
 		decided_by = excluded.decided_by`,
 		approval.ID, approval.ExecID, approval.SessionID, approval.TraceID,
 		approval.ToolName, approval.ToolCallID, approval.ToolKind, approval.Effect,
-		approval.Reason, string(approval.Status), formatSQLiteTime(approval.CreatedAt),
+		approval.Reason, approval.ArgsHash, string(approval.Status), formatSQLiteTime(approval.CreatedAt),
 		nullableSQLiteTime(approval.DecidedAt), approval.DecidedBy,
 	)
 	return err
@@ -67,6 +68,28 @@ func (s *SQLiteStore) PendingApprovals(ctx context.Context) ([]PendingApproval, 
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, approvalSelectColumns+" FROM ouvrier_approvals WHERE status = ? ORDER BY seq", string(ApprovalPending))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	approvals := []PendingApproval{}
+	for rows.Next() {
+		approval, err := scanApprovalRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		approvals = append(approvals, approval)
+	}
+	return approvals, rows.Err()
+}
+
+func (s *SQLiteStore) ApprovalsForExecution(ctx context.Context, execID string) ([]PendingApproval, error) {
+	ctx, err := activeContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, approvalSelectColumns+" FROM ouvrier_approvals WHERE exec_id = ? ORDER BY seq", strings.TrimSpace(execID))
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +146,7 @@ func (s *SQLiteStore) ResolveApproval(ctx context.Context, id string, status App
 }
 
 const approvalSelectColumns = `SELECT id, exec_id, session_id, trace_id, tool_name, tool_call_id,
-	tool_kind, effect, reason, status, created_at, decided_at, decided_by`
+	tool_kind, effect, reason, args_hash, status, created_at, decided_at, decided_by`
 
 type sqlRowScanner interface {
 	Scan(dest ...any) error
@@ -136,7 +159,7 @@ func scanApprovalRow(row sqlRowScanner) (PendingApproval, error) {
 	if err := row.Scan(
 		&approval.ID, &approval.ExecID, &approval.SessionID, &approval.TraceID,
 		&approval.ToolName, &approval.ToolCallID, &approval.ToolKind, &approval.Effect,
-		&approval.Reason, &status, &createdAt, &decidedAt, &approval.DecidedBy,
+		&approval.Reason, &approval.ArgsHash, &status, &createdAt, &decidedAt, &approval.DecidedBy,
 	); err != nil {
 		return PendingApproval{}, err
 	}

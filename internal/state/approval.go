@@ -35,6 +35,9 @@ func normalizeApproval(approval PendingApproval) (PendingApproval, error) {
 	approval.Effect = strings.TrimSpace(approval.Effect)
 	approval.DecidedBy = strings.TrimSpace(approval.DecidedBy)
 	approval.Reason = events.RedactText(strings.TrimSpace(approval.Reason))
+	// ArgsHash is a digest by construction; the redaction pass is a
+	// defense-in-depth backstop matching the tool-intent idem_key posture.
+	approval.ArgsHash = events.RedactText(strings.TrimSpace(approval.ArgsHash))
 	return approval, nil
 }
 

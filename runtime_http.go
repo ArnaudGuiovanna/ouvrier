@@ -96,6 +96,7 @@ func newHTTPHandlerFromRoutesAndPlans(routes []httpRoute, plans []runtimeplan.Pl
 	runtime = runtime.withAsyncGroup()
 	runtime.adminRoutes = routes
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
+	startDurableRunRecovery(runtime, plans)
 
 	mux := http.NewServeMux()
 	registerHTTPAdminRoutes(mux, runtime)
@@ -114,6 +115,7 @@ func newAdminHandlerWithRuntime(plans []runtimeplan.Plan, runtime httpRuntime) (
 	}
 	runtime = runtime.withAsyncGroup()
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
+	startDurableRunRecovery(runtime, plans)
 	mux := http.NewServeMux()
 	registerHTTPAdminRoutes(mux, runtime)
 	return newRuntimeHTTPHandler(mux, runtime.async), nil
@@ -795,6 +797,11 @@ func (rt httpRuntime) emitPipelineEvent(ctx context.Context, result planRunResul
 		"steps":    len(plan.Steps),
 		"terminal": string(plan.Terminal.Kind),
 		"status":   status,
+	}
+	if rt.cronLease != nil {
+		payload["lease"] = rt.cronLease.name
+		payload["holder"] = rt.cronLease.holder
+		payload["fence"] = rt.cronLease.fence
 	}
 	if eventErr != nil {
 		payload["error"] = eventErr.Error()

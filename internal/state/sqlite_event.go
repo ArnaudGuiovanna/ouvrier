@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
@@ -44,20 +45,13 @@ func (s *SQLiteStore) AddEvent(ctx context.Context, event events.Event) (events.
 		}
 		event.ID = uint64(id)
 	} else {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return events.Event{}, err
-		}
-		var maxID uint64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM ouvrier_events`).Scan(&maxID); err != nil {
-			_ = tx.Rollback()
-			return events.Event{}, err
-		}
-		if event.ID <= maxID {
-			_ = tx.Rollback()
-			return events.Event{}, errors.New("event ID must be greater than existing event IDs")
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO ouvrier_events (
+		// Explicit IDs come from an EventStream allocator; concurrent
+		// emitters may persist them out of arrival order, so the invariant is
+		// uniqueness (the primary key) — never insertion-order monotonicity.
+		// A duplicate means a stale allocator is re-issuing already-persisted
+		// IDs and is rejected loudly. AUTOINCREMENT keeps later auto-assigned
+		// IDs above every explicit ID ever inserted.
+		_, err = s.db.ExecContext(ctx, `INSERT INTO ouvrier_events (
 			id, at, kind, exec_id, session_id, trace_id, payload
 		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			event.ID,
@@ -69,10 +63,9 @@ func (s *SQLiteStore) AddEvent(ctx context.Context, event events.Event) (events.
 			string(payload),
 		)
 		if err != nil {
-			_ = tx.Rollback()
-			return events.Event{}, err
-		}
-		if err := tx.Commit(); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return events.Event{}, errors.New("event ID already exists")
+			}
 			return events.Event{}, err
 		}
 	}

@@ -349,6 +349,14 @@ func (r *Runner) defaultHTTPRuntimeForRun() (httpRuntime, func() error, error) {
 			}
 			return closer.Close()
 		}
+		// Startup guard: custom public stores cannot persist the run
+		// journal, so the durable-runs flag is refused loudly here.
+		durable, err := durableRunsConfigForStore(rt.stateStore)
+		if err != nil {
+			_ = closeRuntime()
+			return httpRuntime{}, nil, err
+		}
+		rt.durableRuns = durable
 		if err := seedHTTPEventStreamFromStore(&rt, rt.stateStore); err != nil {
 			_ = closeRuntime()
 			return httpRuntime{}, nil, err

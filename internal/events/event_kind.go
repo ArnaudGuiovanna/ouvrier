@@ -54,6 +54,16 @@ const (
 	EventStreamDeadLettered EventKind = "stream_dead_lettered"
 	EventStreamRedelivered  EventKind = "stream_redelivered"
 
+	EventCronLeaseAcquired EventKind = "cron_lease_acquired"
+	EventCronLeaseLost     EventKind = "cron_lease_lost"
+	EventCronTickSkipped   EventKind = "cron_tick_skipped"
+
+	EventDurableRunPruneFailed EventKind = "durable_run_prune_failed"
+
+	EventRunRecovered            EventKind = "run_recovered"
+	EventRunAbandoned            EventKind = "run_abandoned"
+	EventReplayIndeterminateTool EventKind = "replay_indeterminate_tool"
+
 	EventSinkLogged EventKind = "sink_logged"
 )
 

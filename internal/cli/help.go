@@ -19,6 +19,7 @@ Commands:
   logs      List the last N traced executions of a running worker
   trace     Print the full event timeline for one execution
   deploy    Ship the project to a remote host (ssh) or build a container image (docker)
+  state     Manage the worker's durable state backend (migrate)
   version   Print the ouvrier CLI version
 
 Run "ouvrier <command> --help" for command details.
@@ -267,6 +268,39 @@ Options:
   -h, --help           Show this help message
 `
 
+const stateHelp = `Manage the worker's durable state backend.
+
+Usage: ouvrier state <migrate> [flags]
+
+Subcommands:
+  migrate   Apply pending schema migrations to the configured state backend
+
+Run "ouvrier state <subcommand> --help" for details.
+`
+
+const stateMigrateHelp = `Apply pending schema migrations to the configured state backend.
+
+Usage: ouvrier state migrate
+
+Reads the same environment the worker uses:
+
+  OUVRIER_STATE_BACKEND   sqlite (default) or postgres
+  OUVRIER_STATE_PATH      SQLite database path (default ".ouvrier/state.db")
+  OUVRIER_STATE_DSN       Postgres connection string (required for postgres)
+
+Postgres migrations run inside one transaction serialized by an advisory
+lock, so concurrent invocations are safe; SQLite migrations stamp PRAGMA
+user_version. The command prints each schema version it applies and is a
+no-op when the schema is already current.
+
+Run this with a DDL-capable role when the worker itself connects with a
+DML-only role and OUVRIER_STATE_MIGRATE=off. The DSN is secret-bearing and
+is never printed.
+
+Options:
+  -h, --help   Show this help message
+`
+
 func printRootHelp(w io.Writer) {
 	fmt.Fprint(w, rootHelp)
 }
@@ -333,4 +367,12 @@ func printDeploySSHHelp(w io.Writer) {
 
 func printDeployDockerHelp(w io.Writer) {
 	fmt.Fprint(w, deployDockerHelp)
+}
+
+func printStateHelp(w io.Writer) {
+	fmt.Fprint(w, stateHelp)
+}
+
+func printStateMigrateHelp(w io.Writer) {
+	fmt.Fprint(w, stateMigrateHelp)
 }

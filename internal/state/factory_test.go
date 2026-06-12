@@ -33,6 +33,35 @@ func TestNewStoreFromEnvSupportsMemory(t *testing.T) {
 	}
 }
 
+func TestNewStoreFromEnvPostgresRequiresDSN(t *testing.T) {
+	t.Setenv(EnvStateBackend, BackendPostgres)
+	t.Setenv(EnvStateDSN, "")
+
+	_, err := NewStoreFromEnv()
+	if err == nil {
+		t.Fatal("NewStoreFromEnv returned nil error for postgres backend without DSN")
+	}
+	if !strings.Contains(err.Error(), EnvStateDSN) || !strings.Contains(err.Error(), EnvStateBackend) {
+		t.Fatalf("NewStoreFromEnv error = %q, want both %s and %s named", err.Error(), EnvStateDSN, EnvStateBackend)
+	}
+}
+
+func TestNewStoreFromEnvSupportsPostgres(t *testing.T) {
+	dsn := postgresTestSchemaDSN(t)
+	t.Setenv(EnvStateBackend, BackendPostgres)
+	t.Setenv(EnvStateDSN, dsn)
+
+	store, err := NewStoreFromEnv()
+	if err != nil {
+		t.Fatalf("NewStoreFromEnv returned error: %v", err)
+	}
+	defer closeStore(t, store)
+
+	if _, ok := store.(*PostgresStore); !ok {
+		t.Fatalf("store type = %T, want *PostgresStore", store)
+	}
+}
+
 func TestNewStoreFromEnvRejectsUnknownBackend(t *testing.T) {
 	t.Setenv(EnvStateBackend, "redis")
 

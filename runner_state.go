@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	internalevents "github.com/ArnaudGuiovanna/ouvrier/internal/events"
@@ -258,6 +259,60 @@ func (s publicStateStoreAdapter) PendingApprovals(ctx context.Context) ([]intern
 func (s publicStateStoreAdapter) ResolveApproval(ctx context.Context, id string, status internalstate.ApprovalStatus, decidedBy string) (internalstate.PendingApproval, error) {
 	resolved, err := s.store.ResolveApproval(ctx, id, ApprovalStatus(status), decidedBy)
 	return internalPendingApproval(resolved), err
+}
+
+// ApprovalsForExecution backs durable-run recovery, which is refused at
+// startup with a custom public StateStore; the public contract only lists
+// pending approvals, so this method exists to satisfy the internal Store
+// interface honestly.
+func (s publicStateStoreAdapter) ApprovalsForExecution(context.Context, string) ([]internalstate.PendingApproval, error) {
+	return nil, errors.New("listing approvals by execution is not supported by custom state stores; use the built-in sqlite or postgres backend")
+}
+
+// errDurableRunsUnsupported backs the durable-run Store methods on custom
+// public state stores. The startup guard refuses OUVRIER_DURABLE_RUNS=1 with
+// WithStateStore, so these methods are never reached in a configured runtime;
+// they exist to satisfy the internal Store interface honestly.
+var errDurableRunsUnsupported = errors.New("durable runs are not supported by custom state stores; use the built-in sqlite or postgres backend")
+
+func (s publicStateStoreAdapter) SaveRunJournal(context.Context, internalstate.RunJournal) error {
+	return errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) RunJournal(context.Context, string) (internalstate.RunJournal, bool, error) {
+	return internalstate.RunJournal{}, false, errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) RunJournals(context.Context) ([]internalstate.RunJournal, error) {
+	return nil, errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) SaveRunCheckpoint(context.Context, internalstate.RunCheckpoint) error {
+	return errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) RunCheckpoints(context.Context, string) ([]internalstate.RunCheckpoint, error) {
+	return nil, errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) BeginToolIntent(context.Context, internalstate.ToolIntent) error {
+	return errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) CompleteToolIntent(context.Context, string, string) error {
+	return errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) ToolIntents(context.Context, string) ([]internalstate.ToolIntent, error) {
+	return nil, errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) PruneRunJournal(context.Context, string) error {
+	return errDurableRunsUnsupported
+}
+
+func (s publicStateStoreAdapter) PruneRunJournalsBefore(context.Context, time.Time) ([]string, error) {
+	return nil, errDurableRunsUnsupported
 }
 
 func publicPendingApproval(approval internalstate.PendingApproval) PendingApproval {

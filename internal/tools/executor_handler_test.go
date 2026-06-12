@@ -160,12 +160,25 @@ func TestExecutorSkipsDuplicateIdempotentHandlerCall(t *testing.T) {
 	if first.IsError {
 		t.Fatalf("first IsError = true, content=%s", first.Content)
 	}
+	// Same-exec duplicates dedupe as success (#40); a different execution
+	// still gets the hard duplicate error.
 	second, err := executor.Execute(ctx, call)
 	if err != nil {
 		t.Fatalf("second Execute returned error: %v", err)
 	}
-	if !second.IsError {
-		t.Fatal("second IsError = false, want duplicate idempotency error")
+	if second.IsError {
+		t.Fatalf("second IsError = true, want same-exec duplicate treated as success; content=%s", second.Content)
+	}
+	if called != 1 {
+		t.Fatalf("called = %d, want exactly one handler execution", called)
+	}
+	otherCtx := ContextWithIdempotencyStore(context.Background(), store, "exec_2")
+	third, err := executor.Execute(otherCtx, call)
+	if err != nil {
+		t.Fatalf("third Execute returned error: %v", err)
+	}
+	if !third.IsError {
+		t.Fatal("third IsError = false, want cross-exec duplicate idempotency error")
 	}
 	if called != 1 {
 		t.Fatalf("called = %d, want exactly one handler execution", called)

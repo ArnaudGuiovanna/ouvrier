@@ -113,6 +113,36 @@ func printStatusSummary(w io.Writer, payload map[string]any) {
 	fmt.Fprintf(w, "  failures:          %s\n", numberField(payload, "tool_failures"))
 	fmt.Fprintf(w, "  perm_allowed:      %s\n", numberField(payload, "permission_allowed"))
 	fmt.Fprintf(w, "  perm_denied:       %s\n", numberField(payload, "permission_denied"))
+
+	printCronLeases(w, payload)
+}
+
+// printCronLeases renders the cron leader-leases reported by lease-capable
+// state backends. Single-replica workers without leases print nothing.
+func printCronLeases(w io.Writer, payload map[string]any) {
+	leases, ok := payload["cron_leases"].([]any)
+	if !ok || len(leases) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "cron_leases:")
+	for _, entry := range leases {
+		lease, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		self := ""
+		if isSelf, _ := lease["is_self"].(bool); isSelf {
+			self = " (self)"
+		}
+		fmt.Fprintf(w, "  %s holder=%s fence=%s expires_at=%s%s\n",
+			stringField(lease, "name"),
+			stringField(lease, "holder"),
+			numberField(lease, "fence"),
+			stringField(lease, "expires_at"),
+			self,
+		)
+	}
 }
 
 func stringField(payload map[string]any, key string) string {
