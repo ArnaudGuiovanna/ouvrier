@@ -25,6 +25,7 @@ type MemoryStore struct {
 	approvals       map[string]PendingApproval
 	approvalSeq     uint64
 	approvalOrder   map[string]uint64
+	leases          map[string]Lease
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -35,6 +36,7 @@ func NewMemoryStore() *MemoryStore {
 		memory:        make(map[string]map[string]MemoryRecord),
 		approvals:     make(map[string]PendingApproval),
 		approvalOrder: make(map[string]uint64),
+		leases:        make(map[string]Lease),
 	}
 }
 

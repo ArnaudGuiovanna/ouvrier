@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultSQLitePath   = ".ouvrier/state.db"
-	sqliteSchemaVersion = 4
+	sqliteSchemaVersion = 5
 )
 
 type SQLiteStore struct {
@@ -305,4 +305,15 @@ var sqliteSchemaStatements = []string{
 		decided_by TEXT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ouvrier_approvals_status ON ouvrier_approvals(status, seq)`,
+	// Schema v5: fenced TTL leases for cron leader election and durable-run
+	// recovery claims. Timestamps are SQLite-generated strftime strings with
+	// fixed millisecond width so expiry comparisons stay in database time.
+	`CREATE TABLE IF NOT EXISTS ouvrier_leases (
+		name TEXT PRIMARY KEY,
+		holder TEXT NOT NULL,
+		fence INTEGER NOT NULL,
+		acquired_at TEXT NOT NULL,
+		renewed_at TEXT NOT NULL,
+		expires_at TEXT NOT NULL
+	)`,
 }

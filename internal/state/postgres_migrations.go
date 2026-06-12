@@ -97,6 +97,22 @@ var postgresMigrations = []postgresMigration{
 			`CREATE INDEX idx_ouvrier_approvals_status ON ouvrier_approvals(status, seq)`,
 		},
 	},
+	{
+		// Fenced TTL leases for cron leader election and durable-run recovery
+		// claims. Expiry comparisons run against now() so replica clock skew
+		// never decides ownership.
+		version: 2,
+		statements: []string{
+			`CREATE TABLE ouvrier_leases (
+				name TEXT PRIMARY KEY,
+				holder TEXT NOT NULL,
+				fence BIGINT NOT NULL,
+				acquired_at TIMESTAMPTZ NOT NULL,
+				renewed_at TIMESTAMPTZ NOT NULL,
+				expires_at TIMESTAMPTZ NOT NULL
+			)`,
+		},
+	},
 }
 
 // migrate applies pending migrations inside one transaction, serialized by a
