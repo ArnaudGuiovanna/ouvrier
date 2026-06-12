@@ -1,10 +1,11 @@
-# Ouvrier v0.1 Public API Reference
+# Ouvrier Public API Reference
 
 This file is a single-source map of the public surface in package
-`ovr "github.com/ArnaudGuiovanna/ouvrier"`. It mirrors the v0.1 framework
+`ovr "github.com/ArnaudGuiovanna/ouvrier"`. It mirrors the shipped framework
 contract documented in the handbook and is exercised by the
-`TestPublicV01APIParityCompiles` golden test so the doc cannot drift away from
-the code.
+`TestPublicAPIParityCompiles` golden test so the doc cannot drift away from the
+code. As of June 2026, `main` contains the v0.2 milestone work; `v0.1.0`
+remains the latest tagged release until v0.2 is tagged.
 
 ## Triggers
 
@@ -23,7 +24,7 @@ Trigger options (passed inside the trigger constructor or via `From`-level
 | `IdempotencyKey(header string) FromOption`        | Use the named HTTP/webhook header as the idempotency key. |
 | `VerifySignature(envVar, header string) FromOption` | HMAC-SHA256 signature verification using a shared secret read from `envVar`. |
 | `WorkerPool(limit int) FromOption`                 | Cap concurrent trigger handlers.                     |
-| `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries. The target is published to the real broker transport (`kafka://`, `nats://`, `redis://`); replay it with `ReplayStreamDLQ` or `POST /admin/streams/replay`. |
+| `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries. Broker targets are published over the real queue transport; runtime replay drains the retained runtime DLQ copy for that plan. |
 | `StreamMaxInFlight(limit int) FromOption`          | Bound concurrently processed stream messages so a slow handler applies backpressure to the broker. |
 | `StreamAckPolicy(policy StreamAckMode) FromOption` | Per-broker acknowledgement mode: `StreamAckAuto` (default; runtime acks after successful processing) or `StreamAckManual` (handler owns the ack, broker redelivers until acked). No-op for brokers whose receiver exposes no ack closure. |
 
@@ -249,6 +250,52 @@ strings) before export. Export errors are swallowed so observability never
 breaks the pipeline. `WithOTLPExporter` is a convenience over `WithTracer`;
 when both are passed, the last option wins.
 
+## Hook Events
+
+`EventKind` constants exposed for hooks include:
+
+```go
+ovr.EventPipelineStarted
+ovr.EventPipelineCompleted
+ovr.EventPipelineFailed
+ovr.EventPipeStarted
+ovr.EventPipeCompleted
+ovr.EventPipeFailed
+ovr.EventSessionStarted
+ovr.EventSessionSaved
+ovr.EventSessionCancelled
+ovr.EventLLMCallStarted
+ovr.EventLLMCallCompleted
+ovr.EventLLMCallFailed
+ovr.EventLLMTokenDelta
+ovr.EventModelFallback
+ovr.EventToolCallStarted
+ovr.EventToolCallCompleted
+ovr.EventToolCallFailed
+ovr.EventPermissionDecision
+ovr.EventIdempotencyDecision
+ovr.EventSignatureDecision
+ovr.EventApprovalRequested
+ovr.EventApprovalApproved
+ovr.EventApprovalDenied
+ovr.EventExecutionSuspended
+ovr.EventExecutionResumed
+ovr.EventHookFailed
+ovr.EventSchemaValidationPassed
+ovr.EventSchemaValidationFailed
+ovr.EventSchemaRepairStarted
+ovr.EventSchemaRepairCompleted
+ovr.EventSchemaRepairFailed
+ovr.EventBudgetExceeded
+ovr.EventTaskStarted
+ovr.EventTaskCompleted
+ovr.EventTaskFailed
+ovr.EventSkillLoaded
+ovr.EventStreamDeadLettered
+ovr.EventStreamRedelivered
+ovr.EventSinkLogged
+```
+
 ## Metrics
 
 ```
@@ -271,9 +318,15 @@ Bearer-authenticated HTTP endpoints exposed by the runtime:
 ```
 GET  /admin/health
 GET  /admin/status
+GET  /admin/plans          # compiled trigger/step/terminal capabilities
+GET  /admin/capabilities   # integration-oriented alias for compiled capabilities
+GET  /admin/events         # redacted JSONL/SSE event stream
 GET  /admin/traces?last=N
 GET  /admin/traces/<exec-id>
-POST /admin/trigger
+POST /admin/trigger        # returns exec_id/trace_id/session_id when scheduled
+GET  /admin/approvals      # pending human-in-the-loop approvals
+POST /admin/approvals/<id> # approve or deny a suspended tool call
+POST /admin/streams/replay # replay the runtime-retained DLQ copy for a stream plan
 GET  /metrics              # Prometheus text exposition (admin token required)
 GET  /dev                  # dev-mode trace viewer (admin token required)
 ```
@@ -292,9 +345,12 @@ Use `AllowSideEffects` for non-targeted Go tool labels. Use
 `AllowSideEffectTargets` for target-scoped output actions such as webhook push,
 queue push, file sink, MCP, Bash process, and Bash filesystem access. Compose
 more sophisticated policies by implementing the `PermissionPolicy` interface.
+`PermissionDecision` exposes `Allowed`, `Reason`, `Suspended`, and `ApprovalID`;
+a suspended decision must carry a non-empty approval ID so the runtime can
+resume after an operator approves it.
 
 ## Stability
 
-This document is the v0.1 reference. Anything not listed here is considered
-internal and may change between v0.1 patch releases. Spec gaps discovered by
-`api_parity_test.go` are logged at the top of that file.
+This document is the current shipped public reference. Anything not listed here
+is considered internal and may change between patch releases. Spec gaps
+discovered by `api_parity_test.go` are logged at the top of that file.

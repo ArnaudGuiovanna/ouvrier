@@ -28,6 +28,8 @@ const (
 	EventLLMCallStarted   EventKind = "llm_call_started"
 	EventLLMCallCompleted EventKind = "llm_call_completed"
 	EventLLMCallFailed    EventKind = "llm_call_failed"
+	EventLLMTokenDelta    EventKind = "llm_token_delta"
+	EventModelFallback    EventKind = "model_fallback"
 
 	EventToolCallStarted   EventKind = "tool_call_started"
 	EventToolCallCompleted EventKind = "tool_call_completed"
@@ -36,6 +38,12 @@ const (
 	EventPermissionDecision  EventKind = "permission_decision"
 	EventIdempotencyDecision EventKind = "idempotency_decision"
 	EventSignatureDecision   EventKind = "signature_decision"
+
+	EventApprovalRequested  EventKind = "approval_requested"
+	EventApprovalApproved   EventKind = "approval_approved"
+	EventApprovalDenied     EventKind = "approval_denied"
+	EventExecutionSuspended EventKind = "execution_suspended"
+	EventExecutionResumed   EventKind = "execution_resumed"
 
 	EventHookFailed EventKind = "hook_failed"
 
@@ -50,6 +58,11 @@ const (
 	EventTaskStarted   EventKind = "task_started"
 	EventTaskCompleted EventKind = "task_completed"
 	EventTaskFailed    EventKind = "task_failed"
+
+	EventSkillLoaded EventKind = "skill_loaded"
+
+	EventStreamDeadLettered EventKind = "stream_dead_lettered"
+	EventStreamRedelivered  EventKind = "stream_redelivered"
 
 	EventSinkLogged EventKind = "sink_logged"
 )

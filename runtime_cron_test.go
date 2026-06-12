@@ -134,7 +134,7 @@ func TestRunCronPlanOncePushesPipelineOutputToWebhook(t *testing.T) {
 }
 
 func TestServeCronPlansMountsAdminEndpointsWhileLoopRuns(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	plans, err := compilePlans([]Node{
 		From(Cron("@every 1h")),
 		Sink(Log()),

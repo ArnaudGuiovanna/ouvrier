@@ -151,3 +151,26 @@ func TestPublicHookFailedEventKind(t *testing.T) {
 		t.Fatalf("EventHookFailed = %q, want hook_failed", ovr.EventHookFailed)
 	}
 }
+
+func TestPublicEventKindsExposeRuntimeEvents(t *testing.T) {
+	cases := map[ovr.EventKind]string{
+		ovr.EventLLMTokenDelta:       "llm_token_delta",
+		ovr.EventModelFallback:       "model_fallback",
+		ovr.EventApprovalRequested:   "approval_requested",
+		ovr.EventApprovalApproved:    "approval_approved",
+		ovr.EventApprovalDenied:      "approval_denied",
+		ovr.EventExecutionSuspended:  "execution_suspended",
+		ovr.EventExecutionResumed:    "execution_resumed",
+		ovr.EventSkillLoaded:         "skill_loaded",
+		ovr.EventStreamDeadLettered:  "stream_dead_lettered",
+		ovr.EventStreamRedelivered:   "stream_redelivered",
+		ovr.EventPermissionDecision:  "permission_decision",
+		ovr.EventIdempotencyDecision: "idempotency_decision",
+		ovr.EventSchemaRepairStarted: "schema_repair_started",
+	}
+	for got, want := range cases {
+		if string(got) != want {
+			t.Fatalf("event kind = %q, want %q", got, want)
+		}
+	}
+}

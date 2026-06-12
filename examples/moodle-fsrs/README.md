@@ -16,6 +16,7 @@ response: `next_due`, `stability`, `difficulty`, `lapses`.
 moodle-fsrs/
   main.go
   go.mod                          (replace -> ../../)
+  ouvrier.worker.json             (integration manifest)
 ```
 
 ## Required environment
@@ -25,7 +26,7 @@ moodle-fsrs/
 Optional:
 
 - `ANTHROPIC_BASE_URL` - override the provider endpoint.
-- `PIP_ADMIN_TOKEN`   - protect `/admin/*` endpoints.
+- `OUVRIER_ADMIN_TOKEN`   - protect `/admin/*` endpoints.
 
 ## Run
 

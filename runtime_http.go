@@ -29,7 +29,19 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 const maxHTTPRequestBodyBytes = 1 << 20
+const maxAdminRequestBodyBytes = 1 << 20
 const directReplyOKOutput = `{"status":"ok"}`
+
+// limitAdminBody caps an admin request body to maxAdminRequestBodyBytes,
+// mirroring the hardening already applied to the public trigger path
+// (readHTTPRequestInput) so an admin handler cannot be made to buffer an
+// unbounded body. Each handler keeps its own decode and error contract.
+func limitAdminBody(w http.ResponseWriter, req *http.Request) {
+	if req.Body == nil {
+		return
+	}
+	req.Body = http.MaxBytesReader(w, req.Body, maxAdminRequestBodyBytes)
+}
 
 var checkBashIsolationAvailable = tools.CheckBashIsolationAvailable
 

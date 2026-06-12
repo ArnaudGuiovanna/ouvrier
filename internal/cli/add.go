@@ -22,12 +22,14 @@ func (app *App) runAddCommand(ctx context.Context, args []string) error {
 	switch sub {
 	case "agent":
 		return app.runAddAgentCommand(ctx, rest)
+	case "trigger":
+		return app.runAddTriggerCommand(ctx, rest)
 	case "tool":
 		return app.runAddToolCommand(ctx, rest)
 	case "skill":
 		return app.runAddSkillCommand(ctx, rest)
 	default:
-		return fmt.Errorf("%w: unknown add subcommand %q (expected agent|tool|skill)", ErrUsage, sub)
+		return fmt.Errorf("%w: unknown add subcommand %q (expected agent|trigger|tool|skill)", ErrUsage, sub)
 	}
 }
 

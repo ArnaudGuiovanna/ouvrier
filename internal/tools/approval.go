@@ -76,3 +76,36 @@ func approvalGateFromContext(ctx context.Context) (ApprovalGate, ApprovalContext
 	}
 	return value.gate, value.context, true
 }
+
+type approvedApprovalContextValue struct {
+	approvalID string
+	toolCallID string
+}
+
+type approvedApprovalContextKey struct{}
+
+// ContextWithApprovedApproval marks one previously suspended tool call as
+// operator-approved for the duration of a resumed execution.
+func ContextWithApprovedApproval(ctx context.Context, approvalID, toolCallID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if approvalID == "" || toolCallID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, approvedApprovalContextKey{}, approvedApprovalContextValue{
+		approvalID: approvalID,
+		toolCallID: toolCallID,
+	})
+}
+
+func approvedApprovalFromContext(ctx context.Context, toolCallID string) (string, bool) {
+	if ctx == nil || toolCallID == "" {
+		return "", false
+	}
+	value, ok := ctx.Value(approvedApprovalContextKey{}).(approvedApprovalContextValue)
+	if !ok || value.toolCallID != toolCallID || value.approvalID == "" {
+		return "", false
+	}
+	return value.approvalID, true
+}

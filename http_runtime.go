@@ -42,20 +42,22 @@ type httpRuntime struct {
 	async                *runtimeAsyncGroup
 	streamDeltas         bool
 	providerGate         *harness.ProviderGate
+	approvalResumes      *approvalResumeRegistry
 }
 
 func defaultHTTPRuntime() httpRuntime {
 	providers, _ := providerRegistryFromEnv()
 	stream, _ := events.NewEventStream()
 	return httpRuntime{
-		providers:      providers,
-		toolExecutor:   tools.NewExecutor(),
-		mcpConnector:   envMCPConnector{connector: mcpclient.NewEnvConnector()},
-		streamReceiver: newDefaultStreamReceiver(),
-		streamDLQ:      newRoutingStreamDLQ(),
-		eventStream:    stream,
-		adminToken:     adminTokenFromEnv(),
-		async:          newRuntimeAsyncGroup(),
+		providers:       providers,
+		toolExecutor:    tools.NewExecutor(),
+		mcpConnector:    envMCPConnector{connector: mcpclient.NewEnvConnector()},
+		streamReceiver:  newDefaultStreamReceiver(),
+		streamDLQ:       newRoutingStreamDLQ(),
+		eventStream:     stream,
+		adminToken:      adminTokenFromEnv(),
+		async:           newRuntimeAsyncGroup(),
+		approvalResumes: newApprovalResumeRegistry(),
 	}
 }
 
@@ -106,11 +108,6 @@ func seedHTTPEventStreamFromStore(rt *httpRuntime, store state.Store) error {
 	return nil
 }
 
-func (rt httpRuntime) runPlan(ctx context.Context, plan runtimeplan.Plan, input string) (string, error) {
-	result, err := rt.runPlanResult(ctx, plan, input)
-	return result.Output, err
-}
-
 func (rt httpRuntime) runPlanWithSession(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session) (string, error) {
 	result, err := rt.runPlanResultWithSession(ctx, plan, input, session)
 	return result.Output, err
@@ -137,6 +134,9 @@ func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtime
 		result.HasSession = true
 	}
 	if err != nil {
+		if rt.rememberSuspendedPlan(err, plan, pipelineSession) {
+			return result, err
+		}
 		emitErr := rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err)
 		return result, errors.Join(err, emitErr)
 	}
@@ -270,7 +270,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 	}
 
 	current := input
-	for _, step := range steps {
+	for stepIndex, step := range steps {
 		if step.Kind == runtimeplan.StepParallel {
 			stepResult, err := rt.runParallelStepResult(ctx, step, current, scope)
 			if err != nil {
@@ -372,6 +372,33 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		closeErr := closeMCP()
 		if err != nil {
 			result.Output = out.Text
+			if suspended, ok := harness.SuspendedRun(err); ok {
+				remainingSteps := append([]runtimeplan.Step(nil), steps[stepIndex+1:]...)
+				resume := func(resumeCtx context.Context) (planRunResult, error) {
+					resumed, resumeErr := suspended.Resume(resumeCtx)
+					resumedResult := planRunResult{
+						Output:     resumed.Text,
+						Session:    resumed.Session,
+						HasSession: resumed.Session.SessionID != "",
+					}
+					if resumeErr != nil {
+						return resumedResult, resumeErr
+					}
+					if resumed.Status != harness.StatusCompleted {
+						return resumedResult, fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, resumed.Status)
+					}
+					if len(remainingSteps) == 0 {
+						return resumedResult, nil
+					}
+					restResult, restErr := rt.runStepsResult(resumeCtx, remainingSteps, resumed.Text, scope)
+					if !restResult.HasSession && resumedResult.HasSession {
+						restResult.Session = resumedResult.Session
+						restResult.HasSession = true
+					}
+					return restResult, restErr
+				}
+				return result, newSuspendedPlanError(suspended, resume)
+			}
 			return result, err
 		}
 		if closeErr != nil {
@@ -561,6 +588,16 @@ func (g *runtimeAsyncGroup) Shutdown(ctx context.Context) error {
 func (rt httpRuntime) withAsyncGroup() httpRuntime {
 	if rt.async == nil {
 		rt.async = newRuntimeAsyncGroup()
+	}
+	if rt.approvalResumes == nil {
+		rt.approvalResumes = newApprovalResumeRegistry()
+	}
+	if rt.stateStore != nil && rt.eventStream == nil {
+		stream, err := events.NewEventStream()
+		if err == nil {
+			rt.eventStream = stream
+			_ = rt.syncEventStreamWithStore(context.Background())
+		}
 	}
 	return rt
 }

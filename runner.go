@@ -3,6 +3,7 @@ package ovr
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -36,6 +37,7 @@ type Runner struct {
 	tracer               Tracer
 	pricing              PricingTable
 	providerBudgets      map[string]int
+	provider             Provider
 	err                  error
 }
 
@@ -48,6 +50,7 @@ type runnerConfig struct {
 	tracer               Tracer
 	pricing              PricingTable
 	providerBudgets      map[string]int
+	provider             Provider
 	err                  error
 }
 
@@ -105,6 +108,7 @@ func NewRunner(options ...RunnerOption) *Runner {
 		tracer:               cfg.tracer,
 		pricing:              cfg.pricing,
 		providerBudgets:      cfg.providerBudgets,
+		provider:             cfg.provider,
 		err:                  cfg.err,
 	}
 }
@@ -260,6 +264,9 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 	if r.err != nil {
 		return r.err
 	}
+	if err := checkLegacyEnv(); err != nil {
+		return err
+	}
 	plans, err := compilePlans(nodes)
 	if err != nil {
 		return err
@@ -268,6 +275,14 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 	runtime, closeRuntime, err := r.defaultHTTPRuntimeForRun()
 	if err != nil {
 		return fmt.Errorf("state store: %w", err)
+	}
+
+	if err := checkAdminExposure(addr, runtime.adminToken); err != nil {
+		_ = closeRuntime()
+		return err
+	}
+	if warning := adminExposureWarning(addr, runtime.adminToken); warning != "" {
+		log.Println(warning)
 	}
 
 	var serveErr error
@@ -391,6 +406,12 @@ func (r *Runner) configureHTTPRuntime(rt *httpRuntime) error {
 	}
 	if gate := harness.NewProviderGate(r.providerBudgets); gate != nil {
 		rt.providerGate = gate
+	}
+	if r.provider != nil {
+		// An injected provider serves every model id; clear the env-derived
+		// registry so resolution falls through to it (see providerForModel).
+		rt.provider = r.provider
+		rt.providers = nil
 	}
 	return nil
 }

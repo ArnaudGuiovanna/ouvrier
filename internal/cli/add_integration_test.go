@@ -63,6 +63,15 @@ func TestAddCommandsKeepScaffoldCompiling(t *testing.T) {
 		t.Fatalf("add skill: %v\nstderr=%s", err, errOut.String())
 	}
 
+	if err := app.Run(context.Background(), []string{
+		"add", "trigger",
+		"--trigger", "cron @every 1h",
+		"--goal", "Run periodic maintenance.",
+		"--dir", project.Dir,
+	}); err != nil {
+		t.Fatalf("add trigger: %v\nstderr=%s", err, errOut.String())
+	}
+
 	cmd := exec.Command("go", "build", "-buildvcs=false", "./...")
 	cmd.Dir = project.Dir
 	if buildOutput, buildErr := cmd.CombinedOutput(); buildErr != nil {
@@ -72,7 +81,8 @@ func TestAddCommandsKeepScaffoldCompiling(t *testing.T) {
 	// Sanity assertion: stdout reports the three add messages.
 	if !strings.Contains(out.String(), "added agent") ||
 		!strings.Contains(out.String(), "added tool") ||
-		!strings.Contains(out.String(), "added skill") {
+		!strings.Contains(out.String(), "added skill") ||
+		!strings.Contains(out.String(), "added trigger") {
 		t.Fatalf("stdout missing add messages:\n%s", out.String())
 	}
 }

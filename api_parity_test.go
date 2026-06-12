@@ -1,5 +1,5 @@
 // Package ovr_test contains a compile-time parity test that references every
-// documented v0.1 public symbol from docs/api.md so that any rename, removal,
+// documented public symbol from docs/api.md so that any rename, removal,
 // or signature drift breaks `go build ./...` and public API drift is
 // observable from CI.
 //
@@ -10,7 +10,7 @@
 // against the package as of the time of writing. When the spec describes a
 // public surface that is intentionally not implemented yet, the offending
 // reference should be replaced with a `t.Logf("api gap: ...")` line and noted
-// in this header block. As of 2026-05 every documented v0.1 primitive listed
+// in this header block. As of 2026-06 every documented primitive listed
 // in docs/api.md has a public counterpart.
 package ovr_test
 
@@ -29,13 +29,13 @@ type parityReply struct {
 // parityTool keeps the Tool() signature exercise free of nil-function failures.
 func parityTool(_ context.Context) error { return nil }
 
-// TestPublicV01APIParityCompiles is a no-op test whose purpose is to fail the
-// build when any documented v0.1 public symbol is removed or renamed.
+// TestPublicAPIParityCompiles is a no-op test whose purpose is to fail the
+// build when any documented public symbol is removed or renamed.
 //
 // Each reference is an assignment to the blank identifier or a call that only
 // produces ignored values. Validation errors at runtime are tolerated: the
 // goal is type-checking, not behaviour.
-func TestPublicV01APIParityCompiles(t *testing.T) {
+func TestPublicAPIParityCompiles(t *testing.T) {
 	t.Helper()
 
 	// Trigger primitives.
@@ -110,6 +110,12 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 	_ = ovr.Run
 	_ = ovr.Validate
 	_ = ovr.WithPermissionPolicy
+	_ = ovr.PermissionDecision{
+		Allowed:    false,
+		Reason:     "operator approval pending",
+		Suspended:  true,
+		ApprovalID: "approval-1",
+	}
 	_ = ovr.WithStateStore
 	_ = ovr.MemoryRecord{}
 	// StateStore now carries scoped persistent agent memory; reference the
@@ -121,6 +127,45 @@ func TestPublicV01APIParityCompiles(t *testing.T) {
 		_ = memStore.ListMemory
 	}
 	_ = ovr.WithHooks
+	_ = ovr.EventPipelineStarted
+	_ = ovr.EventPipelineCompleted
+	_ = ovr.EventPipelineFailed
+	_ = ovr.EventPipeStarted
+	_ = ovr.EventPipeCompleted
+	_ = ovr.EventPipeFailed
+	_ = ovr.EventSessionStarted
+	_ = ovr.EventSessionSaved
+	_ = ovr.EventSessionCancelled
+	_ = ovr.EventLLMCallStarted
+	_ = ovr.EventLLMCallCompleted
+	_ = ovr.EventLLMCallFailed
+	_ = ovr.EventLLMTokenDelta
+	_ = ovr.EventModelFallback
+	_ = ovr.EventToolCallStarted
+	_ = ovr.EventToolCallCompleted
+	_ = ovr.EventToolCallFailed
+	_ = ovr.EventPermissionDecision
+	_ = ovr.EventIdempotencyDecision
+	_ = ovr.EventSignatureDecision
+	_ = ovr.EventApprovalRequested
+	_ = ovr.EventApprovalApproved
+	_ = ovr.EventApprovalDenied
+	_ = ovr.EventExecutionSuspended
+	_ = ovr.EventExecutionResumed
+	_ = ovr.EventHookFailed
+	_ = ovr.EventSchemaValidationPassed
+	_ = ovr.EventSchemaValidationFailed
+	_ = ovr.EventSchemaRepairStarted
+	_ = ovr.EventSchemaRepairCompleted
+	_ = ovr.EventSchemaRepairFailed
+	_ = ovr.EventBudgetExceeded
+	_ = ovr.EventTaskStarted
+	_ = ovr.EventTaskCompleted
+	_ = ovr.EventTaskFailed
+	_ = ovr.EventSkillLoaded
+	_ = ovr.EventStreamDeadLettered
+	_ = ovr.EventStreamRedelivered
+	_ = ovr.EventSinkLogged
 	_ = ovr.WithSandbox
 	_ = ovr.WithSchemaRepairAttempts
 	_ = ovr.WithTracer

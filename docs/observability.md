@@ -7,14 +7,17 @@ Ouvrier exposes execution through three layers:
    subagent task, hook invocation, permission decision). Events are persisted
    to `StateStore` and redacted before any external output.
 2. **Admin HTTP endpoints** — `/admin/health`, `/admin/status`,
+   `/admin/plans`, `/admin/capabilities`, `/admin/events`,
    `/admin/traces?last=N`, `/admin/traces/<exec-id>`, `POST /admin/trigger`,
-   and (dev-mode only) `GET /dev` for the trace viewer UI.
+   `GET /admin/approvals`, `POST /admin/approvals/<id>`,
+   `POST /admin/streams/replay`, and (dev-mode only) `GET /dev` for the trace
+   viewer UI.
 3. **Tracer hooks** — an OTel-compatible `Tracer` interface that pairs
    `*_started` and `*_completed` / `*_failed` events into spans.
 
 ## Admin endpoints
 
-All admin endpoints require `Authorization: Bearer <PIP_ADMIN_TOKEN>` outside
+All admin endpoints require `Authorization: Bearer <OUVRIER_ADMIN_TOKEN>` outside
 local development. Responses are JSON and redact secrets before they leave the
 process.
 
@@ -22,9 +25,15 @@ process.
 | ------------------------------ | --------------------------------------------- |
 | `GET /admin/health`            | Liveness probe.                               |
 | `GET /admin/status`            | Counters derived from EventStream + StateStore: sessions, executions by status, LLM usage, harness metrics, schema violations, budget usage. |
+| `GET /admin/plans`             | Machine-readable compiled triggers, steps, tools, schemas, and terminals. |
+| `GET /admin/capabilities`      | Integration-oriented alias for compiled worker capabilities. |
+| `GET /admin/events`            | Redacted event stream as JSONL by default or SSE with `?format=sse`; add `?follow=false` for a snapshot. |
 | `GET /admin/traces?last=N`     | Recent execution headers.                     |
 | `GET /admin/traces/<exec-id>`  | Full event timeline for one execution.        |
-| `POST /admin/trigger`          | Manually fire a trigger (cron/HTTP/stream).    |
+| `POST /admin/trigger`          | Manually fire a trigger (cron/HTTP/stream) and return `exec_id`, `trace_id`, and `session_id` when scheduled. |
+| `GET /admin/approvals`         | Pending human-in-the-loop approvals.          |
+| `POST /admin/approvals/<id>`   | Approve or deny a suspended tool call.        |
+| `POST /admin/streams/replay`   | Replay the runtime-retained DLQ copy for one configured stream plan. |
 | `GET /metrics`                 | Prometheus text exposition (counters + latency summaries). |
 | `GET /dev`                     | Local dev-mode trace viewer UI.               |
 
@@ -36,14 +45,14 @@ ouvrier logs --last 50                # /admin/traces?last=50
 ouvrier trace <exec-id>               # /admin/traces/<exec-id>
 ```
 
-`PIP_ADMIN_TOKEN` from the environment is used automatically.
+`OUVRIER_ADMIN_TOKEN` from the environment is used automatically.
 
 ## Prometheus `/metrics`
 
 `GET /metrics` returns a hand-rolled Prometheus text exposition (format version
 0.0.4, no third-party dependency) computed on demand from the EventStream and
 StateStore. It shares the admin auth posture: bearer-token protected outside
-local dev mode (`PIP_ENV=dev`), exactly like the `/admin/*` endpoints.
+local dev mode (`OUVRIER_ENV=dev`), exactly like the `/admin/*` endpoints.
 
 Counters (all monotonic `_total`):
 
@@ -74,7 +83,7 @@ scrape_configs:
   - job_name: ouvrier
     metrics_path: /metrics
     authorization:
-      credentials: <PIP_ADMIN_TOKEN>
+      credentials: <OUVRIER_ADMIN_TOKEN>
     static_configs:
       - targets: ["ouvrier:8080"]
 ```
@@ -169,16 +178,15 @@ observability stacks can correlate Ouvrier executions with upstream and
 downstream systems. `Tracer` adapters typically map `TraceID` to OTel's
 `trace.SpanContext.TraceID` and treat `ExecID` as a span attribute.
 
-## Limitations (v0.1)
+## Limitations
 
 - **Cost estimates are best-effort.** Provider metadata exposes tokens and
-  latency; cost is only attached when the provider returns a cost figure (none
-  currently do for v0.1 prefixes), so dashboards should compute cost from
-  token usage and your own pricing table.
-- **Provider streaming events** are not surfaced through Ouvrier's EventStream
-  in v0.1; only request lifecycle (`llm_call_started` / `llm_call_completed`)
-  is observable. `Reply(SSE())` streams the final reply to the HTTP client but
-  is not driven by upstream provider streaming.
+  latency; cost is attached when a pricing table matches the model and the
+  provider exposes usable token metadata.
+- **DLQ replay drains Ouvrier's retained copy.** Broker DLQ targets are
+  published over the real transport, but `/admin/streams/replay` replays the
+  runtime-retained DLQ copy for the configured plan. Replaying arbitrary broker
+  DLQ topics or streams requires a dedicated consumer/custom DLQ integration.
 - **Trace persistence** uses the same `StateStore` as everything else
   (SQLite by default). For high-volume production workloads, configure a
   longer-retention backend by implementing `state.Store`.

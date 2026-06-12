@@ -54,6 +54,7 @@ type adminApprovalDecisionRequest struct {
 type adminApprovalDecisionResponse struct {
 	Status   string                `json:"status"`
 	Approval adminApprovalResponse `json:"approval"`
+	Resumed  bool                  `json:"resumed,omitempty"`
 }
 
 func adminApprovalResponseFromState(approval state.PendingApproval) adminApprovalResponse {
@@ -113,6 +114,7 @@ func (rt httpRuntime) serveAdminApprovalDecision(w http.ResponseWriter, req *htt
 		writeJSONStatus(w, http.StatusNotFound, "not_found")
 		return
 	}
+	limitAdminBody(w, req)
 	var decision adminApprovalDecisionRequest
 	if err := json.NewDecoder(req.Body).Decode(&decision); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_decision")
@@ -144,9 +146,14 @@ func (rt httpRuntime) serveAdminApprovalDecision(w http.ResponseWriter, req *htt
 		return
 	}
 	rt.recordApprovalDecisionEvents(req.Context(), resolved)
+	resumed := false
+	if resolved.Status == state.ApprovalApproved {
+		resumed = rt.startApprovedResume(resolved.ID)
+	}
 	writeJSON(w, http.StatusOK, adminApprovalDecisionResponse{
 		Status:   "ok",
 		Approval: adminApprovalResponseFromState(resolved),
+		Resumed:  resumed,
 	})
 }
 
@@ -158,7 +165,6 @@ func (rt httpRuntime) recordApprovalDecisionEvents(ctx context.Context, approval
 	}
 	if approval.Status == state.ApprovalApproved {
 		rt.emitApprovalEvent(ctx, approval, events.EventApprovalApproved, base)
-		rt.emitApprovalEvent(ctx, approval, events.EventExecutionResumed, base)
 		return
 	}
 	rt.emitApprovalEvent(ctx, approval, events.EventApprovalDenied, base)
@@ -174,7 +180,7 @@ func (rt httpRuntime) recordApprovalDecisionEvents(ctx context.Context, approval
 }
 
 func (rt httpRuntime) emitApprovalEvent(ctx context.Context, approval state.PendingApproval, kind events.EventKind, payload map[string]any) {
-	if rt.stateStore == nil && rt.eventStream == nil {
+	if rt.stateStore == nil && rt.eventStream == nil && rt.hookBus == nil {
 		return
 	}
 	event := events.Event{
@@ -184,14 +190,7 @@ func (rt httpRuntime) emitApprovalEvent(ctx context.Context, approval state.Pend
 		TraceID:   approval.TraceID,
 		Payload:   payload,
 	}
-	if rt.stateStore != nil {
-		if _, err := rt.stateStore.AddEvent(ctx, event); err != nil {
-			return
-		}
-	}
-	if rt.eventStream != nil {
-		_, _ = rt.eventStream.Append(ctx, event)
-	}
+	_ = rt.appendRuntimeEvent(ctx, event)
 }
 
 func approvalStatusForDecision(decision string) (state.ApprovalStatus, bool) {

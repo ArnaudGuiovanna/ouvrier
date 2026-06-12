@@ -51,10 +51,13 @@ func TestHTTPAdminTriggerRunsExistingHTTPRouteThroughHarness(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var body httpStatusResponse
+	var body adminTriggerResponse
 	decodeAdminJSON(t, rec, &body)
 	if body.Status != "ok" || body.Output != `{"status":"classified"}` {
 		t.Fatalf("body = %+v, want ok classified output", body)
+	}
+	if body.ExecID == "" || body.TraceID == "" || body.SessionID == "" {
+		t.Fatalf("body = %+v, want admin trigger execution identifiers", body)
 	}
 	if len(scripted.requests) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
@@ -389,7 +392,7 @@ func TestHTTPAdminTriggerRejectsInvalidPayload(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := &asyncAdminTriggerProvider{started: make(chan struct{})}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /jobs"),
@@ -406,6 +409,11 @@ func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
+	var body adminTriggerResponse
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "accepted" || body.ExecID == "" || body.TraceID == "" || body.SessionID == "" {
+		t.Fatalf("body = %+v, want accepted with execution identifiers", body)
+	}
 	select {
 	case <-scripted.started:
 	case <-time.After(time.Second):
@@ -414,7 +422,7 @@ func TestHTTPAdminTriggerRespectsAcceptedReplyAsync(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRunsCronPlanThroughHarness(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"cron"}`, StopReason: provider.StopEndTurn},
 	}
@@ -451,7 +459,7 @@ func TestHTTPAdminTriggerRunsCronPlanThroughHarness(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRedactsCronPushOutput(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	webhook, posts := newWebhookPostRecorder(t)
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"cron","api_key":"sk-cron"}`, StopReason: provider.StopEndTurn},
@@ -491,7 +499,7 @@ func TestHTTPAdminTriggerRedactsCronPushOutput(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRunsStreamPlanThroughHarness(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"stream"}`, StopReason: provider.StopEndTurn},
 	}
@@ -532,7 +540,7 @@ func TestHTTPAdminTriggerRunsStreamPlanThroughHarness(t *testing.T) {
 }
 
 func TestHTTPAdminTriggerRedactsStreamPushOutput(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	webhook, posts := newWebhookPostRecorder(t)
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"stream","accessToken":"stream-token"}`, StopReason: provider.StopEndTurn},
@@ -576,7 +584,7 @@ func TestHTTPAdminTriggerRedactsStreamPushOutput(t *testing.T) {
 func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
 	if strings.TrimSpace(rt.adminToken) == "" {
-		t.Setenv("PIP_ENV", "dev")
+		t.Setenv("OUVRIER_ENV", "dev")
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets"),
@@ -592,7 +600,7 @@ func newTestAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 func newTestParameterizedAdminTriggerHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
 	if strings.TrimSpace(rt.adminToken) == "" {
-		t.Setenv("PIP_ENV", "dev")
+		t.Setenv("OUVRIER_ENV", "dev")
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets/{id}"),

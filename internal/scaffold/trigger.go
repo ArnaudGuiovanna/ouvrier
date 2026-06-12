@@ -38,6 +38,34 @@ type triggerSpec struct {
 	usesReplyType bool
 }
 
+// TriggerRender is the validated rendering surface for a supported trigger.
+// FromArg is the expression passed to ovr.From(...). TerminalExpr is the
+// terminal node expression paired with that trigger.
+type TriggerRender struct {
+	Display       string
+	FromArg       string
+	TerminalExpr  string
+	UsesReplyType bool
+}
+
+// RenderTrigger validates a supported trigger string and returns the Go
+// snippets needed to add it to an Ouvrier worker.
+func RenderTrigger(trigger string) (TriggerRender, error) {
+	spec, err := parseScaffoldTrigger(trigger)
+	if err != nil {
+		return TriggerRender{}, err
+	}
+	if err := validateScaffoldTrigger(spec); err != nil {
+		return TriggerRender{}, fmt.Errorf("%w: trigger %q is not supported: %w", ErrInvalidConfig, spec.display, err)
+	}
+	return TriggerRender{
+		Display:       spec.display,
+		FromArg:       spec.fromArg,
+		TerminalExpr:  spec.terminalExpr,
+		UsesReplyType: spec.usesReplyType,
+	}, nil
+}
+
 // parseScaffoldTrigger normalizes and classifies a --trigger string. It accepts
 // HTTP routes ("POST /tickets"), cron expressions (bare "0 6 * * *" or prefixed
 // "cron 0 6 * * *"), webhook providers ("webhook github"), and stream URIs

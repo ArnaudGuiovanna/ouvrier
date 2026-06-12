@@ -48,6 +48,9 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 	if err != nil {
 		return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", start, err)
 	}
+	if err := validateTriggerOptionCompatibility(trigger.Kind, from.config); err != nil {
+		return runtimeplan.Plan{}, 0, fmt.Errorf("node %d: %w", start, err)
+	}
 	trigger.WorkerPool = from.config.workerPool
 	trigger.IdempotencyHeader = from.config.idempotencyHeader
 	trigger.SignatureEnv = from.config.signatureEnv
@@ -101,6 +104,37 @@ func compilePlanAt(nodes []Node, start int) (runtimeplan.Plan, int, error) {
 	}
 
 	return runtimeplan.Plan{}, 0, ErrTerminalMissing
+}
+
+// validateTriggerOptionCompatibility rejects From options that the chosen
+// trigger kind never consumes, so a misplaced option fails loudly at compile
+// time instead of being silently dropped at runtime. Signature and idempotency
+// options are request-scoped (HTTP and Webhook); DLQ, ack, in-flight, and retry
+// attempts are stream-scoped.
+func validateTriggerOptionCompatibility(kind runtimeplan.TriggerKind, cfg fromConfig) error {
+	httpLike := kind == runtimeplan.TriggerHTTP || kind == runtimeplan.TriggerWebhook
+	streamLike := kind == runtimeplan.TriggerStream
+
+	if !httpLike {
+		if cfg.signatureEnv != "" || cfg.signatureHeader != "" {
+			return fmt.Errorf("%w: VerifySignature requires an HTTP or Webhook trigger (got %s)", ErrIncompatibleTriggerOption, kind)
+		}
+		if cfg.idempotencyHeader != "" {
+			return fmt.Errorf("%w: Idempotency header requires an HTTP or Webhook trigger (got %s)", ErrIncompatibleTriggerOption, kind)
+		}
+	}
+	if !streamLike {
+		if cfg.dlqTarget != "" || cfg.maxAttempts > 0 {
+			return fmt.Errorf("%w: StreamDLQ requires a Stream trigger (got %s)", ErrIncompatibleTriggerOption, kind)
+		}
+		if cfg.maxInFlight > 0 {
+			return fmt.Errorf("%w: StreamMaxInFlight requires a Stream trigger (got %s)", ErrIncompatibleTriggerOption, kind)
+		}
+		if cfg.ackPolicy != "" {
+			return fmt.Errorf("%w: StreamAck requires a Stream trigger (got %s)", ErrIncompatibleTriggerOption, kind)
+		}
+	}
+	return nil
 }
 
 func reconcileTerminalResultSchema(plan *runtimeplan.Plan) error {

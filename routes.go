@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
@@ -147,6 +149,9 @@ func adminPlanRoutesFromPlans(plans []runtimeplan.Plan) []adminPlanRoute {
 func registerHTTPAdminRoutes(mux *http.ServeMux, rt httpRuntime) {
 	mux.HandleFunc("GET /admin/health", rt.serveAdminHealth)
 	mux.HandleFunc("GET /admin/status", rt.serveAdminStatus)
+	mux.HandleFunc("GET /admin/plans", rt.serveAdminPlans)
+	mux.HandleFunc("GET /admin/capabilities", rt.serveAdminCapabilities)
+	mux.HandleFunc("GET /admin/events", rt.serveAdminEvents)
 	mux.HandleFunc("GET /admin/traces", rt.serveAdminTraces)
 	mux.HandleFunc("GET /admin/traces/{execID}", rt.serveAdminTrace)
 	mux.HandleFunc("POST /admin/trigger", rt.serveAdminTrigger)
@@ -712,6 +717,7 @@ func (rt httpRuntime) serveAdminTrigger(w http.ResponseWriter, req *http.Request
 	if !rt.authorizeAdmin(w, req) {
 		return
 	}
+	limitAdminBody(w, req)
 	var trigger adminTriggerRequest
 	if err := json.NewDecoder(req.Body).Decode(&trigger); err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, "invalid_trigger")
@@ -897,55 +903,55 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 
 		result, err := rt.startDirectPlanExecution(req.Context(), route.plan, input, nil)
 		if err != nil {
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 			return
 		}
 		switch route.plan.Terminal.Kind {
 		case runtimeplan.TerminalReply:
 			if route.plan.Terminal.Async {
 				if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
-					writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+					writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 					return
 				}
-				writeJSONStatus(w, http.StatusAccepted, "accepted")
+				writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 				return
 			}
 			result.Output = directReplyOKOutput
 			if err := rt.validateObservedTerminalReplyOutput(req.Context(), route.plan, result); err != nil {
 				_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, err)
-				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 				return
 			}
 			if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
-				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 				return
 			}
-			writeJSONStatus(w, http.StatusOK, "ok")
+			writeAdminTriggerStatus(w, http.StatusOK, "ok", result)
 		case runtimeplan.TerminalPush:
 			if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, result, input); err != nil {
 				_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, err)
-				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 				return
 			}
 			if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
-				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 				return
 			}
-			writeJSONStatus(w, http.StatusAccepted, "accepted")
+			writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 		case runtimeplan.TerminalSink:
 			if err := rt.applySinkTerminal(req.Context(), route.plan.Terminal, result, "input"); err != nil {
 				_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, err)
-				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 				return
 			}
 			if err := rt.finishDirectPlanExecution(req.Context(), route.plan, result, nil); err != nil {
-				writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+				writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 				return
 			}
-			writeJSONStatus(w, http.StatusAccepted, "accepted")
+			writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 		default:
 			_ = rt.finishDirectPlanExecution(req.Context(), route.plan, result, errors.New("terminal missing"))
-			writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
+			writeAdminTriggerStatus(w, http.StatusInternalServerError, "terminal_missing", result)
 		}
 		return
 	}
@@ -955,15 +961,22 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 		return
 	}
 	if route.plan.Terminal.Async {
-		if !rt.startAsync(func(ctx context.Context) {
-			defer route.releaseWorker()
-			_, _ = rt.runPlan(ctx, route.plan, input)
-		}) {
+		session, err := pipelineSessionForPlan(route.plan, nil)
+		result := planRunResult{Session: session, HasSession: err == nil}
+		if err != nil {
 			route.releaseWorker()
-			writeJSONStatus(w, http.StatusServiceUnavailable, "shutting_down")
+			writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 			return
 		}
-		writeJSONStatus(w, http.StatusAccepted, "accepted")
+		if !rt.startAsync(func(ctx context.Context) {
+			defer route.releaseWorker()
+			_, _ = rt.runPlanWithSession(ctx, route.plan, input, &session)
+		}) {
+			route.releaseWorker()
+			writeAdminTriggerStatus(w, http.StatusServiceUnavailable, "shutting_down", result)
+			return
+		}
+		writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 		return
 	}
 	defer route.releaseWorker()
@@ -974,39 +987,32 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 			writeSuspendedResponse(w, suspended)
 			return
 		}
-		switch {
-		case errors.Is(err, errHTTPProviderNotConfigured):
-			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")
-		case errors.Is(err, errHTTPPipelineIncomplete):
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete")
-		default:
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
-		}
+		writeAdminTriggerPlanError(w, result, err)
 		return
 	}
 	if err := rt.validateObservedTerminalReplyOutput(req.Context(), route.plan, result); err != nil {
-		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 		return
 	}
 	output := result.Output
 
 	switch route.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
-		writeJSONOutput(w, http.StatusOK, "ok", events.RedactJSONText(output))
+		writeAdminTriggerOutput(w, http.StatusOK, "ok", result, events.RedactJSONText(output))
 	case runtimeplan.TerminalPush:
 		if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, result, output); err != nil {
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 			return
 		}
-		writeJSONOutput(w, http.StatusAccepted, "accepted", events.RedactJSONText(output))
+		writeAdminTriggerOutput(w, http.StatusAccepted, "accepted", result, events.RedactJSONText(output))
 	case runtimeplan.TerminalSink:
 		if err := rt.applySinkTerminal(req.Context(), route.plan.Terminal, result, "output"); err != nil {
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+			writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 			return
 		}
-		writeJSONStatus(w, http.StatusAccepted, "accepted")
+		writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 	default:
-		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
+		writeAdminTriggerStatus(w, http.StatusInternalServerError, "terminal_missing", result)
 	}
 }
 
@@ -1034,29 +1040,33 @@ func (rt httpRuntime) executeAdminTriggerStream(w http.ResponseWriter, req *http
 
 func (rt httpRuntime) writeAdminTriggerPlanResult(w http.ResponseWriter, req *http.Request, plan runtimeplan.Plan, result planRunResult, err error) {
 	if err != nil {
-		switch {
-		case errors.Is(err, errHTTPProviderNotConfigured):
-			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")
-		case errors.Is(err, errHTTPPipelineIncomplete):
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete")
-		default:
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
-		}
+		writeAdminTriggerPlanError(w, result, err)
 		return
 	}
 	if err := rt.validateObservedTerminalReplyOutput(req.Context(), plan, result); err != nil {
-		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
+		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 		return
 	}
 	switch plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
-		writeJSONOutput(w, http.StatusOK, "ok", events.RedactJSONText(result.Output))
+		writeAdminTriggerOutput(w, http.StatusOK, "ok", result, events.RedactJSONText(result.Output))
 	case runtimeplan.TerminalPush:
-		writeJSONOutput(w, http.StatusAccepted, "accepted", events.RedactJSONText(result.Output))
+		writeAdminTriggerOutput(w, http.StatusAccepted, "accepted", result, events.RedactJSONText(result.Output))
 	case runtimeplan.TerminalSink:
-		writeJSONStatus(w, http.StatusAccepted, "accepted")
+		writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 	default:
-		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
+		writeAdminTriggerStatus(w, http.StatusInternalServerError, "terminal_missing", result)
+	}
+}
+
+func writeAdminTriggerPlanError(w http.ResponseWriter, result planRunResult, err error) {
+	switch {
+	case errors.Is(err, errHTTPProviderNotConfigured):
+		writeAdminTriggerStatus(w, http.StatusServiceUnavailable, "provider_not_configured", result)
+	case errors.Is(err, errHTTPPipelineIncomplete):
+		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete", result)
+	default:
+		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 	}
 }
 
@@ -1103,7 +1113,71 @@ func (rt httpRuntime) authorizeAdmin(w http.ResponseWriter, req *http.Request) b
 }
 
 func adminDevModeEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("PIP_ENV")), "dev")
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(envnames.Env)), "dev")
+}
+
+const adminInsecureEnv = "OUVRIER_ADMIN_INSECURE"
+
+// adminInsecureOptIn reports whether the operator explicitly accepted serving
+// unauthenticated admin endpoints on a network-reachable address.
+func adminInsecureOptIn() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(adminInsecureEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// loopbackBindAddr reports whether addr binds only the loopback interface. An
+// empty host (e.g. ":8080") means every interface and is therefore not
+// loopback-only.
+func loopbackBindAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		host = strings.TrimSpace(addr)
+	}
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// checkAdminExposure guards the production server entrypoint against
+// unauthenticated admin endpoints reachable from the network.
+//
+// When an admin token is set, bearer auth is enforced and any bind is fine.
+// When no token is set and dev mode is off, every /admin/* route answers 401,
+// so the surface is locked. The dangerous combination is dev mode + no token,
+// which disables admin auth entirely: that is permitted only on a loopback bind
+// or with an explicit OUVRIER_ADMIN_INSECURE opt-in; otherwise the server
+// refuses to start rather than silently exposing /admin/trigger and approval
+// decisions to the network.
+func checkAdminExposure(addr, adminToken string) error {
+	if strings.TrimSpace(adminToken) != "" {
+		return nil
+	}
+	if !adminDevModeEnabled() {
+		return nil
+	}
+	if loopbackBindAddr(addr) || adminInsecureOptIn() {
+		return nil
+	}
+	return fmt.Errorf("refusing to start: admin endpoints are unauthenticated (%s=dev, no %s) and %q is reachable from the network; set %s for production, bind to localhost for local dev, or set %s=1 to override", envnames.Env, envnames.AdminToken, addr, envnames.AdminToken, adminInsecureEnv)
+}
+
+// adminExposureWarning returns a non-empty warning when admin auth is disabled
+// on a permitted but still insecure configuration, so the operator is told
+// loudly at startup. It returns "" when the configuration is safe.
+func adminExposureWarning(addr, adminToken string) string {
+	if strings.TrimSpace(adminToken) != "" || !adminDevModeEnabled() {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: admin endpoints are UNAUTHENTICATED (%s=dev, no %s) on %q", envnames.Env, envnames.AdminToken, addr)
 }
 
 type adminHealthResponse struct {
@@ -1350,6 +1424,28 @@ type adminTriggerRequest struct {
 	ScheduledAt string            `json:"scheduled_at"`
 	Metadata    map[string]string `json:"metadata"`
 	Body        json.RawMessage   `json:"body"`
+}
+
+type adminTriggerResponse struct {
+	Status    string `json:"status"`
+	Output    string `json:"output,omitempty"`
+	ExecID    string `json:"exec_id,omitempty"`
+	TraceID   string `json:"trace_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+func writeAdminTriggerStatus(w http.ResponseWriter, code int, status string, result planRunResult) {
+	writeAdminTriggerOutput(w, code, status, result, "")
+}
+
+func writeAdminTriggerOutput(w http.ResponseWriter, code int, status string, result planRunResult, output string) {
+	response := adminTriggerResponse{Status: status, Output: output}
+	if result.HasSession {
+		response.ExecID = result.Session.ExecID
+		response.TraceID = result.Session.TraceID
+		response.SessionID = result.Session.SessionID
+	}
+	writeJSON(w, code, response)
 }
 
 func (r adminTriggerRequest) kind() runtimeplan.TriggerKind {

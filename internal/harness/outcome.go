@@ -10,6 +10,7 @@ type Status string
 const (
 	StatusCompleted Status = "completed"
 	StatusTruncated Status = "truncated"
+	StatusSuspended Status = "suspended"
 	StatusFailed    Status = "failed"
 )
 

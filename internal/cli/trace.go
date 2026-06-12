@@ -19,7 +19,7 @@ func (app *App) runTraceCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("trace", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	urlFlag := flags.String("url", defaultAdminURL, "worker base URL")
-	token := flags.String("token", "", "admin bearer token (defaults to $PIP_ADMIN_TOKEN)")
+	token := flags.String("token", "", "admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)")
 	// Move flag tokens ahead of any positional <exec-id> so the std flag
 	// package parses them. Without this, `trace exec-42 --url ...` would
 	// stop at the positional and ignore --url.
@@ -35,7 +35,11 @@ func (app *App) runTraceCommand(ctx context.Context, args []string) error {
 		return fmt.Errorf("%w: <exec-id> cannot be empty", ErrUsage)
 	}
 
-	client := newAdminClient(*urlFlag, resolveAdminToken(*token))
+	adminToken, err := resolveAdminToken(*token)
+	if err != nil {
+		return err
+	}
+	client := newAdminClient(*urlFlag, adminToken)
 
 	var payload map[string]any
 	endpoint := "/admin/traces/" + url.PathEscape(execID)

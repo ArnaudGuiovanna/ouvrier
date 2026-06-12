@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 )
 
 // ErrDev is returned when `ouvrier dev` cannot proceed.
@@ -65,7 +67,7 @@ func parseDevFlags(args []string) (DevConfig, error) {
 	flags := flag.NewFlagSet("dev", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", ".", "project directory")
-	addr := flags.String("addr", "", "override the worker listen address via PIP_ADDR")
+	addr := flags.String("addr", "", "override the worker listen address via OUVRIER_ADDR")
 	noReload := flags.Bool("no-reload", false, "disable hot reload; run `go run .` once")
 	noDotenv := flags.Bool("no-dotenv", false, "do not auto-load a local .env into the worker environment")
 	if err := flags.Parse(args); err != nil {
@@ -124,7 +126,7 @@ func runDev(ctx context.Context, cfg DevConfig, out, errOut io.Writer, runner de
 	if cfg.NoReload {
 		fmt.Fprintf(out, "ouvrier dev: running `go run .` in %s\n", dir)
 		if cfg.Addr != "" {
-			fmt.Fprintf(out, "ouvrier dev: PIP_ADDR=%s\n", cfg.Addr)
+			fmt.Fprintf(out, "ouvrier dev: %s=%s\n", envnames.Addr, cfg.Addr)
 		}
 		fmt.Fprintln(out, "ouvrier dev: hot reload disabled (--no-reload); restart this command after edits to main.go, tools/, or skills/.")
 		return finishDevRun(runner(runCtx, dir, env, out, errOut), runCtx)
@@ -132,7 +134,7 @@ func runDev(ctx context.Context, cfg DevConfig, out, errOut io.Writer, runner de
 
 	fmt.Fprintf(out, "ouvrier dev: watching %s for changes (hot reload enabled)\n", dir)
 	if cfg.Addr != "" {
-		fmt.Fprintf(out, "ouvrier dev: PIP_ADDR=%s\n", cfg.Addr)
+		fmt.Fprintf(out, "ouvrier dev: %s=%s\n", envnames.Addr, cfg.Addr)
 	}
 
 	// Start the file watcher; it emits one signal per debounced change burst.
@@ -334,7 +336,7 @@ func devWatchedFile(path string) bool {
 // devEnv builds the child process environment for `ouvrier dev`. It starts
 // from the real process environment, optionally merges a local .env (dev-only;
 // the process environment always wins), and finally applies the --addr
-// override via PIP_ADDR. .env values are never logged.
+// override via OUVRIER_ADDR. .env values are never logged.
 func devEnv(cfg DevConfig, dir string, errOut io.Writer) []string {
 	env := os.Environ()
 	if !cfg.NoDotenv {
@@ -358,15 +360,15 @@ func devEnv(cfg DevConfig, dir string, errOut io.Writer) []string {
 			out = append(out, kv)
 			continue
 		}
-		if kv[:eq] == "PIP_ADDR" {
-			out = append(out, "PIP_ADDR="+cfg.Addr)
+		if kv[:eq] == envnames.Addr {
+			out = append(out, envnames.Addr+"="+cfg.Addr)
 			consumed = true
 			continue
 		}
 		out = append(out, kv)
 	}
 	if !consumed {
-		out = append(out, "PIP_ADDR="+cfg.Addr)
+		out = append(out, envnames.Addr+"="+cfg.Addr)
 	}
 	return out
 }

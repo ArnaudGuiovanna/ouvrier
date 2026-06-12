@@ -67,6 +67,9 @@ func (n pipeNode) validatePipeNodeWithSubAgentContext(depth int, stack []string)
 	if strings.TrimSpace(n.config.model) == "" {
 		return ErrPipeMissingModel
 	}
+	if err := validateModelForm(n.config.model); err != nil {
+		return err
+	}
 	for _, tool := range n.config.tools {
 		if err := tool.validateTool(); err != nil {
 			return err
@@ -106,6 +109,20 @@ func Model(id string) PipeOption {
 
 func (o modelOption) applyPipe(config *pipeConfig) {
 	config.model = o.id
+}
+
+// validateModelForm rejects a model id that is not in provider/model form, so a
+// missing provider prefix (e.g. "claude-sonnet-4-6" instead of
+// "anthropic/claude-sonnet-4-6") fails at declaration time rather than as an
+// opaque 503 on the first request. It mirrors the check Fallback already
+// enforces.
+func validateModelForm(model string) error {
+	model = strings.TrimSpace(model)
+	prov, name, ok := strings.Cut(model, "/")
+	if !ok || strings.TrimSpace(prov) == "" || strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: Model %q must use provider/model form, e.g. \"anthropic/claude-sonnet-4-6\"", ErrInvalidModelForm, model)
+	}
+	return nil
 }
 
 type fallbackOption struct {

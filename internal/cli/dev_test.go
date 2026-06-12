@@ -64,8 +64,8 @@ func TestRunDevInvokesRunnerWithDirAndEnv(t *testing.T) {
 	if capturedDir != abs {
 		t.Fatalf("dev runner dir = %q, want %q", capturedDir, abs)
 	}
-	if !envHas(capturedEnv, "PIP_ADDR=:9090") {
-		t.Fatalf("dev runner env missing PIP_ADDR; got %v", filterDevEnv(capturedEnv))
+	if !envHas(capturedEnv, "OUVRIER_ADDR=:9090") {
+		t.Fatalf("dev runner env missing OUVRIER_ADDR; got %v", filterDevEnv(capturedEnv))
 	}
 	if !strings.Contains(out.String(), "hot reload disabled") {
 		t.Fatalf("dev did not log --no-reload notice; got:\n%s", out.String())
@@ -397,7 +397,7 @@ func waitForStart(t *testing.T, starts <-chan struct{}) {
 func filterDevEnv(env []string) []string {
 	out := make([]string, 0, 2)
 	for _, e := range env {
-		if strings.HasPrefix(e, "PIP_ADDR=") {
+		if strings.HasPrefix(e, "OUVRIER_ADDR=") {
 			out = append(out, e)
 		}
 	}
