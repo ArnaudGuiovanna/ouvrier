@@ -242,20 +242,7 @@ func cronSchedulesForPlans(plans []runtimeplan.Plan) ([]cronSchedule, error) {
 }
 
 func runCronPlansWithSchedules(ctx context.Context, rt httpRuntime, plans []runtimeplan.Plan, schedules []cronSchedule) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var wg sync.WaitGroup
-	for i, plan := range plans {
-		wg.Add(1)
-		go func(plan runtimeplan.Plan, schedule cronSchedule) {
-			defer wg.Done()
-			runCronLoop(ctx, rt, plan, schedule)
-		}(plan, schedules[i])
-	}
-	<-ctx.Done()
-	wg.Wait()
-	return nil
+	return runCronPlansWithLeaseConfig(ctx, rt, plans, schedules, cronLeaseConfigForRuntime(rt))
 }
 
 func runCronLoop(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan, schedule cronSchedule) {
@@ -307,6 +294,14 @@ func releaseCronWorker(workerPool chan struct{}) {
 }
 
 func runCronPlanOnce(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan, scheduledAt time.Time) (planRunResult, error) {
+	return runCronPlanOnceWithSession(ctx, rt, plan, scheduledAt, nil)
+}
+
+// runCronPlanOnceWithSession lets the leased cron loop pre-mint the pipeline
+// session, so the per-fire idempotency reservation can record the ExecID of
+// the run it guards before the run starts. A nil session keeps the v0.2
+// behavior of minting one inside the runtime.
+func runCronPlanOnceWithSession(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan, scheduledAt time.Time, session *runtimeplan.Session) (planRunResult, error) {
 	if plan.Trigger.Kind != runtimeplan.TriggerCron {
 		return planRunResult{}, fmt.Errorf("%w: expected cron trigger", ErrRunNotImplemented)
 	}
@@ -314,7 +309,7 @@ func runCronPlanOnce(ctx context.Context, rt httpRuntime, plan runtimeplan.Plan,
 	if err != nil {
 		return planRunResult{}, err
 	}
-	result, err := rt.runPlanResult(ctx, plan, input)
+	result, err := rt.runPlanResultWithSession(ctx, plan, input, session)
 	if err != nil {
 		return result, err
 	}

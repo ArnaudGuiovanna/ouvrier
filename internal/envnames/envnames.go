@@ -15,6 +15,12 @@ const (
 	StateMaxConns = "OUVRIER_STATE_MAX_CONNS"
 	StateMigrate  = "OUVRIER_STATE_MIGRATE"
 
+	// ReplicaID overrides the generated <hostname>-<rand8> cron lease holder
+	// identity. CronLease set to "off" disables cron leader-leases even when
+	// the state backend supports them.
+	ReplicaID = "OUVRIER_REPLICA_ID"
+	CronLease = "OUVRIER_CRON_LEASE"
+
 	LegacyEnv        = "PIP_ENV"
 	LegacyAdminToken = "PIP_ADMIN_TOKEN"
 	LegacyAddr       = "PIP_ADDR"

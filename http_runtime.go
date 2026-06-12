@@ -43,6 +43,9 @@ type httpRuntime struct {
 	streamDeltas         bool
 	providerGate         *harness.ProviderGate
 	approvalResumes      *approvalResumeRegistry
+	// cronLease is set per fire by the leased cron loop so the fire's
+	// pipeline events carry the leadership lease name, holder, and fence.
+	cronLease *cronLeaseStamp
 }
 
 func defaultHTTPRuntime() httpRuntime {

@@ -54,6 +54,10 @@ const (
 	EventStreamDeadLettered EventKind = "stream_dead_lettered"
 	EventStreamRedelivered  EventKind = "stream_redelivered"
 
+	EventCronLeaseAcquired EventKind = "cron_lease_acquired"
+	EventCronLeaseLost     EventKind = "cron_lease_lost"
+	EventCronTickSkipped   EventKind = "cron_tick_skipped"
+
 	EventSinkLogged EventKind = "sink_logged"
 )
 

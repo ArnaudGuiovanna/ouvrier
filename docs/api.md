@@ -293,6 +293,9 @@ ovr.EventTaskFailed
 ovr.EventSkillLoaded
 ovr.EventStreamDeadLettered
 ovr.EventStreamRedelivered
+ovr.EventCronLeaseAcquired
+ovr.EventCronLeaseLost
+ovr.EventCronTickSkipped
 ovr.EventSinkLogged
 ```
 

@@ -796,6 +796,11 @@ func (rt httpRuntime) emitPipelineEvent(ctx context.Context, result planRunResul
 		"terminal": string(plan.Terminal.Kind),
 		"status":   status,
 	}
+	if rt.cronLease != nil {
+		payload["lease"] = rt.cronLease.name
+		payload["holder"] = rt.cronLease.holder
+		payload["fence"] = rt.cronLease.fence
+	}
 	if eventErr != nil {
 		payload["error"] = eventErr.Error()
 	}

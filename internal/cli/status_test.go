@@ -84,6 +84,66 @@ func TestRunStatusFetchesAndPrintsAdminCounters(t *testing.T) {
 	}
 }
 
+func TestRunStatusPrintsCronLeases(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"cron_leases": []map[string]any{
+				{
+					"name":       "cron:ab12cd34:0",
+					"holder":     "worker-1-deadbeef",
+					"fence":      3,
+					"expires_at": "2026-06-12T10:00:30Z",
+					"is_self":    true,
+				},
+				{
+					"name":       "cron:ff00ff00:1",
+					"holder":     "worker-2-cafebabe",
+					"fence":      7,
+					"expires_at": "2026-06-12T10:00:25Z",
+					"is_self":    false,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	app := New("dev", WithStreams(nil, &out, &errOut))
+	if err := app.Run(context.Background(), []string{"status", "--url", srv.URL, "--token", "token"}); err != nil {
+		t.Fatalf("Run(status) error = %v", err)
+	}
+
+	stdout := out.String()
+	if !strings.Contains(stdout, "cron_leases:") {
+		t.Fatalf("status output missing cron_leases section in:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "cron:ab12cd34:0 holder=worker-1-deadbeef fence=3 expires_at=2026-06-12T10:00:30Z (self)") {
+		t.Fatalf("status output missing self lease line in:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "cron:ff00ff00:1 holder=worker-2-cafebabe fence=7 expires_at=2026-06-12T10:00:25Z\n") {
+		t.Fatalf("status output missing other lease line in:\n%s", stdout)
+	}
+}
+
+func TestRunStatusOmitsCronLeasesWhenAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	var out, errOut bytes.Buffer
+	app := New("dev", WithStreams(nil, &out, &errOut))
+	if err := app.Run(context.Background(), []string{"status", "--url", srv.URL, "--token", "token"}); err != nil {
+		t.Fatalf("Run(status) error = %v", err)
+	}
+	if strings.Contains(out.String(), "cron_leases") {
+		t.Fatalf("status output mentions cron_leases without leases:\n%s", out.String())
+	}
+}
+
 func TestRunStatusPropagatesAdminError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

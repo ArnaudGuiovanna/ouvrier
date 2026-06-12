@@ -192,7 +192,42 @@ func (rt httpRuntime) serveAdminHealth(w http.ResponseWriter, req *http.Request)
 			WaitDurationMS:     stats.WaitDuration.Milliseconds(),
 		}
 	}
+	cronLeases, err := adminCronLeases(req.Context(), rt)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	response.CronLeases = cronLeases
 	writeJSON(w, http.StatusOK, response)
+}
+
+// adminCronLeases lists the cron leader-leases stored on lease-capable
+// backends, in the same additive spirit as the state_db pool-stats section.
+// is_self marks rows held under this replica's holder identity.
+func adminCronLeases(ctx context.Context, rt httpRuntime) ([]adminCronLeaseResponse, error) {
+	leaseStore, ok := rt.stateStore.(state.LeaseStore)
+	if !ok {
+		return nil, nil
+	}
+	leases, err := leaseStore.Leases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	self := cronReplicaID()
+	var rows []adminCronLeaseResponse
+	for _, lease := range leases {
+		if !strings.HasPrefix(lease.Name, "cron:") {
+			continue
+		}
+		rows = append(rows, adminCronLeaseResponse{
+			Name:      lease.Name,
+			Holder:    lease.Holder,
+			Fence:     lease.Fence,
+			ExpiresAt: lease.ExpiresAt.UTC().Format(time.RFC3339Nano),
+			IsSelf:    lease.Holder == self,
+		})
+	}
+	return rows, nil
 }
 
 func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request) {
@@ -281,6 +316,12 @@ func (rt httpRuntime) serveAdminStatus(w http.ResponseWriter, req *http.Request)
 	}
 	response.SchemaViolations = len(violations)
 	response.RecentSchemaViolations = recentAdminSchemaViolations(violations, parseAdminTraceLimit(req.URL.Query().Get("last")))
+	cronLeases, err := adminCronLeases(req.Context(), rt)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	response.CronLeases = cronLeases
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1199,6 +1240,17 @@ type adminHealthResponse struct {
 	Executions       int                      `json:"executions,omitempty"`
 	RecentExecutions []adminExecutionResponse `json:"recent_executions,omitempty"`
 	StateDB          *adminStateDBResponse    `json:"state_db,omitempty"`
+	CronLeases       []adminCronLeaseResponse `json:"cron_leases,omitempty"`
+}
+
+// adminCronLeaseResponse reports one cron leader-lease row for lease-capable
+// state backends, expired rows included; consumers compare expires_at.
+type adminCronLeaseResponse struct {
+	Name      string `json:"name"`
+	Holder    string `json:"holder"`
+	Fence     uint64 `json:"fence"`
+	ExpiresAt string `json:"expires_at"`
+	IsSelf    bool   `json:"is_self"`
 }
 
 // adminStateDBResponse reports connection-pool statistics for state backends
@@ -1259,6 +1311,7 @@ type adminStatusResponse struct {
 	IdempotencyReserved      int                            `json:"idempotency_reserved"`
 	IdempotencyDuplicate     int                            `json:"idempotency_duplicate"`
 	IdempotencyRetry         int                            `json:"idempotency_retry"`
+	CronLeases               []adminCronLeaseResponse       `json:"cron_leases,omitempty"`
 }
 
 type adminLLMUsageSummary struct {
