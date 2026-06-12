@@ -263,12 +263,16 @@ func assertLeaseConformance(t *testing.T, newStore func(t *testing.T) Store) {
 			t.Fatalf("AcquireLease acquired=%v err=%v", acquired, err)
 		}
 
-		_, ok, err := store.RenewLease(context.Background(), "lease-1", "replica-b", held.Fence, time.Minute)
+		current, ok, err := store.RenewLease(context.Background(), "lease-1", "replica-b", held.Fence, time.Minute)
 		if err != nil {
 			t.Fatalf("RenewLease returned error: %v", err)
 		}
 		if ok {
 			t.Fatal("RenewLease ok = true for non-holder, want false")
+		}
+		if current.Holder != held.Holder || current.Fence != held.Fence {
+			t.Fatalf("failed renew observed lease %q fence %d, want current %q fence %d",
+				current.Holder, current.Fence, held.Holder, held.Fence)
 		}
 	})
 
