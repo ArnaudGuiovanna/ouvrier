@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
@@ -17,12 +18,15 @@ type recordedIntentEvent struct {
 }
 
 type fakeIntentRecorder struct {
+	mu          sync.Mutex
 	events      []recordedIntentEvent
 	beginErr    error
 	completeErr error
 }
 
 func (r *fakeIntentRecorder) BeginToolIntent(_ context.Context, intent ToolIntent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.beginErr != nil {
 		return r.beginErr
 	}
@@ -31,11 +35,21 @@ func (r *fakeIntentRecorder) BeginToolIntent(_ context.Context, intent ToolInten
 }
 
 func (r *fakeIntentRecorder) CompleteToolIntent(_ context.Context, execID, toolCallID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.completeErr != nil {
 		return r.completeErr
 	}
 	r.events = append(r.events, recordedIntentEvent{kind: "complete", intent: ToolIntent{ExecID: execID, ToolCallID: toolCallID}})
 	return nil
+}
+
+// recorded returns a snapshot of the events under the same lock the writers
+// hold, so assertions never race a concurrent tool execution.
+func (r *fakeIntentRecorder) recorded() []recordedIntentEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedIntentEvent(nil), r.events...)
 }
 
 func intentTestExecutor(t *testing.T) *Executor {
@@ -68,10 +82,11 @@ func TestExecutorRecordsIntentAroundNonReadTool(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("Execute result = %+v, want success", result)
 	}
-	if len(recorder.events) != 2 {
-		t.Fatalf("recorder events = %+v, want begin then complete", recorder.events)
+	recorded := recorder.recorded()
+	if len(recorded) != 2 {
+		t.Fatalf("recorder events = %+v, want begin then complete", recorded)
 	}
-	begin := recorder.events[0]
+	begin := recorded[0]
 	if begin.kind != "begin" || begin.intent.ExecID != "exec_1" || begin.intent.ToolCallID != "call_1" ||
 		begin.intent.StepIndex != 2 || begin.intent.ToolName != "send_email" ||
 		begin.intent.Effect != string(policy.EffectSideEffecting) {
@@ -80,7 +95,7 @@ func TestExecutorRecordsIntentAroundNonReadTool(t *testing.T) {
 	if !strings.HasPrefix(begin.intent.IdemKey, "args:") {
 		t.Fatalf("side-effecting idem key = %q, want args hash", begin.intent.IdemKey)
 	}
-	complete := recorder.events[1]
+	complete := recorded[1]
 	if complete.kind != "complete" || complete.intent.ExecID != "exec_1" || complete.intent.ToolCallID != "call_1" {
 		t.Fatalf("complete event = %+v", complete)
 	}
@@ -94,8 +109,8 @@ func TestExecutorRecordsNoIntentForReadOnlyTool(t *testing.T) {
 	if _, err := executor.Execute(ctx, provider.ToolCall{ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{}`)}); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if len(recorder.events) != 0 {
-		t.Fatalf("recorder events = %+v, want none for read-only tool", recorder.events)
+	if recorded := recorder.recorded(); len(recorded) != 0 {
+		t.Fatalf("recorder events = %+v, want none for read-only tool", recorded)
 	}
 }
 
@@ -120,8 +135,8 @@ func TestExecutorCompletesIntentOnToolErrorResult(t *testing.T) {
 	if !result.IsError {
 		t.Fatalf("result = %+v, want tool error result", result)
 	}
-	if len(recorder.events) != 2 || recorder.events[1].kind != "complete" {
-		t.Fatalf("recorder events = %+v, want begin then complete", recorder.events)
+	if recorded := recorder.recorded(); len(recorded) != 2 || recorded[1].kind != "complete" {
+		t.Fatalf("recorder events = %+v, want begin then complete", recorded)
 	}
 }
 
@@ -189,8 +204,8 @@ func TestToolIntentIdemKeyMatchesIdempotencyReservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("idempotencyReservationKey returned error: %v", err)
 	}
-	if len(recorder.events) == 0 || recorder.events[0].intent.IdemKey != wantKey {
-		t.Fatalf("intent idem key = %+v, want reservation key %q (must match idempotency.go hashing for #40)", recorder.events, wantKey)
+	if recorded := recorder.recorded(); len(recorded) == 0 || recorded[0].intent.IdemKey != wantKey {
+		t.Fatalf("intent idem key = %+v, want reservation key %q (must match idempotency.go hashing for #40)", recorded, wantKey)
 	}
 	if len(store.keys) != 1 || store.keys[0] != wantKey {
 		t.Fatalf("reserved keys = %v, want %q", store.keys, wantKey)

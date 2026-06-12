@@ -299,6 +299,183 @@ func TestDurableRunsParallelStepCheckpointsAsOneUnit(t *testing.T) {
 	}
 }
 
+// TestDurableRunsParallelToolIntentsUseCompositeStepIndex runs Parallel as
+// step 0 with a side-effecting tool inside one branch and fails step 1: the
+// tool intent must be journaled under the composite step's index, because
+// intents flow through the step context even though sub-branches never
+// checkpoint individually.
+func TestDurableRunsParallelToolIntentsUseCompositeStepIndex(t *testing.T) {
+	store := newDurableTestStore(t)
+	toolCall := provider.ToolCall{ID: "call_email_1", Name: "send_email"}
+	scripted := &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
+		switch model {
+		case "durable/tool":
+			if call == 0 {
+				return provider.Response{Text: "sending", StopReason: provider.StopToolUse,
+					ToolCalls: []provider.ToolCall{toolCall}}, nil
+			}
+			return endTurn(`{"step":"tool"}`)
+		case "durable/compliance":
+			return endTurn(`{"step":"compliance"}`)
+		case "durable/fail":
+			return provider.Response{}, errors.New("provider exploded")
+		default:
+			return provider.Response{}, fmt.Errorf("unexpected model %q", model)
+		}
+	}}
+
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Parallel(
+			Pipe("tool branch",
+				Model("durable/tool"),
+				Tool("send_email", func(ctx context.Context) error { return nil }, SideEffecting("email")),
+			),
+			Pipe("compliance", Model("durable/compliance")),
+		),
+		Pipe("merge", Model("durable/fail")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{
+		provider:   scripted,
+		stateStore: store,
+		toolExecutor: tools.NewExecutor(tools.WithPermissionPolicy(
+			policy.NewDefaultPolicy(policy.AllowSideEffects("email")),
+		)),
+		durableRuns: newDurableRunsConfig(0),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := postDurableTicket(t, handler)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want failed pipeline; body=%s", rec.Code, rec.Body.String())
+	}
+
+	journal := soleDurableJournal(t, store)
+	intents, err := store.ToolIntents(context.Background(), journal.ExecID)
+	if err != nil {
+		t.Fatalf("ToolIntents returned error: %v", err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("intents = %+v, want exactly the side-effecting branch tool", intents)
+	}
+	intent := intents[0]
+	if intent.ToolCallID != "call_email_1" || intent.ToolName != "send_email" {
+		t.Fatalf("intent = %+v, want send_email call from the parallel branch", intent)
+	}
+	if intent.StepIndex != 0 {
+		t.Fatalf("intent step index = %d, want the composite parallel step's index 0", intent.StepIndex)
+	}
+	if intent.CompletedAt.IsZero() {
+		t.Fatal("intent CompletedAt is zero after the tool returned, want completed")
+	}
+}
+
+// TestDurableRunsResumeCheckpointsAtOriginalPlanIndices suspends step 1 on a
+// gated tool, approves it, and lets the resumed run fail at step 3: the
+// checkpoints written before the suspend, by the resumed step, and by the
+// steps after it (the withBase offset path) must all land at the original
+// plan indices 0, 1, and 2.
+func TestDurableRunsResumeCheckpointsAtOriginalPlanIndices(t *testing.T) {
+	t.Setenv("OUVRIER_ENV", "dev")
+	store := newDurableTestStore(t)
+	toolCall := provider.ToolCall{ID: "call_wire_1", Name: "wire_payment"}
+	scripted := &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
+		switch model {
+		case "durable/step0":
+			return endTurn(`{"step":"zero"}`)
+		case "durable/gated":
+			if call == 0 {
+				return provider.Response{Text: "need approval", StopReason: provider.StopToolUse,
+					ToolCalls: []provider.ToolCall{toolCall}}, nil
+			}
+			return endTurn(`{"step":"gated"}`)
+		case "durable/step2":
+			return endTurn(`{"step":"two"}`)
+		case "durable/fail":
+			return provider.Response{}, errors.New("provider exploded")
+		default:
+			return provider.Response{}, fmt.Errorf("unexpected model %q", model)
+		}
+	}}
+
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("step zero", Model("durable/step0")),
+		Pipe("gated step",
+			Model("durable/gated"),
+			Tool("wire_payment", func(ctx context.Context) error { return nil }, RequiresApproval()),
+		),
+		Pipe("step two", Model("durable/step2")),
+		Pipe("failing step", Model("durable/fail")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{
+		provider:    scripted,
+		stateStore:  store,
+		durableRuns: newDurableRunsConfig(0),
+	})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := postDurableTicket(t, handler)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want suspended run; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Status     string `json:"status"`
+		ApprovalID string `json:"approval_id"`
+		ExecID     string `json:"exec_id"`
+	}
+	decodeAdminJSON(t, rec, &body)
+	if body.Status != "pending_approval" || body.ApprovalID == "" || body.ExecID == "" {
+		t.Fatalf("body = %+v, want pending_approval with approval and exec ids", body)
+	}
+
+	approvalReq := httptest.NewRequest(http.MethodPost, "/admin/approvals/"+body.ApprovalID,
+		strings.NewReader(`{"decision":"approve","decided_by":"ops"}`))
+	approvalRec := httptest.NewRecorder()
+	handler.ServeHTTP(approvalRec, approvalReq)
+	if approvalRec.Code != http.StatusOK {
+		t.Fatalf("approval status = %d body=%s, want %d", approvalRec.Code, approvalRec.Body.String(), http.StatusOK)
+	}
+
+	// The resume runs asynchronously; the run fails at step 3, which keeps the
+	// journal so the checkpoint indices can be asserted.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		execution, ok, err := store.Execution(context.Background(), body.ExecID)
+		if err != nil {
+			t.Fatalf("Execution returned error: %v", err)
+		}
+		if ok && execution.Status == state.ExecutionFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("execution = %+v ok=%v, want failed after resumed run", execution, ok)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	checkpoints, err := store.RunCheckpoints(context.Background(), body.ExecID)
+	if err != nil {
+		t.Fatalf("RunCheckpoints returned error: %v", err)
+	}
+	if len(checkpoints) != 3 {
+		t.Fatalf("checkpoints = %+v, want steps 0, 1, 2 at their original plan indices", checkpoints)
+	}
+	wantOutputs := map[int]string{0: `{"step":"zero"}`, 1: `{"step":"gated"}`, 2: `{"step":"two"}`}
+	for i, checkpoint := range checkpoints {
+		if checkpoint.StepIndex != i {
+			t.Fatalf("checkpoint[%d] step index = %d, want %d (resume must keep original plan indices)", i, checkpoint.StepIndex, i)
+		}
+		if checkpoint.Output != wantOutputs[i] {
+			t.Fatalf("checkpoint[%d] output = %q, want %q", i, checkpoint.Output, wantOutputs[i])
+		}
+	}
+}
+
 // TestDurableRunsFlagOffWritesNothing runs the same tool-using pipeline with
 // the flag off and asserts zero journal rows by inspecting the database.
 func TestDurableRunsFlagOffWritesNothing(t *testing.T) {

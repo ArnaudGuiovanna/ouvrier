@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -156,7 +157,7 @@ func durablePlanHash(steps []runtimeplan.Step) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func writePlanHashSteps(hash interface{ Write([]byte) (int, error) }, steps []runtimeplan.Step, depth int) {
+func writePlanHashSteps(hash io.Writer, steps []runtimeplan.Step, depth int) {
 	for index, step := range steps {
 		fmt.Fprintf(hash, "%d/%d|%s|%s|%s|%v|%d|%t|%t|%t\n",
 			depth, index, step.Kind, step.Goal, step.Model, step.Fallback,

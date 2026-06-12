@@ -261,17 +261,27 @@ func (s *SQLiteStore) PruneRunJournalsBefore(ctx context.Context, cutoff time.Ti
 	return expired, nil
 }
 
+// pruneRunJournalRows deletes one execution's journal rows inside a single
+// transaction, children first, so a concurrent reader never sees checkpoints
+// or intents without their journal row.
 func (s *SQLiteStore) pruneRunJournalRows(ctx context.Context, execID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
 	for _, stmt := range []string{
 		`DELETE FROM ouvrier_tool_intents WHERE exec_id = ?`,
 		`DELETE FROM ouvrier_run_checkpoints WHERE exec_id = ?`,
 		`DELETE FROM ouvrier_run_journal WHERE exec_id = ?`,
 	} {
-		if _, err := s.db.ExecContext(ctx, stmt, execID); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt, execID); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 const sqliteRunJournalSelectColumns = `SELECT exec_id, plan_key, plan_hash, trigger_kind, input, created_at`
