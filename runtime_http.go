@@ -144,11 +144,15 @@ func newSplitHTTPHandlersFromRoutesAndPlans(routes []httpRoute, plans []runtimep
 	}
 
 	publicMux := http.NewServeMux()
-	if err := registerPublicHTTPRoutes(publicMux, routes, runtime); err != nil {
-		return nil, nil, err
-	}
+	// Register the opt-in public /metrics before trigger routes, mirroring
+	// the combined layout's admin-first order: a user trigger declared at
+	// GET /metrics then fails route registration with ErrInvalidNode
+	// instead of panicking the mux.
 	if metricsPublicOptIn() {
 		publicMux.HandleFunc("GET /metrics", runtime.serveMetrics)
+	}
+	if err := registerPublicHTTPRoutes(publicMux, routes, runtime); err != nil {
+		return nil, nil, err
 	}
 	adminMux := http.NewServeMux()
 	registerHTTPAdminRoutes(adminMux, runtime)
