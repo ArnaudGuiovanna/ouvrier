@@ -86,7 +86,11 @@ func (s *MemoryStore) ReleaseLease(ctx context.Context, name, holder string, fen
 	defer s.mu.Unlock()
 	current, exists := s.leases[name]
 	if exists && current.Holder == holder && current.Fence == fence {
-		delete(s.leases, name)
+		// Tombstone instead of delete: expire the lease in place, keeping the
+		// row (holder and fence included) so the next acquire is a takeover at
+		// fence + 1 and fences stay strictly monotonic per name.
+		current.ExpiresAt = time.Now().UTC().Add(-time.Second)
+		s.leases[name] = current
 	}
 	return nil
 }

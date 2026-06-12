@@ -15,10 +15,12 @@ const sqliteLeaseNow = `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
 
 const sqliteLeaseColumns = `name, holder, fence, acquired_at, renewed_at, expires_at`
 
-// sqliteLeaseTTLModifier renders ttl as an SQLite date modifier with
-// millisecond precision, matching the stored timestamp resolution.
+// sqliteLeaseTTLModifier renders a signed duration as an SQLite date modifier
+// with millisecond precision, matching the stored timestamp resolution.
+// Negative durations yield a "-N.NNN seconds" modifier, used by ReleaseLease
+// to compute an already-past expiry.
 func sqliteLeaseTTLModifier(ttl time.Duration) string {
-	return fmt.Sprintf("+%.3f seconds", ttl.Seconds())
+	return fmt.Sprintf("%+.3f seconds", ttl.Seconds())
 }
 
 func (s *SQLiteStore) AcquireLease(ctx context.Context, name, holder string, ttl time.Duration) (Lease, bool, error) {
@@ -38,9 +40,9 @@ func (s *SQLiteStore) AcquireLease(ctx context.Context, name, holder string, ttl
 	// expired row at the previous fence + 1. There is intentionally no holder
 	// self-reacquire clause — fence-checked RenewLease is the only extension
 	// path. The retry loop covers the rare window where the upsert loses but
-	// the winning row is released before the loser reads it back; after the
-	// attempts are exhausted the caller simply observes "not acquired" and
-	// polls again.
+	// the winning row vanishes (release only tombstones, so out-of-band
+	// pruning) before the loser reads it back; after the attempts are
+	// exhausted the caller simply observes "not acquired" and polls again.
 	acquire := `INSERT INTO ouvrier_leases (` + sqliteLeaseColumns + `)
 		VALUES (?, ?, 1, ` + sqliteLeaseNow + `, ` + sqliteLeaseNow + `, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?))
 		ON CONFLICT(name) DO UPDATE SET
@@ -114,9 +116,13 @@ func (s *SQLiteStore) ReleaseLease(ctx context.Context, name, holder string, fen
 		return err
 	}
 
+	// Tombstone instead of delete: expire the lease in place by database time,
+	// keeping the row (holder and fence included) so the next acquire is a
+	// takeover at fence + 1 and fences stay strictly monotonic per name.
 	_, err = s.db.ExecContext(ctx,
-		`DELETE FROM ouvrier_leases WHERE name = ? AND holder = ? AND fence = ?`,
-		name, holder, int64(fence))
+		`UPDATE ouvrier_leases SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+			WHERE name = ? AND holder = ? AND fence = ?`,
+		sqliteLeaseTTLModifier(-time.Second), name, holder, int64(fence))
 	return err
 }
 

@@ -306,8 +306,55 @@ func assertLeaseConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		if lease.Holder != "replica-b" {
 			t.Fatalf("re-acquired holder = %q, want replica-b", lease.Holder)
 		}
-		if lease.Fence != 1 {
-			t.Fatalf("re-acquired fence = %d, want 1 (release deletes the row)", lease.Fence)
+		if lease.Fence != held.Fence+1 {
+			t.Fatalf("re-acquired fence = %d, want %d (release tombstones the row, so re-acquire is a takeover)", lease.Fence, held.Fence+1)
+		}
+	})
+
+	t.Run("ReleaseDoesNotEnableSameHolderABA", func(t *testing.T) {
+		// Zombie trace pinned by this test: replica A acquires and stalls past
+		// expiry; B takes over; B releases; A restarts and re-acquires. A's
+		// original (zombie) session must NOT be able to renew with A's
+		// original fence. With delete-on-release the restarted A would be
+		// re-issued fence 1 — the zombie's exact fence — and the renew would
+		// succeed, leaving two sessions of A both believing they hold the
+		// lease. Tombstoning keeps fences strictly monotonic per name, so the
+		// restarted A gets a strictly higher fence and the zombie renew fails.
+		store := leaseStore(t)
+		ctx := context.Background()
+		original, acquired, err := store.AcquireLease(ctx, "lease-1", "replica-a", 80*time.Millisecond)
+		if err != nil || !acquired {
+			t.Fatalf("AcquireLease acquired=%v err=%v", acquired, err)
+		}
+
+		takeover := acquireLeaseEventually(t, store, "lease-1", "replica-b", time.Minute)
+		if err := store.ReleaseLease(ctx, "lease-1", "replica-b", takeover.Fence); err != nil {
+			t.Fatalf("ReleaseLease returned error: %v", err)
+		}
+
+		restarted, acquired, err := store.AcquireLease(ctx, "lease-1", "replica-a", time.Minute)
+		if err != nil {
+			t.Fatalf("AcquireLease after release returned error: %v", err)
+		}
+		if !acquired {
+			t.Fatal("restarted replica-a failed to re-acquire released lease, want immediate takeover")
+		}
+		if restarted.Fence != takeover.Fence+1 {
+			t.Fatalf("restarted fence = %d, want %d (strictly monotonic past the released fence)", restarted.Fence, takeover.Fence+1)
+		}
+		if restarted.Fence == original.Fence {
+			t.Fatalf("restarted replica-a re-issued its original fence %d", original.Fence)
+		}
+
+		current, ok, err := store.RenewLease(ctx, "lease-1", "replica-a", original.Fence, time.Minute)
+		if err != nil {
+			t.Fatalf("zombie RenewLease returned error: %v", err)
+		}
+		if ok {
+			t.Fatalf("zombie session renewed with original fence %d, want ok=false (same-holder ABA)", original.Fence)
+		}
+		if current.Holder != restarted.Holder || current.Fence != restarted.Fence {
+			t.Fatalf("failed zombie renew observed %+v, want current lease %+v", current, restarted)
 		}
 	})
 
@@ -334,8 +381,12 @@ func assertLeaseConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		if err := store.ReleaseLease(context.Background(), "lease-1", "replica-a", held.Fence); err != nil {
 			t.Fatalf("matching ReleaseLease returned error: %v", err)
 		}
-		if _, acquired, err := store.AcquireLease(context.Background(), "lease-1", "replica-b", time.Minute); err != nil || !acquired {
+		reacquired, acquired, err := store.AcquireLease(context.Background(), "lease-1", "replica-b", time.Minute)
+		if err != nil || !acquired {
 			t.Fatalf("AcquireLease after matching release: acquired=%v err=%v, want true", acquired, err)
+		}
+		if reacquired.Fence != held.Fence+1 {
+			t.Fatalf("post-release fence = %d, want %d (tombstone takeover)", reacquired.Fence, held.Fence+1)
 		}
 	})
 

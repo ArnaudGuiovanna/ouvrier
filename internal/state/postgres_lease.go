@@ -29,9 +29,9 @@ func (s *PostgresStore) AcquireLease(ctx context.Context, name, holder string, t
 	// expired row at the previous fence + 1. There is intentionally no holder
 	// self-reacquire clause — fence-checked RenewLease is the only extension
 	// path. The retry loop covers the rare window where the upsert loses but
-	// the winning row is released before the loser reads it back; after the
-	// attempts are exhausted the caller simply observes "not acquired" and
-	// polls again.
+	// the winning row vanishes (release only tombstones, so out-of-band
+	// pruning) before the loser reads it back; after the attempts are
+	// exhausted the caller simply observes "not acquired" and polls again.
 	acquire := `INSERT INTO ouvrier_leases (` + postgresLeaseColumns + `)
 		VALUES ($1, $2, 1, now(), now(), now() + make_interval(secs => $3))
 		ON CONFLICT (name) DO UPDATE SET
@@ -105,8 +105,12 @@ func (s *PostgresStore) ReleaseLease(ctx context.Context, name, holder string, f
 		return err
 	}
 
+	// Tombstone instead of delete: expire the lease in place by database time,
+	// keeping the row (holder and fence included) so the next acquire is a
+	// takeover at fence + 1 and fences stay strictly monotonic per name.
 	_, err = s.db.ExecContext(ctx,
-		`DELETE FROM ouvrier_leases WHERE name = $1 AND holder = $2 AND fence = $3`,
+		`UPDATE ouvrier_leases SET expires_at = now() - interval '1 second'
+			WHERE name = $1 AND holder = $2 AND fence = $3`,
 		name, holder, int64(fence))
 	return err
 }

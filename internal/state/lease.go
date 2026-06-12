@@ -26,22 +26,33 @@ type Lease struct {
 // implementations share these semantics:
 //
 //   - AcquireLease returns (lease, true, nil) when the caller acquired the
-//     lease: either no row existed (fence starts at 1) or the existing row had
-//     expired (takeover; fence = previous fence + 1, so fences are strictly
-//     monotonic across takeovers). When the lease is held and not expired —
-//     including by the caller itself — it returns the current lease and false;
-//     there is no holder self-reacquire path, fence-checked RenewLease is the
-//     only extension path.
+//     lease: either no row had ever existed for the name (fence starts at 1)
+//     or the existing row had expired or been released (takeover; fence =
+//     previous fence + 1). When the lease is held and not expired — including
+//     by the caller itself — it returns the current lease and false; there is
+//     no holder self-reacquire path, fence-checked RenewLease is the only
+//     extension path.
 //   - RenewLease succeeds only when holder AND fence match the current row
-//     (i.e. the lease has not been taken over or released); it extends
-//     ExpiresAt by ttl from now and updates RenewedAt, fence unchanged. An
-//     expired lease that no contender has taken over yet can still be renewed:
-//     the fence, not wall-clock expiry, is the safety boundary. On failure it
-//     returns the current lease (zero Lease when none) and false.
-//   - ReleaseLease deletes the row only when holder and fence match; it is
-//     idempotent — releasing an absent or non-held lease is not an error.
-//     Because release deletes the row, a subsequent acquire restarts at
-//     fence 1.
+//     (i.e. the lease has not been taken over); it extends ExpiresAt by ttl
+//     from now and updates RenewedAt, fence unchanged. An expired lease that
+//     no contender has taken over yet can still be renewed: the fence, not
+//     wall-clock expiry, is the safety boundary. On failure it returns the
+//     current lease (zero Lease when none) and false.
+//   - ReleaseLease tombstones the row when holder and fence match: a single
+//     update sets ExpiresAt to a moment in the past (by database time) and
+//     keeps the row, holder and fence included, so the next AcquireLease is a
+//     takeover at the previous fence + 1. It is idempotent — releasing an
+//     absent, non-held, or wrong-fence lease is a nil no-op. Release never
+//     deletes the row: fences are therefore strictly monotonic per name for
+//     the lifetime of the row and are usable as external fencing tokens, and
+//     a holder that releases (or loses) the lease and later re-acquires can
+//     never be re-issued a fence it already held — so a zombie session from
+//     its previous incarnation can never renew with its old fence. Future
+//     consumers may prune long-dead lease rows out-of-band. Because the
+//     tombstone keeps holder and fence, the releasing holder itself could
+//     still renew its released lease back to life with its current fence;
+//     release-then-renew within one incarnation is a caller bug, not a
+//     split-brain (a fence never identifies two sessions).
 //   - Leases returns every stored row sorted by name, expired rows included;
 //     callers compare ExpiresAt themselves for observability.
 //
@@ -57,8 +68,9 @@ type LeaseStore interface {
 }
 
 // leaseAcquireAttempts bounds the retry loop in the SQL backends for the rare
-// window where an acquire loses the upsert race but the winning row is
-// released before the loser can read it back.
+// window where an acquire loses the upsert race but the winning row vanishes
+// before the loser can read it back. Release tombstones rows rather than
+// deleting them, so today only out-of-band pruning can open that window.
 const leaseAcquireAttempts = 3
 
 // normalizeLeaseKey validates and trims the (name, holder) pair shared by
