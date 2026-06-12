@@ -264,6 +264,9 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 	if r.err != nil {
 		return r.err
 	}
+	if err := checkLegacyEnv(); err != nil {
+		return err
+	}
 	plans, err := compilePlans(nodes)
 	if err != nil {
 		return err

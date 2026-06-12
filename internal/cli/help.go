@@ -77,7 +77,7 @@ Usage: ouvrier status [flags]
 
 Options:
       --url string     Worker base URL (default "http://localhost:8080")
-      --token string   Admin bearer token (defaults to $PIP_ADMIN_TOKEN)
+      --token string   Admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)
   -h, --help           Show this help message
 `
 
@@ -87,7 +87,7 @@ Usage: ouvrier logs [flags]
 
 Options:
       --url string     Worker base URL (default "http://localhost:8080")
-      --token string   Admin bearer token (defaults to $PIP_ADMIN_TOKEN)
+      --token string   Admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)
       --last int       Number of executions to fetch (default 20)
   -h, --help           Show this help message
 `
@@ -98,7 +98,7 @@ Usage: ouvrier trace [flags] <exec-id>
 
 Options:
       --url string     Worker base URL (default "http://localhost:8080")
-      --token string   Admin bearer token (defaults to $PIP_ADMIN_TOKEN)
+      --token string   Admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)
   -h, --help           Show this help message
 `
 
@@ -192,7 +192,7 @@ const devHelp = `Run the worker locally (go run .) with hot reload until interru
 Usage: ouvrier dev [flags]
 
 Options:
-      --addr string   Address override exposed via PIP_ADDR (default ":8080")
+      --addr string   Address override exposed via OUVRIER_ADDR (default ":8080")
       --dir string    Project directory containing main.go and pip.yaml (default ".")
       --no-reload     Disable hot reload; run "go run ." once
       --no-dotenv     Do not auto-load a local .env into the worker environment

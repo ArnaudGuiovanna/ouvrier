@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 )
 
 func TestRunStatusFetchesAndPrintsAdminCounters(t *testing.T) {
@@ -111,5 +113,25 @@ func TestRedactURLHidesUserinfo(t *testing.T) {
 	}
 	if strings.Contains(got, "user:pass") {
 		t.Fatalf("redactURL still contains credentials: %q", got)
+	}
+}
+
+func TestResolveAdminTokenRejectsLegacyEnv(t *testing.T) {
+	t.Setenv(envnames.AdminToken, "")
+	t.Setenv(envnames.LegacyAdminToken, "old-secret")
+	_, err := resolveAdminToken("")
+	if err == nil || !strings.Contains(err.Error(), envnames.LegacyAdminToken) || !strings.Contains(err.Error(), envnames.AdminToken) {
+		t.Fatalf("expected migration error naming %s and %s, got %v", envnames.LegacyAdminToken, envnames.AdminToken, err)
+	}
+}
+
+func TestResolveAdminTokenPrecedence(t *testing.T) {
+	t.Setenv(envnames.LegacyAdminToken, "old-secret")
+	if got, err := resolveAdminToken("flag-token"); err != nil || got != "flag-token" {
+		t.Fatalf("flag must win: got %q, %v", got, err)
+	}
+	t.Setenv(envnames.AdminToken, "new-secret")
+	if got, err := resolveAdminToken(""); err != nil || got != "new-secret" {
+		t.Fatalf("%s must win over legacy: got %q, %v", envnames.AdminToken, got, err)
 	}
 }

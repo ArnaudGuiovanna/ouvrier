@@ -23,7 +23,7 @@ import (
 )
 %s
 func listenAddr() string {
-	if addr := os.Getenv("PIP_ADDR"); addr != "" {
+	if addr := os.Getenv("OUVRIER_ADDR"); addr != "" {
 		return addr
 	}
 	return ":8080"
@@ -184,10 +184,10 @@ func envExample(cfg Config) string {
 		b.WriteString(key)
 		b.WriteString("=\n")
 	}
-	b.WriteString("PIP_ENV=dev\n")
-	b.WriteString("PIP_ADDR=:8080\n")
-	b.WriteString("PIP_LOG_LEVEL=info\n")
-	b.WriteString("PIP_ADMIN_TOKEN=\n")
+	b.WriteString("OUVRIER_ENV=dev\n")
+	b.WriteString("OUVRIER_ADDR=:8080\n")
+	b.WriteString("OUVRIER_LOG_LEVEL=info\n")
+	b.WriteString("OUVRIER_ADMIN_TOKEN=\n")
 	return b.String()
 }
 

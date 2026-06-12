@@ -15,7 +15,7 @@ import (
 )
 
 func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {
@@ -41,7 +41,7 @@ func TestHTTPAdminHealthAllowsDevAccessWithoutToken(t *testing.T) {
 }
 
 func TestHTTPAdminHealthIncludesRecentExecutionsFromStateStore(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	store := state.NewMemoryStore()
 	now := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC)
 	saveAdminExecution(t, store, state.Execution{
@@ -92,8 +92,8 @@ func TestHTTPAdminHealthIncludesRecentExecutionsFromStateStore(t *testing.T) {
 }
 
 func TestHTTPAdminRejectsMissingTokenOutsideDevMode(t *testing.T) {
-	t.Setenv("PIP_ENV", "production")
-	t.Setenv("PIP_ADMIN_TOKEN", "")
+	t.Setenv("OUVRIER_ENV", "production")
+	t.Setenv("OUVRIER_ADMIN_TOKEN", "")
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("GET /health"),
 		Reply(JSON[httpTestReply]()),
@@ -150,7 +150,7 @@ func TestHTTPAdminRequiresBearerTokenWhenConfigured(t *testing.T) {
 }
 
 func TestDefaultHTTPRuntimeLoadsAdminTokenFromEnv(t *testing.T) {
-	t.Setenv("PIP_ADMIN_TOKEN", " env-admin-token ")
+	t.Setenv("OUVRIER_ADMIN_TOKEN", " env-admin-token ")
 	handler := newTestAdminHTTPHandler(t, defaultHTTPRuntime())
 
 	unauthorized := httptest.NewRecorder()
@@ -169,7 +169,7 @@ func TestDefaultHTTPRuntimeLoadsAdminTokenFromEnv(t *testing.T) {
 }
 
 func TestHTTPAdminPlansDescribeCompiledWorkerCapabilities(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("POST /tickets/{id}", WorkerPool(3)),
 		Pipe("classify ticket",
@@ -1459,7 +1459,7 @@ func TestHTTPAdminTraceByExecutionIncludesRedactedEventPayload(t *testing.T) {
 }
 
 func TestHTTPDevTraceViewerIsUnavailableOutsideDevMode(t *testing.T) {
-	t.Setenv("PIP_ENV", "production")
+	t.Setenv("OUVRIER_ENV", "production")
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("GET /health"),
 		Reply(JSON[httpTestReply]()),
@@ -1482,7 +1482,7 @@ func TestHTTPDevTraceViewerIsUnavailableOutsideDevMode(t *testing.T) {
 }
 
 func TestHTTPDevTraceViewerServesSelfContainedUIInDevMode(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	handler := newTestAdminHTTPHandler(t, httpRuntime{})
 
 	rec := httptest.NewRecorder()
@@ -1514,7 +1514,7 @@ func TestHTTPDevTraceViewerServesSelfContainedUIInDevMode(t *testing.T) {
 }
 
 func TestHTTPDevTraceViewerRequiresConfiguredAdminToken(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("GET /health"),
 		Reply(JSON[httpTestReply]()),
@@ -1544,7 +1544,7 @@ func TestHTTPDevTraceViewerRequiresConfiguredAdminToken(t *testing.T) {
 func newTestAdminHTTPHandler(t *testing.T, rt httpRuntime) http.Handler {
 	t.Helper()
 	if strings.TrimSpace(rt.adminToken) == "" {
-		t.Setenv("PIP_ENV", "dev")
+		t.Setenv("OUVRIER_ENV", "dev")
 	}
 	handler, err := newHTTPHandlerWithRuntime([]Node{
 		From("GET /health"),

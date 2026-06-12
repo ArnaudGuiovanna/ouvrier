@@ -17,7 +17,7 @@ Ouvrier exposes execution through three layers:
 
 ## Admin endpoints
 
-All admin endpoints require `Authorization: Bearer <PIP_ADMIN_TOKEN>` outside
+All admin endpoints require `Authorization: Bearer <OUVRIER_ADMIN_TOKEN>` outside
 local development. Responses are JSON and redact secrets before they leave the
 process.
 
@@ -45,14 +45,14 @@ ouvrier logs --last 50                # /admin/traces?last=50
 ouvrier trace <exec-id>               # /admin/traces/<exec-id>
 ```
 
-`PIP_ADMIN_TOKEN` from the environment is used automatically.
+`OUVRIER_ADMIN_TOKEN` from the environment is used automatically.
 
 ## Prometheus `/metrics`
 
 `GET /metrics` returns a hand-rolled Prometheus text exposition (format version
 0.0.4, no third-party dependency) computed on demand from the EventStream and
 StateStore. It shares the admin auth posture: bearer-token protected outside
-local dev mode (`PIP_ENV=dev`), exactly like the `/admin/*` endpoints.
+local dev mode (`OUVRIER_ENV=dev`), exactly like the `/admin/*` endpoints.
 
 Counters (all monotonic `_total`):
 
@@ -83,7 +83,7 @@ scrape_configs:
   - job_name: ouvrier
     metrics_path: /metrics
     authorization:
-      credentials: <PIP_ADMIN_TOKEN>
+      credentials: <OUVRIER_ADMIN_TOKEN>
     static_configs:
       - targets: ["ouvrier:8080"]
 ```

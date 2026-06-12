@@ -21,7 +21,7 @@ func (app *App) runLogsCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	urlFlag := flags.String("url", defaultAdminURL, "worker base URL")
-	token := flags.String("token", "", "admin bearer token (defaults to $PIP_ADMIN_TOKEN)")
+	token := flags.String("token", "", "admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)")
 	last := flags.Int("last", defaultLogsLast, "number of executions to fetch")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", ErrUsage, err)
@@ -33,7 +33,11 @@ func (app *App) runLogsCommand(ctx context.Context, args []string) error {
 		return fmt.Errorf("%w: --last must be positive", ErrUsage)
 	}
 
-	client := newAdminClient(*urlFlag, resolveAdminToken(*token))
+	adminToken, err := resolveAdminToken(*token)
+	if err != nil {
+		return err
+	}
+	client := newAdminClient(*urlFlag, adminToken)
 
 	query := url.Values{}
 	query.Set("last", strconv.Itoa(*last))

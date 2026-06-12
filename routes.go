@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
@@ -1112,7 +1113,7 @@ func (rt httpRuntime) authorizeAdmin(w http.ResponseWriter, req *http.Request) b
 }
 
 func adminDevModeEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("PIP_ENV")), "dev")
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(envnames.Env)), "dev")
 }
 
 const adminInsecureEnv = "OUVRIER_ADMIN_INSECURE"
@@ -1166,7 +1167,7 @@ func checkAdminExposure(addr, adminToken string) error {
 	if loopbackBindAddr(addr) || adminInsecureOptIn() {
 		return nil
 	}
-	return fmt.Errorf("refusing to start: admin endpoints are unauthenticated (PIP_ENV=dev, no PIP_ADMIN_TOKEN) and %q is reachable from the network; set PIP_ADMIN_TOKEN for production, bind to localhost for local dev, or set %s=1 to override", addr, adminInsecureEnv)
+	return fmt.Errorf("refusing to start: admin endpoints are unauthenticated (%s=dev, no %s) and %q is reachable from the network; set %s for production, bind to localhost for local dev, or set %s=1 to override", envnames.Env, envnames.AdminToken, addr, envnames.AdminToken, adminInsecureEnv)
 }
 
 // adminExposureWarning returns a non-empty warning when admin auth is disabled
@@ -1176,7 +1177,7 @@ func adminExposureWarning(addr, adminToken string) string {
 	if strings.TrimSpace(adminToken) != "" || !adminDevModeEnabled() {
 		return ""
 	}
-	return fmt.Sprintf("WARNING: admin endpoints are UNAUTHENTICATED (PIP_ENV=dev, no PIP_ADMIN_TOKEN) on %q", addr)
+	return fmt.Sprintf("WARNING: admin endpoints are UNAUTHENTICATED (%s=dev, no %s) on %q", envnames.Env, envnames.AdminToken, addr)
 }
 
 type adminHealthResponse struct {

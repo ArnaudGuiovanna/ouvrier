@@ -41,7 +41,7 @@ func metricsRuntimeWithEvents(t *testing.T) httpRuntime {
 }
 
 func TestHTTPMetricsRequiresAdminAuth(t *testing.T) {
-	t.Setenv("PIP_ENV", "")
+	t.Setenv("OUVRIER_ENV", "")
 	rt := metricsRuntimeWithEvents(t)
 	rt.adminToken = "secret-token"
 	handler := newTestAdminHTTPHandler(t, rt)
@@ -62,7 +62,7 @@ func TestHTTPMetricsRequiresAdminAuth(t *testing.T) {
 }
 
 func TestHTTPMetricsEmitsPrometheusFamilies(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	rt := metricsRuntimeWithEvents(t)
 	handler := newTestAdminHTTPHandler(t, rt)
 
@@ -100,7 +100,7 @@ func TestHTTPMetricsEmitsPrometheusFamilies(t *testing.T) {
 }
 
 func TestHTTPMetricsDoesNotLeakSecrets(t *testing.T) {
-	t.Setenv("PIP_ENV", "dev")
+	t.Setenv("OUVRIER_ENV", "dev")
 	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {

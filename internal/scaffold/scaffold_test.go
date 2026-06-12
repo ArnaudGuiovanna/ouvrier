@@ -48,7 +48,7 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	}
 
 	assertFileContains(t, filepath.Join(project.Dir, "main.go"), []string{
-		`os.Getenv("PIP_ADDR")`,
+		`os.Getenv("OUVRIER_ADDR")`,
 		`ovr.Run(listenAddr()`,
 		`ovr.From("POST /tickets")`,
 		`ovr.Model("anthropic/claude-sonnet-4-6")`,
@@ -65,7 +65,7 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	})
 	assertFileContains(t, filepath.Join(project.Dir, ".env.example"), []string{
 		"ANTHROPIC_API_KEY=",
-		"PIP_ADDR=:8080",
+		"OUVRIER_ADDR=:8080",
 	})
 	assertFileContains(t, filepath.Join(project.Dir, "ouvrier.worker.json"), []string{
 		`"name": "demo"`,
@@ -106,7 +106,7 @@ func TestGenerateUsesModelSpecificEnvironment(t *testing.T) {
 	})
 	assertFileContains(t, filepath.Join(project.Dir, ".env.example"), []string{
 		"OPENAI_API_KEY=",
-		"PIP_ADDR=:8080",
+		"OUVRIER_ADDR=:8080",
 	})
 }
 

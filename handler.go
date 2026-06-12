@@ -50,6 +50,9 @@ func (r *Runner) Handler(nodes ...Node) (http.Handler, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
+	if err := checkLegacyEnv(); err != nil {
+		return nil, err
+	}
 	if _, err := compilePlans(nodes); err != nil {
 		return nil, err
 	}
