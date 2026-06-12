@@ -175,9 +175,13 @@ func cliPostgresSchemaDSN(t *testing.T) string {
 		_ = admin.Close()
 	})
 
-	separator := "?"
-	if strings.Contains(dsn, "?") {
-		separator = "&"
+	separator := " " // keyword/value DSN form
+	if strings.Contains(dsn, "://") {
+		if strings.Contains(dsn, "?") {
+			separator = "&"
+		} else {
+			separator = "?"
+		}
 	}
 	return dsn + separator + "search_path=" + schema
 }
@@ -189,6 +193,22 @@ func cliPostgresSchemaDSN(t *testing.T) string {
 func TestRunStateMigratePostgresConcurrentInvocationsAreSafe(t *testing.T) {
 	dsn := cliPostgresSchemaDSN(t)
 	t.Setenv(envnames.StateBackend, "postgres")
+
+	// Baseline: a single run on its own fresh schema applies every pending
+	// migration; the concurrent invocations below must apply exactly as
+	// many in total, whatever that count is as migrations are added.
+	baselineDSN := cliPostgresSchemaDSN(t)
+	t.Setenv(envnames.StateDSN, baselineDSN)
+	var baselineOut bytes.Buffer
+	baselineApp := New("dev", WithStreams(nil, &baselineOut, &bytes.Buffer{}))
+	if err := baselineApp.Run(context.Background(), []string{"state", "migrate"}); err != nil {
+		t.Fatalf("baseline state migrate returned error: %v", err)
+	}
+	wantApplied := strings.Count(baselineOut.String(), "applied migration")
+	if wantApplied == 0 {
+		t.Fatal("baseline run applied no migrations")
+	}
+
 	t.Setenv(envnames.StateDSN, dsn)
 
 	const invocations = 2
@@ -221,8 +241,8 @@ func TestRunStateMigratePostgresConcurrentInvocationsAreSafe(t *testing.T) {
 			t.Fatalf("output %d contains the DSN:\n%s", i, outputs[i].String())
 		}
 	}
-	if applied != 1 {
-		t.Fatalf("applied-migration lines across both invocations = %d, want exactly 1", applied)
+	if applied != wantApplied {
+		t.Fatalf("applied-migration lines across both invocations = %d, want exactly %d", applied, wantApplied)
 	}
 
 	// A second sequential run is a no-op.

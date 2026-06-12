@@ -125,6 +125,9 @@ func (s *PostgresStore) migrate(ctx context.Context) ([]int, error) {
 	}
 
 	applied := map[int]bool{}
+	// rows must be fully consumed and closed before any subsequent
+	// ExecContext on the same transaction (single pgx connection); do not
+	// switch these explicit Close calls to a defer.
 	rows, err := tx.QueryContext(ctx, `SELECT version FROM ouvrier_schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres state store: read applied migrations: %w", err)
