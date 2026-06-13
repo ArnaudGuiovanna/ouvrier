@@ -272,12 +272,57 @@ func SwapCurrentCommands(root, releaseID string) []string {
 // `current` target it replaced ("-" on a first deploy). Rollback resolves
 // the previous release from this log, never from timestamp sorting.
 func AppendDeployLogCommand(root, releaseID, previousTarget string, now time.Time) string {
+	return appendDeployLogCommand(root, releaseID, previousTarget, now, "")
+}
+
+// AppendRollbackLogCommand appends the ledger entry for an operator-initiated
+// rollback: the same parseable format as AppendDeployLogCommand (time, the
+// release that just became current, previous=<replaced target>) plus a
+// trailing "rollback" marker so deploys and rollbacks stay distinguishable.
+func AppendRollbackLogCommand(root, releaseID, previousTarget string, now time.Time) string {
+	return appendDeployLogCommand(root, releaseID, previousTarget, now, " rollback")
+}
+
+func appendDeployLogCommand(root, releaseID, previousTarget string, now time.Time, marker string) string {
 	prev := strings.TrimSpace(previousTarget)
 	if prev == "" {
 		prev = "-"
 	}
-	line := fmt.Sprintf("%s %s previous=%s", now.UTC().Format(time.RFC3339), releaseID, prev)
+	line := fmt.Sprintf("%s %s previous=%s%s", now.UTC().Format(time.RFC3339), releaseID, prev, marker)
 	return fmt.Sprintf("printf '%%s\\n' %s >> %s", shellQuote(line), shellQuote(root+"/deploys.log"))
+}
+
+// ReadLastDeployLogCommand prints the last <root>/deploys.log line, or
+// nothing when the log is missing or empty. `ouvrier deploy rollback`
+// resolves its target from this entry — the recorded previous `current`
+// target is clock-skew-proof, unlike timestamp sorting.
+func ReadLastDeployLogCommand(root string) string {
+	return fmt.Sprintf("tail -n 1 -- %s 2>/dev/null || true", shellQuote(root+"/deploys.log"))
+}
+
+// parseDeployLogLine parses one deploys.log line as written by
+// AppendDeployLogCommand / AppendRollbackLogCommand:
+//
+//	<RFC3339> <releaseID> previous=<target|-> [rollback]
+//
+// Unknown trailing fields are ignored so the format can grow.
+func parseDeployLogLine(line string) (releaseID, previous string, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return "", "", false
+	}
+	prev, found := strings.CutPrefix(fields[2], "previous=")
+	if !found || prev == "" {
+		return "", "", false
+	}
+	return fields[1], prev, true
+}
+
+// ReleaseDirExistsCommand fails when the release directory is gone (e.g.
+// pruned by --keep). Rollback verifies its target still exists with this
+// before touching the `current` symlink.
+func ReleaseDirExistsCommand(root, releaseID string) string {
+	return fmt.Sprintf("test -d %s", shellQuote(ReleaseDir(root, releaseID)))
 }
 
 // AcquireLockCommand takes the per-root deploy lock. The flock(1) on

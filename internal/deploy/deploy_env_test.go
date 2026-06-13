@@ -657,6 +657,7 @@ func TestDeployEnvInventoryUpsert(t *testing.T) {
 		Service:    "ouvrier-demo",
 		AdminAddr:  "127.0.0.1:9090",
 		HealthPath: "/admin/health",
+		ReleaseID:  fixtureReleaseID,
 		SHA256:     fixtureBinarySHA,
 		GitRev:     "",
 		DeployedAt: fixedDeployTime,

@@ -18,7 +18,7 @@ func (app *App) runDeployCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 || isHelpFlag(args[0]) {
 		printDeployHelp(app.out)
 		if len(args) == 0 {
-			return fmt.Errorf("%w: deploy requires an environment name from pip.yaml deploy.<env>, or a subcommand (ssh|docker)", ErrUsage)
+			return fmt.Errorf("%w: deploy requires an environment name from pip.yaml deploy.<env>, or a subcommand (ssh|docker|rollback)", ErrUsage)
 		}
 		return nil
 	}
@@ -30,8 +30,12 @@ func (app *App) runDeployCommand(ctx context.Context, args []string) error {
 		return app.runDeployEnvCommand(ctx, "", args[1:])
 	case args[0] == "docker":
 		return app.runDeployDockerCommand(ctx, args[1:])
+	case args[0] == "rollback":
+		// `deploy rollback <env>` repoints current at the previous release
+		// from the host's deploys.log ledger — no build, no upload.
+		return app.runDeployRollbackCommand(ctx, args[1:])
 	case strings.HasPrefix(args[0], "-"):
-		return fmt.Errorf("%w: deploy requires an environment name from pip.yaml deploy.<env>, or a subcommand (ssh|docker)", ErrUsage)
+		return fmt.Errorf("%w: deploy requires an environment name from pip.yaml deploy.<env>, or a subcommand (ssh|docker|rollback)", ErrUsage)
 	default:
 		return app.runDeployEnvCommand(ctx, args[0], args[1:])
 	}

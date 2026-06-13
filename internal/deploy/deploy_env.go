@@ -536,6 +536,7 @@ func (p *envDeploy) upsertInventory(host, user string) error {
 		Service:    p.service,
 		AdminAddr:  p.adminAddr,
 		HealthPath: "/admin/health",
+		ReleaseID:  p.releaseID,
 		SHA256:     p.info.SHA256,
 		GitRev:     p.info.GitSHA,
 		DeployedAt: p.now().UTC(),
@@ -590,24 +591,30 @@ func (p *envDeploy) failAfterSwap(ctx context.Context, runner RemoteRunner, conn
 // ~30s by default). The bearer token travels as a curl config on the ssh
 // stdin channel (`curl -K -`), never in argv and never on disk.
 func (p *envDeploy) healthGate(ctx context.Context, runner RemoteRunner, connect ConnectOpts) error {
-	cmd := healthGateCommand(p.adminPort)
-	cfg := curlAuthConfig(p.token)
+	return runHealthGate(ctx, runner, connect, p.adminPort, p.token, p.attempts, p.sleep, p.out)
+}
+
+// runHealthGate is the health gate shared by deploy and rollback; see
+// envDeploy.healthGate for the protocol.
+func runHealthGate(ctx context.Context, runner RemoteRunner, connect ConnectOpts, adminPort, token string, attempts int, sleep func(time.Duration), out io.Writer) error {
+	cmd := healthGateCommand(adminPort)
+	cfg := curlAuthConfig(token)
 	var last error
-	for attempt := 1; attempt <= p.attempts; attempt++ {
+	for attempt := 1; attempt <= attempts; attempt++ {
 		if attempt > 1 {
-			p.sleep(healthRetryDelay)
+			sleep(healthRetryDelay)
 		}
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("health gate interrupted: %w", err)
 		}
 		if _, err := runner.SSHIn(ctx, connect, cmd, cfg); err == nil {
-			fmt.Fprintf(p.out, "health OK: http://127.0.0.1:%s/admin/health (attempt %d/%d)\n", p.adminPort, attempt, p.attempts)
+			fmt.Fprintf(out, "health OK: http://127.0.0.1:%s/admin/health (attempt %d/%d)\n", adminPort, attempt, attempts)
 			return nil
 		} else {
 			last = err
 		}
 	}
-	return fmt.Errorf("health gate failed after %d attempts against 127.0.0.1:%s/admin/health: %w", p.attempts, p.adminPort, last)
+	return fmt.Errorf("health gate failed after %d attempts against 127.0.0.1:%s/admin/health: %w", attempts, adminPort, last)
 }
 
 // healthGateCommand renders the on-host probe. -K - makes curl read its

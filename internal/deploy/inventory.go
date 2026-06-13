@@ -20,14 +20,17 @@ const inventoryVersion = 1
 // `ouvrier console`/`fleet` — live /admin/health is truth. No secrets ever:
 // there is deliberately no field that could hold a token or env value.
 type Deployment struct {
-	Name       string    `json:"name"`
-	Host       string    `json:"host"`
-	User       string    `json:"user,omitempty"`
-	Port       int       `json:"port,omitempty"`
-	Path       string    `json:"path,omitempty"`
-	Service    string    `json:"service,omitempty"`
-	AdminAddr  string    `json:"admin_addr,omitempty"`
-	HealthPath string    `json:"health_path,omitempty"`
+	Name       string `json:"name"`
+	Host       string `json:"host"`
+	User       string `json:"user,omitempty"`
+	Port       int    `json:"port,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Service    string `json:"service,omitempty"`
+	AdminAddr  string `json:"admin_addr,omitempty"`
+	HealthPath string `json:"health_path,omitempty"`
+	// ReleaseID is the <UTCts>-<shortsha> release directory currently live on
+	// the host. Rollback records it instead of recomputing SHA256/GitRev.
+	ReleaseID  string    `json:"release_id,omitempty"`
 	SHA256     string    `json:"sha256,omitempty"`
 	GitRev     string    `json:"git_rev,omitempty"`
 	DeployedAt time.Time `json:"deployed_at"`

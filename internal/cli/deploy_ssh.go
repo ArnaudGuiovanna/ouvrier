@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -157,7 +158,13 @@ func (app *App) confirmProdDeploy(envName string, hosts []string) (bool, error) 
 		return false, fmt.Errorf("%w: deploying to %s requires confirmation; pass --yes in non-interactive runs (CI)", ErrDeploy, envName)
 	}
 	fmt.Fprintf(app.out, "Deploy to %s (%s)? [y/N]: ", envName, strings.Join(hosts, ", "))
-	line, err := bufio.NewReader(app.in).ReadString('\n')
+	return readConfirmAnswer(app.in)
+}
+
+// readConfirmAnswer reads one confirmation line; only an explicit y/yes
+// proceeds, and EOF without an answer is a decline.
+func readConfirmAnswer(in io.Reader) (bool, error) {
+	line, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil && line == "" {
 		return false, nil // EOF without an answer = decline
 	}

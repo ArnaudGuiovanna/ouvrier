@@ -770,6 +770,8 @@ ouvrier server trust HOST [--fingerprint SHA256:...] [--rotate] [--port 22] [--d
 ouvrier deploy ENV [--env-file FILE] [--identity FILE] [--target GOOS/GOARCH] [--keep 5] [--yes] [--allow-shared-admin] [--unit-sandbox on|off]
 ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME] [...same flags]
 ouvrier deploy ssh --print-sudoers [--user USER] [--service NAME] [--path PATH]
+ouvrier deploy rollback ENV [--env-file FILE] [--identity FILE] [--yes] [--allow-shared-admin]
+ouvrier deploy rollback --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME] [...same flags]
 ouvrier deploy docker [--image IMAGE] [--tag TAG] [--push] [--force]
 ouvrier state migrate
 ```
@@ -866,9 +868,35 @@ Each host deploy is an atomic release switch:
    and reports.
 
 Multi-host environments deploy sequentially, health-check each host, and
-abort on the first failure with a loud mixed-version summary. Roll back by
-deploying the previous git revision (the `current` symlink swap makes any
-release activation atomic).
+abort on the first failure with a loud mixed-version summary.
+
+### Rollback
+
+Instant rollback is the payoff of the releases/current layout:
+
+```sh
+ouvrier deploy rollback staging
+ouvrier deploy rollback prod --yes     # same confirmation gate as deploy
+```
+
+Per host, `deploy rollback` takes the same `.deploy.lock`, reads the **last**
+`deploys.log` entry, and repoints `current` at the release that entry
+replaced — the ledger records the actual previous `current` target at deploy
+time, so rollback never trusts timestamp ordering. It then restarts the
+service, runs the same health gate, appends a distinguishable `rollback`
+entry to `deploys.log`, and updates the deployments inventory (result
+`rollback-ok`; the binary's sha256 is not recomputed — the entry records the
+release ID now live). It refuses with an actionable error — leaving
+`current` untouched — when there is no deploy history, when the last deploy
+recorded no previous release (a first deploy), or when the previous release
+directory was pruned by `--keep`; redeploy a known-good revision instead.
+Multiple hosts roll back sequentially and abort on the first failure.
+
+The host's `shared/.env` is intentionally **not** rolled back: the latest
+shipped secrets stay in place (snapshotting the env per release is a pending
+design decision). The local env file is read only for the
+`OUVRIER_ADMIN_TOKEN` and `OUVRIER_ADMIN_ADDR` the health gate needs, so its
+token must match the one already deployed.
 
 ### Server Preparation (sudoers)
 
