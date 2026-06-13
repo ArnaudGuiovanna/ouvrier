@@ -55,8 +55,8 @@ func main() {
 
 ## Status
 
-Ouvrier `main` includes the completed v0.1 and v0.2 milestone backlog. The
-latest tagged release is still `v0.1.0` until v0.2 is tagged.
+Ouvrier `main` includes the completed v0.1, v0.2, and v0.3 milestone backlog.
+The latest tagged release is `v0.3.0` (Deploy & Scale).
 The public Go module path is:
 
 ```txt
