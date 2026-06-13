@@ -5,17 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ouvrier console</title>
   <link rel="stylesheet" href="/app.css" />
-  <!-- Import map resolves the bare "preact" specifier the vendored hooks
-       module imports, so everything stays first-party (CSP default-src 'self'). -->
-  <script type="importmap">
-    {
-      "imports": {
-        "preact": "/vendor/preact.module.js",
-        "preact/hooks": "/vendor/hooks.module.js",
-        "htm": "/vendor/htm.module.js"
-      }
-    }
-  </script>
+  <link rel="icon" href="data:," />
+  <!-- The SPA references modules by absolute /vendor paths and uses no inline
+       scripts, so the strict CSP (default-src 'self', which forbids inline
+       scripts) is satisfied with first-party external modules only. -->
 </head>
 <body>
   <div id="app"></div>

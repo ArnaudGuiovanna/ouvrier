@@ -58,13 +58,58 @@ func TestAssetsServedWithSecurityHeaders(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET / = %d", resp.StatusCode)
 	}
-	buf := make([]byte, 2048)
+	buf := make([]byte, 4096)
 	n, _ := resp.Body.Read(buf)
 	body := string(buf[:n])
 	if !strings.Contains(body, `id="app"`) {
 		t.Fatalf("index.html missing app mount point")
 	}
-	if !strings.Contains(body, "importmap") {
-		t.Fatalf("index.html missing import map for first-party module resolution")
+
+	// Regression guard: the CSP is default-src 'self' (no script-src override
+	// allowing inline scripts), which the browser also applies to inline
+	// <script type=importmap>. An inline import map is therefore silently
+	// blocked, the bare "preact" specifier fails to resolve, the module graph
+	// never loads, and the page renders blank. The SPA must avoid inline
+	// scripts entirely and reference modules by absolute /vendor paths.
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "default-src 'self'") {
+		t.Fatalf("CSP missing default-src 'self': %q", csp)
+	}
+	if strings.Contains(csp, "'unsafe-inline'") && strings.Contains(csp, "script") {
+		t.Fatalf("CSP permits inline scripts; the no-inline-script invariant relies on it forbidding them: %q", csp)
+	}
+	for _, tag := range []string{`type="importmap"`, `type=importmap`} {
+		if strings.Contains(body, tag) {
+			t.Fatalf("index.html has an inline import map (%s), which the strict CSP blocks (page renders blank)", tag)
+		}
+	}
+	// No inline <script> body at all: the only script element must be the
+	// external module loader (src=...). An inline script would be CSP-blocked.
+	if idx := strings.Index(body, "<script"); idx >= 0 {
+		tagEnd := strings.Index(body[idx:], ">")
+		if tagEnd >= 0 && !strings.Contains(body[idx:idx+tagEnd], "src=") {
+			t.Fatalf("index.html has an inline <script> (no src=); the strict CSP blocks it: %q", body[idx:idx+tagEnd+1])
+		}
+	}
+}
+
+// TestSPAModulesUseAbsoluteVendorPaths is the source-level half of the
+// no-inline-script invariant: every ESM import must use an absolute /vendor
+// path (or another absolute first-party path), never a bare specifier like
+// "preact" that would require an inline import map the CSP blocks.
+func TestSPAModulesUseAbsoluteVendorPaths(t *testing.T) {
+	sub := mustSub(assetsFS, "assets")
+	// (file, bare specifiers that must NOT appear as import sources)
+	for _, f := range []string{"app.js", "vendor/hooks.module.js"} {
+		b, err := fs.ReadFile(sub, f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		src := string(b)
+		for _, bare := range []string{`from"preact"`, `from "preact"`, `from"preact/hooks"`, `from "preact/hooks"`, `from"htm"`, `from "htm"`} {
+			if strings.Contains(src, bare) {
+				t.Fatalf("%s imports the bare specifier %q; use an absolute /vendor/*.js path so no inline import map is needed", f, strings.TrimPrefix(strings.TrimPrefix(bare, "from"), " "))
+			}
+		}
 	}
 }

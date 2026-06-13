@@ -1,0 +1,59 @@
+name: release
+
+# Cross-compiles the ouvrier CLI for the common OS/arch pairs and attaches the
+# binaries + SHA256SUMS to the GitHub release whenever a v* tag is pushed.
+# Pure `go build` (no GoReleaser), so install.sh has real downloadable binaries.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # needed to upload assets to the release
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build cross-platform binaries
+        env:
+          CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            out="dist/ouvrier_${os}_${arch}"
+            echo "building $out"
+            GOOS="$os" GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "$out" ./cmd/ouvrier
+          done
+          ( cd dist && sha256sum ouvrier_* > SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Attach binaries to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Upload onto an existing release (created by hand with rich notes),
+          # or create one with auto-generated notes if the tag has none yet.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/ouvrier_* dist/SHA256SUMS \
+              --clobber --repo "$REPO"
+          else
+            gh release create "$TAG" dist/ouvrier_* dist/SHA256SUMS \
+              --repo "$REPO" --title "$TAG" --generate-notes
+          fi
