@@ -87,26 +87,91 @@ func newHTTPHandlerFromRoutes(routes []httpRoute, runtime httpRuntime) (http.Han
 }
 
 func newHTTPHandlerFromRoutesAndPlans(routes []httpRoute, plans []runtimeplan.Plan, runtime httpRuntime) (http.Handler, error) {
-	if err := validateHTTPTriggerSecurityConfig(routes, runtime); err != nil {
+	runtime, err := prepareHTTPServeRuntime(routes, plans, runtime)
+	if err != nil {
 		return nil, err
 	}
-	if err := validateRuntimeGuardsForPlans(plans); err != nil {
+
+	mux := http.NewServeMux()
+	registerHTTPAdminRoutes(mux, runtime)
+	if err := registerPublicHTTPRoutes(mux, routes, runtime); err != nil {
 		return nil, err
+	}
+	return newRuntimeHTTPHandler(mux, runtime.async), nil
+}
+
+// prepareHTTPServeRuntime applies the serve-time runtime setup shared by the
+// combined (v0.2 shared-port) and split (OUVRIER_ADMIN_ADDR) handler layouts:
+// trigger security validation, runtime guards, async group, admin route/plan
+// wiring, and durable-run recovery.
+func prepareHTTPServeRuntime(routes []httpRoute, plans []runtimeplan.Plan, runtime httpRuntime) (httpRuntime, error) {
+	if err := validateHTTPTriggerSecurityConfig(routes, runtime); err != nil {
+		return httpRuntime{}, err
+	}
+	if err := validateRuntimeGuardsForPlans(plans); err != nil {
+		return httpRuntime{}, err
 	}
 	runtime = runtime.withAsyncGroup()
 	runtime.adminRoutes = routes
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
 	startDurableRunRecovery(runtime, plans)
+	return runtime, nil
+}
 
-	mux := http.NewServeMux()
-	registerHTTPAdminRoutes(mux, runtime)
+func registerPublicHTTPRoutes(mux *http.ServeMux, routes []httpRoute, runtime httpRuntime) error {
 	for _, route := range routes {
 		route.runtime = runtime
 		if err := registerHTTPRoute(mux, route); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return newRuntimeHTTPHandler(mux, runtime.async), nil
+	return nil
+}
+
+// newSplitHTTPHandlersFromRoutesAndPlans builds the OUVRIER_ADMIN_ADDR layout:
+// a public handler carrying only the trigger routes, and an admin handler
+// carrying the full registerHTTPAdminRoutes surface (every /admin/* route,
+// the dev-mode /dev viewer, and /metrics) while 404ing everything else. Both
+// handlers share one runtime — state store, event stream, async group — so
+// admin endpoints on the second listener observe triggers fired on the first
+// and graceful shutdown drains both together. With OUVRIER_METRICS_PUBLIC,
+// /metrics is additionally registered on the public handler (same bearer
+// auth) for Prometheus scrapers that cannot reach the loopback admin port.
+func newSplitHTTPHandlersFromRoutesAndPlans(routes []httpRoute, plans []runtimeplan.Plan, runtime httpRuntime) (publicHandler, adminHandler http.Handler, err error) {
+	runtime, err = prepareHTTPServeRuntime(routes, plans, runtime)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	publicMux := http.NewServeMux()
+	// Register the opt-in public /metrics before trigger routes, mirroring
+	// the combined layout's admin-first order: a user trigger declared at
+	// GET /metrics then fails route registration with ErrInvalidNode
+	// instead of panicking the mux.
+	if metricsPublicOptIn() {
+		publicMux.HandleFunc("GET /metrics", runtime.serveMetrics)
+	}
+	if err := registerPublicHTTPRoutes(publicMux, routes, runtime); err != nil {
+		return nil, nil, err
+	}
+	adminMux := http.NewServeMux()
+	registerHTTPAdminRoutes(adminMux, runtime)
+	return newRuntimeHTTPHandler(publicMux, runtime.async), newRuntimeHTTPHandler(adminMux, runtime.async), nil
+}
+
+// newSplitHTTPCompatibleHandlersWithRuntime is the split-listener counterpart
+// of newHTTPCompatibleHandlerWithRuntime, used by Run when OUVRIER_ADMIN_ADDR
+// is set.
+func newSplitHTTPCompatibleHandlersWithRuntime(nodes []Node, runtime httpRuntime) (publicHandler, adminHandler http.Handler, err error) {
+	routes, err := httpCompatibleRoutesFromNodes(nodes)
+	if err != nil {
+		return nil, nil, err
+	}
+	plans := make([]runtimeplan.Plan, 0, len(routes))
+	for _, route := range routes {
+		plans = append(plans, route.plan)
+	}
+	return newSplitHTTPHandlersFromRoutesAndPlans(routes, plans, runtime)
 }
 
 func newAdminHandlerWithRuntime(plans []runtimeplan.Plan, runtime httpRuntime) (http.Handler, error) {
@@ -1051,6 +1116,42 @@ func serveHTTP(addr string, handler http.Handler) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return serveHTTPWithContext(ctx, addr, handler)
+}
+
+// serveSplitHTTP serves the public handler on addr and the admin handler on
+// adminAddr (OUVRIER_ADMIN_ADDR) under one signal-driven shutdown. Both
+// listeners mirror the single-listener lifecycle: a failure on either one
+// cancels the other (which then shuts down gracefully) and fails Run the same
+// way a single listener failure does.
+func serveSplitHTTP(addr string, publicHandler http.Handler, adminAddr string, adminHandler http.Handler) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return serveSplitHTTPWithContext(ctx, addr, publicHandler, adminAddr, adminHandler)
+}
+
+func serveSplitHTTPWithContext(ctx context.Context, addr string, publicHandler http.Handler, adminAddr string, adminHandler http.Handler) error {
+	return runSupervisedRuntimes(ctx,
+		func(ctx context.Context) error {
+			return serveHTTPWithContext(ctx, addr, publicHandler)
+		},
+		func(ctx context.Context) error {
+			return serveHTTPWithContext(ctx, adminAddr, adminHandler)
+		},
+	)
+}
+
+// serveAdminOnlyHTTPWithContext serves the HTTP surface of a worker whose
+// only HTTP routes are the admin ones (cron and stream runtimes). When
+// OUVRIER_ADMIN_ADDR is unset the admin handler binds the public addr exactly
+// as in v0.2. When set, the admin surface moves to the dedicated listener and
+// the public addr still binds — keeping Run's contract of owning addr — but
+// answers 404 for everything, so admin routes are never network reachable.
+func serveAdminOnlyHTTPWithContext(ctx context.Context, addr string, adminHandler http.Handler) error {
+	adminAddr := adminAddrFromEnv()
+	if adminAddr == "" {
+		return serveHTTPWithContext(ctx, addr, adminHandler)
+	}
+	return serveSplitHTTPWithContext(ctx, addr, http.NewServeMux(), adminAddr, adminHandler)
 }
 
 func serveHTTPWithContext(ctx context.Context, addr string, handler http.Handler) error {

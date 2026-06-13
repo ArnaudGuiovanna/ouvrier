@@ -231,7 +231,10 @@ func modelProvider(model string) string {
 }
 
 func gitignore() string {
-	return `.env
+	// .env* covers per-environment files like .env.staging and .env.prod;
+	// the committed .env.example template is explicitly re-included.
+	return `.env*
+!.env.example
 bin/
 dist/
 *.log

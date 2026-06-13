@@ -9,6 +9,16 @@ const (
 	Addr       = "OUVRIER_ADDR"
 	LogLevel   = "OUVRIER_LOG_LEVEL"
 
+	// AdminAddr moves the admin surface (/admin/*, /metrics, and the dev-mode
+	// /dev viewer) off the public port onto a dedicated listener bound at this
+	// address (e.g. 127.0.0.1:9090); the public port then answers 404 for
+	// those routes. Unset preserves the v0.2 shared-port layout. MetricsPublic
+	// ("1") additionally keeps /metrics registered on the public port when the
+	// surface is split, for Prometheus scrapers that cannot reach the loopback
+	// admin listener; it changes nothing while AdminAddr is unset.
+	AdminAddr     = "OUVRIER_ADMIN_ADDR"
+	MetricsPublic = "OUVRIER_METRICS_PUBLIC"
+
 	StateBackend  = "OUVRIER_STATE_BACKEND"
 	StatePath     = "OUVRIER_STATE_PATH"
 	StateDSN      = "OUVRIER_STATE_DSN"
@@ -26,6 +36,15 @@ const (
 	// journals are kept before pruning (Go duration, default 72h).
 	DurableRuns      = "OUVRIER_DURABLE_RUNS"
 	DurableRetention = "OUVRIER_DURABLE_RETENTION"
+
+	// DeployEnvFile overrides which dotenv file `ouvrier deploy` ships,
+	// taking precedence over .env.<env> and .env (same as --env-file).
+	DeployEnvFile = "OUVRIER_DEPLOY_ENV_FILE"
+	// ConfigDir overrides the user-level config directory (default
+	// ~/.config/ouvrier); FleetPath overrides the full path of the
+	// deployments inventory (default <config dir>/deployments.json).
+	ConfigDir = "OUVRIER_CONFIG_DIR"
+	FleetPath = "OUVRIER_FLEET_PATH"
 
 	LegacyEnv        = "PIP_ENV"
 	LegacyAdminToken = "PIP_ADMIN_TOKEN"

@@ -47,6 +47,37 @@ ouvrier trace <exec-id>               # /admin/traces/<exec-id>
 
 `OUVRIER_ADMIN_TOKEN` from the environment is used automatically.
 
+## Dedicated admin listener (`OUVRIER_ADMIN_ADDR`)
+
+By default the admin surface shares the public port, exactly as in v0.2. Set
+`OUVRIER_ADMIN_ADDR` (e.g. `127.0.0.1:9090`) and `Run` starts a second
+listener with its own mux: every `/admin/*` route, `GET /metrics`, and the
+dev-mode `GET /dev` viewer answer only on that listener, and the public port
+returns 404 for them. Trigger routes are unaffected. This is how the v0.3
+constraint "admin ports are never exposed publicly" is enforced — operators
+reach the admin listener over an SSH tunnel rather than the network.
+
+- The bind must be loopback. A non-loopback `OUVRIER_ADMIN_ADDR` refuses
+  startup regardless of token or dev mode, unless `OUVRIER_ADMIN_INSECURE=1`
+  explicitly overrides it (a startup warning is logged in that case).
+- Admin token enforcement is identical on the dedicated listener: bearer auth
+  outside `OUVRIER_ENV=dev`, exactly as on the shared port.
+- Cron- and stream-only workers, whose HTTP surface is admin-only, also move
+  it to the admin listener; their public port then answers 404 for everything
+  while still being bound by the worker.
+- `ovr.Handler` (the in-process test seam) is unaffected: it always returns
+  the combined handler with trigger and admin routes together, regardless of
+  `OUVRIER_ADMIN_ADDR`. Only `Run` splits listeners.
+
+### `OUVRIER_METRICS_PUBLIC`
+
+When the surface is split, `/metrics` moves to the admin listener with the
+rest. For Prometheus scrapers that cannot traverse SSH to the loopback admin
+port, set `OUVRIER_METRICS_PUBLIC=1` to keep `/metrics` *also* registered on
+the public port (default when split: not public). The public copy enforces the
+same bearer-token auth. The variable changes nothing while
+`OUVRIER_ADMIN_ADDR` is unset.
+
 ## Prometheus `/metrics`
 
 `GET /metrics` returns a hand-rolled Prometheus text exposition (format version
@@ -87,6 +118,10 @@ scrape_configs:
     static_configs:
       - targets: ["ouvrier:8080"]
 ```
+
+With `OUVRIER_ADMIN_ADDR` set, `/metrics` lives on the admin listener; point
+the scraper there (loopback/tunnel) or set `OUVRIER_METRICS_PUBLIC=1` to keep
+it on the public port as well.
 
 ## Native OTLP exporter
 

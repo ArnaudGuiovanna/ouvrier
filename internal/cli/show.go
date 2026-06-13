@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 )
 
 // ErrPipYAMLMissing is returned when ouvrier show cannot find pip.yaml in the
@@ -18,16 +20,19 @@ var ErrPipYAMLMissing = errors.New("pip.yaml not found")
 
 // pipYAMLSummary captures the structured pieces of pip.yaml we print.
 type pipYAMLSummary struct {
-	Name     string
-	Version  string
-	Trigger  string
-	Model    string
-	Deploy   []string
-	EnvReq   []string
-	Health   string
-	Tools    []string
-	Skills   []string
-	Manifest *workerManifest
+	Name    string
+	Version string
+	Trigger string
+	Model   string
+	Deploy  []string
+	// DeployEnvs holds the parsed deploy.<env> blocks (the committed server
+	// registry) in document order, for the internal/deploy engine.
+	DeployEnvs []deploy.Environment
+	EnvReq     []string
+	Health     string
+	Tools      []string
+	Skills     []string
+	Manifest   *workerManifest
 }
 
 const workerManifestFilename = "ouvrier.worker.json"
