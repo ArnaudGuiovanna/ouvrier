@@ -29,6 +29,9 @@ type App struct {
 	out     io.Writer
 	errOut  io.Writer
 	runNew  RunNewFunc
+	// runOperate launches the interactive v0.4 worker-builder cockpit. Tests
+	// substitute a fake implementation so they do not drive Bubble Tea.
+	runOperate RunOperateFunc
 	// keyscan is the ssh-keyscan seam used by `ouvrier server trust`; tests
 	// substitute canned scan output. Nil means deploy.DefaultKeyscan.
 	keyscan deploy.KeyscanRunner
@@ -42,11 +45,12 @@ func New(version string, opts ...Option) *App {
 	}
 
 	app := &App{
-		version: version,
-		in:      os.Stdin,
-		out:     os.Stdout,
-		errOut:  os.Stderr,
-		runNew:  defaultRunNew,
+		version:    version,
+		in:         os.Stdin,
+		out:        os.Stdout,
+		errOut:     os.Stderr,
+		runNew:     defaultRunNew,
+		runOperate: defaultRunOperate,
 	}
 	for _, opt := range opts {
 		opt(app)
@@ -117,6 +121,8 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runFleetCommand(ctx, args[1:])
 	case "console":
 		return app.runConsoleCommand(ctx, args[1:])
+	case "operate":
+		return app.runOperateCommand(ctx, args[1:])
 	case "state":
 		return app.runStateCommand(ctx, args[1:])
 	default:

@@ -13,8 +13,8 @@ commands.
 
 ## Version And Requirements
 
-- Ouvrier version: current `main` includes v0.1, v0.2, and v0.3 milestone work;
-  the latest tagged release is `v0.3.1`.
+- Ouvrier version: current `main` includes v0.1, v0.2, v0.3, and v0.4
+  milestone work; the latest tagged release is `v0.4.0`.
 - Go version: Go 1.25 or newer.
 - Public module path: `github.com/ArnaudGuiovanna/ouvrier`.
 - Runtime package name: `ovr`.
@@ -781,6 +781,14 @@ ouvrier add skill --name ticket-triage [--description TEXT]
 ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
+ouvrier operate [--dir .] [--agent codex|manual] [--goal TEXT]
+ouvrier operate create-worker --yes --name NAME --trigger "POST /path" --model provider/model [--dir .]
+ouvrier operate patch --goal TEXT [--dir .] [--agent codex|manual]
+ouvrier operate review-worker [--scope whole_worker] [--dir .] [--agent codex|manual]
+ouvrier operate fix-worker [--session ID] [--agent codex|manual]
+ouvrier operate audit [--session ID] [--dir .]
+ouvrier operate build [--session ID] [--target linux/amd64] [--allow-failed]
+ouvrier operate transfer --env ENV [--session ID] [--target linux/amd64] [--allow-failed]
 ouvrier status [--url URL] [--token TOKEN] [--worker NAME | --all]
 ouvrier logs [--url URL] [--token TOKEN] [--last N] [--worker NAME | --all]
 ouvrier trace <exec-id> [--url URL] [--token TOKEN] [--worker NAME | --all]
@@ -797,6 +805,41 @@ ouvrier state migrate
 `ouvrier dev` runs `go run .`, streams output, forwards shutdown signals, and
 sets `OUVRIER_ADDR` when `--addr` is provided. Restart it after editing source
 files.
+
+### Operate Harness
+
+`ouvrier operate` is the v0.4 local construction cockpit for workers. It is a
+Bubble Tea interface, visually aligned with the terminal-first Pi workflow,
+but the workflow owner is Ouvrier: select or create a worker, choose or resume
+a session, prompt Codex, capture the patch, review code, run audit gates,
+build, and transfer.
+
+The non-interactive subcommands expose the same steps:
+
+```sh
+ouvrier operate patch --goal "add a read-only load_ticket tool"
+ouvrier operate create-worker --yes --name inbox --trigger "POST /inbox" --model anthropic/claude-sonnet-4-6
+ouvrier operate review-worker --scope governance_security
+ouvrier operate fix-worker --session <id>
+ouvrier operate audit --session <id>
+ouvrier operate build --session <id>
+ouvrier operate transfer --session <id> --env staging
+```
+
+Codex is accessed through the local Codex CLI driver (`--agent codex`), so
+authentication stays owned by Codex (`codex login`). `--agent manual` keeps the
+same sessions and gates without asking an agent to edit files. Build refuses to
+run without a passing audit, and transfer refuses without both passing audit
+and review unless `--allow-failed` is supplied intentionally.
+
+Every operate session persists human-auditable artifacts under
+`.ouvrier/operate/sessions/<id>/`: `goal.md`, `patch.json`, `diff.patch`,
+`review.json`, `audit.json`, `build.json`, `transfer.json`, and
+`events.jsonl`. This keeps the worker runtime unchanged while giving the
+developer-operator one local interface for operate, build, and transfer. The
+web console remains the remote surface for observing workers and fleets,
+approving suspended runtime actions, triggering workers, and streaming deploy
+progress.
 
 ## Build And Deploy
 

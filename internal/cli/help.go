@@ -22,10 +22,53 @@ Commands:
   server    Manage trusted deploy hosts (trust pins SSH host keys)
   fleet     Inspect or prune the recorded deployments inventory (ls|rm)
   console   Start the loopback web console over the federated admin APIs
+  operate   Open the local agentic worker-builder cockpit
   state     Manage the worker's durable state backend (migrate)
   version   Print the ouvrier CLI version
 
 Run "ouvrier <command> --help" for command details.
+`
+
+const operateHelp = `Open the local agentic worker-builder cockpit.
+
+Usage: ouvrier operate [flags]
+       ouvrier operate create-worker --yes --name <name> --trigger <trigger> --model <model> [flags]
+       ouvrier operate patch --goal "<change>" [flags]
+       ouvrier operate fix-worker [flags]
+       ouvrier operate review-worker [flags]
+       ouvrier operate audit [flags]
+       ouvrier operate build [flags]
+       ouvrier operate transfer --env <name> [flags]
+
+The interactive cockpit orchestrates worker selection, review, agent patching,
+audit gates, build, and transfer while keeping workers as normal Go projects.
+Codex is used only as a local driver; Ouvrier never stores Codex credentials.
+
+Options:
+      --dir string          Worker/project directory (default ".")
+      --agent string        Agent driver: codex or manual (default "codex")
+      --codex-mode string   Codex transport: auto, exec, or app-server (default "auto")
+      --session string      Resume a local operate session
+      --goal string         Pre-fill the first builder prompt
+      --target string       Build/deploy target, e.g. linux/amd64
+      --allow-failed        Override audit/review gates for build or transfer
+  -h, --help                Show this help message
+
+Review worker mode:
+      --scope string        whole_worker, changed_files, tool, pipeline,
+                            governance_security, deploy_readiness, failing_trace
+      --subject string      Optional review subject, e.g. tool name or pipeline
+
+Transfer mode:
+      --env string          deploy.<env> from pip.yaml
+      --env-file string     Env file passed to deploy
+      --keep int            Releases to keep on the host
+
+Create worker mode:
+      --name string         Project name
+      --trigger string      Initial worker trigger
+      --model string        Initial provider/model
+      --yes                 Confirm file creation
 `
 
 const newHelp = `Scaffold a new Ouvrier project.

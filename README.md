@@ -55,8 +55,8 @@ func main() {
 
 ## Status
 
-Ouvrier `main` includes the completed v0.1, v0.2, and v0.3 milestone backlog.
-The latest tagged release is `v0.3.1` (Deploy & Scale).
+Ouvrier `main` includes the completed v0.1, v0.2, v0.3, and v0.4 milestone
+backlog. The latest tagged release is `v0.4.0` (Agentic Worker Builder).
 The public Go module path is:
 
 ```txt
@@ -103,7 +103,7 @@ What ships in the current codebase:
   tool, schema, and subagent spans.
 - The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
   `add agent|trigger|tool|skill`, `dev`, `build` (static cross-compile), and
-  `deploy <env>|ssh|docker`.
+  `deploy <env>|ssh|docker`, plus `operate` for local agentic worker building.
 
 Operational notes: trace persistence uses the configured `StateStore` (SQLite
 by default), cost accounting depends on configured pricing and provider usage
@@ -150,7 +150,7 @@ it fetches the latest release, verifies the checksum, and installs `ouvrier`:
 curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/ouvrier/main/install.sh | sh
 ```
 
-Pin a version with `OUVRIER_VERSION=v0.3.1` and the target directory with
+Pin a version with `OUVRIER_VERSION=v0.4.0` and the target directory with
 `OUVRIER_BIN_DIR=~/.local/bin`. Re-running the script updates an existing
 install in place.
 
@@ -162,7 +162,7 @@ go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
 ouvrier version
 ```
 
-Use `@v0.3.1` instead of `@latest` to pin a specific release.
+Use `@v0.4.0` instead of `@latest` to pin a specific release.
 
 To build from a checkout instead (for contributing or running the tests):
 
@@ -534,6 +534,14 @@ ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]
 ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
+ouvrier operate [--dir .] [--agent codex|manual] [--goal TEXT]
+ouvrier operate create-worker --yes --name NAME --trigger "POST /path" --model provider/model [--dir .]
+ouvrier operate patch --goal TEXT [--agent codex|manual] [--dir .]
+ouvrier operate review-worker [--scope whole_worker] [--agent codex|manual] [--dir .]
+ouvrier operate fix-worker [--session ID] [--agent codex|manual]
+ouvrier operate audit [--session ID] [--dir .]
+ouvrier operate build [--session ID] [--target os/arch] [--allow-failed]
+ouvrier operate transfer --env ENV [--session ID] [--target os/arch] [--allow-failed]
 ouvrier deploy ENV [--env-file FILE] [--identity FILE] [--target os/arch] [--keep 5] [--yes]
 ouvrier deploy ssh --host HOST [--dir .] (same flags; bypasses the registry)
 ouvrier deploy docker [--dir .] [--image IMAGE] [--tag TAG] [--push]
@@ -544,6 +552,17 @@ ouvrier console [--addr 127.0.0.1:7333] [--fleet PATH] [--token TOKEN] [--no-ope
 
 `ouvrier new` opens the Bubble Tea v2 project wizard. The wizard and
 `ouvrier new --yes` support HTTP trigger strings such as `"POST /tickets"`.
+
+`ouvrier operate` is the v0.4 local builder cockpit. It can select an existing
+worker from a parent directory or create one with `operate create-worker`, then
+uses a SOTA agentic harness around Codex or manual mode to patch a worker,
+review the worker code, convert findings into AI fixes, run deterministic
+audit gates, build the binary, and hand transfer to the existing deploy
+engine. Sessions and artifacts live under `.ouvrier/operate/sessions/<id>/`
+(`goal.md`, `patch.json`, `diff.patch`, `review.json`, `audit.json`,
+`build.json`, `transfer.json`, and `events.jsonl`) so a developer-operator can
+audit every step. The web console remains the remote observation and approval
+surface for workers and fleets; `operate` is the local construction harness.
 
 The introspection commands (`show`, `status`, `logs`, `trace`) read from the
 project filesystem (`pip.yaml`) or talk to a running worker through
