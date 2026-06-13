@@ -22,9 +22,9 @@ type Manager interface {
 	// the in-memory admin token server-side so the console's adminapi client and
 	// the browser never see it.
 	Transport(name string) (http.RoundTripper, error)
-	// Dial opens a connection through the worker's tunnel; the reverse proxy
-	// uses it as DialContext so the proxied request lands on the worker's admin
-	// listener over SSH, with the manager injecting the token.
+	// Dial opens a raw connection through the worker's tunnel. The admin
+	// reverse proxy uses Transport (above) directly, not Dial; Dial is kept
+	// for consumers that need a net.Conn rather than an http.RoundTripper.
 	Dial(ctx context.Context, name string) (net.Conn, error)
 	// States snapshots every worker's tunnel state for the fleet view.
 	States() map[string]tunnel.State

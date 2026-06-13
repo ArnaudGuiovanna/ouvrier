@@ -116,4 +116,20 @@ func TestEventsAuthViaQueryParam(t *testing.T) {
 	if resp3.StatusCode != 401 {
 		t.Fatalf("fleet with query token: got %d, want 401 (query token is events-only)", resp3.StatusCode)
 	}
+
+	// Query param must NOT authorize a mutating route. The method guard makes
+	// this structurally impossible; pin it so a refactor can't regress it.
+	for _, path := range []string{"/api/v1/workers/w1/deploy", "/api/v1/workers/w1/reset"} {
+		req4, _ := http.NewRequest("POST", ts.URL+path+"?access_token="+testToken, nil)
+		req4.Host = "127.0.0.1"
+		req4.Header.Set("Origin", "http://127.0.0.1")
+		resp4, err := ts.Client().Do(req4)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		resp4.Body.Close()
+		if resp4.StatusCode != 401 {
+			t.Fatalf("POST %s with query token: got %d, want 401 (query token is events-only)", path, resp4.StatusCode)
+		}
+	}
 }
