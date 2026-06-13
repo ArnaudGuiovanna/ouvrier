@@ -141,12 +141,22 @@ The repository is currently verified with:
 go version go1.25.6 linux/amd64
 ```
 
-## Install From Source
+## Install
 
-Clone the repository and build the CLI from the checkout:
+Install the CLI directly with `go install` (Go 1.25+); it places `ouvrier` in
+`$(go env GOPATH)/bin`:
 
 ```sh
-git clone git@github.com:ArnaudGuiovanna/ouvrier.git
+go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
+ouvrier version
+```
+
+Use `@v0.3.0` instead of `@latest` to pin a specific release.
+
+To build from a checkout instead (for contributing or running the tests):
+
+```sh
+git clone https://github.com/ArnaudGuiovanna/ouvrier.git
 cd ouvrier
 go test ./...
 go install ./cmd/ouvrier
