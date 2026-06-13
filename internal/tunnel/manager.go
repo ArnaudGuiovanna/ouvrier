@@ -60,7 +60,9 @@ const (
 	StatusDegraded Status = "degraded"
 	// StatusAuthFailed means the worker rejected the admin token even after
 	// the single rotation re-fetch. The forward itself may still be up;
-	// requests fail fast until an idle close lets a fresh open re-fetch.
+	// requests fail fast until a short recovery window elapses (the cached
+	// token is then dropped and a fresh open re-fetches) or an operator calls
+	// Reset.
 	StatusAuthFailed Status = "auth_failed"
 )
 
@@ -102,6 +104,11 @@ const (
 	defaultIdleTimeout    = 5 * time.Minute
 	defaultDialInterval   = 50 * time.Millisecond
 	defaultConnectTimeout = 15 * time.Second
+	// defaultAuthRecovery is the short window after which a tunnel stuck in
+	// auth_failed drops its cached token and tears down, so a polling console
+	// recovers on its own once the operator fixes the remote token instead of
+	// re-arming the full idle window on every fail-fast request.
+	defaultAuthRecovery = 30 * time.Second
 )
 
 // idleTimer is the stoppable handle behind cfg.afterFunc; *time.Timer
@@ -115,6 +122,7 @@ type managerConfig struct {
 	backoffMin     time.Duration
 	backoffMax     time.Duration
 	idleTimeout    time.Duration
+	authRecovery   time.Duration
 	dialInterval   time.Duration
 	connectTimeout time.Duration
 	// jitter perturbs a backoff delay (default ±20%); tests use identity.
@@ -136,6 +144,7 @@ func defaultManagerConfig() managerConfig {
 		backoffMin:     defaultBackoffMin,
 		backoffMax:     defaultBackoffMax,
 		idleTimeout:    defaultIdleTimeout,
+		authRecovery:   defaultAuthRecovery,
 		dialInterval:   defaultDialInterval,
 		connectTimeout: defaultConnectTimeout,
 		jitter: func(d time.Duration) time.Duration {
@@ -282,6 +291,22 @@ func (m *Manager) Close() error {
 	return nil
 }
 
+// Reset forces a worker's tunnel all the way down for operator-driven
+// recovery: it kills the ssh process, unlinks the socket, returns the state to
+// down, and drops the cached admin token so the next use re-opens and
+// re-fetches from scratch. Unlike the automatic recovery window, Reset is
+// immediate and unconditional — the escape hatch when a tunnel is wedged in
+// auth_failed or degraded after the remote token was fixed.
+func (m *Manager) Reset(name string) error {
+	t, err := m.tunnelFor(name)
+	if err != nil {
+		return err
+	}
+	t.stop("reset: operator-requested recovery")
+	t.dropCachedToken()
+	return nil
+}
+
 func (m *Manager) isClosed() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -314,6 +339,8 @@ type tunnel struct {
 	notify      chan struct{} // closed and remade on every state change
 	refs        int           // in-flight requests/conns
 	idle        idleTimer     // pending idle close, armed when refs hits 0
+	recovery    idleTimer     // pending auth_failed recovery, armed on markAuthFailed
+	authFailed  bool          // latched: the tunnel entered auth_failed this lifetime
 	supervising bool
 	stopCh      chan struct{} // closing tells the supervisor to wind down
 	doneCh      chan struct{} // closed when the supervisor has fully torn down
@@ -357,7 +384,10 @@ func (t *tunnel) acquire() {
 func (t *tunnel) release() {
 	t.mu.Lock()
 	t.refs--
-	if t.refs == 0 && t.supervising && t.stopReason == "" {
+	// In auth_failed the recovery timer (armed by markAuthFailed) governs
+	// teardown; do not let fail-fast requests re-arm the full idle window, or a
+	// polling console would keep auth_failed alive forever.
+	if t.refs == 0 && t.supervising && t.stopReason == "" && t.st.Status != StatusAuthFailed {
 		t.idle = t.m.cfg.afterFunc(t.m.cfg.idleTimeout, t.idleClose)
 	}
 	t.mu.Unlock()
@@ -394,6 +424,10 @@ func (t *tunnel) stop(reason string) {
 	if t.idle != nil {
 		t.idle.Stop()
 		t.idle = nil
+	}
+	if t.recovery != nil {
+		t.recovery.Stop()
+		t.recovery = nil
 	}
 	done := t.doneCh
 	t.mu.Unlock()
@@ -453,6 +487,7 @@ func (t *tunnel) startSupervisorLocked() {
 	t.stopCh = make(chan struct{})
 	t.doneCh = make(chan struct{})
 	t.stopReason = ""
+	t.authFailed = false
 	go t.supervise(t.stopCh, t.doneCh)
 }
 
@@ -469,7 +504,12 @@ func (t *tunnel) supervise(stop, done chan struct{}) {
 		}
 		attempt++
 		t.setState(StatusDegraded, t.maskSecrets(err.Error()))
+		// Clamp AFTER jitter so the effective delay never exceeds backoffMax:
+		// jitter can perturb the pre-cap schedule above the cap otherwise.
 		delay := t.m.cfg.jitter(backoffDelay(attempt, t.m.cfg.backoffMin, t.m.cfg.backoffMax))
+		if delay > t.m.cfg.backoffMax {
+			delay = t.m.cfg.backoffMax
+		}
 		if !t.m.cfg.sleep(stop, delay) {
 			break
 		}
@@ -485,7 +525,14 @@ func (t *tunnel) supervise(stop, done chan struct{}) {
 		// later reopen starts clean.
 		defer t.transport.CloseIdleConnections()
 	}
-	authFailed := t.st.Status == StatusAuthFailed
+	// authFailed is latched for the tunnel's whole lifetime: if ssh died while
+	// auth_failed the final state is degraded, not auth_failed, but the cached
+	// token was still rejected and must be dropped.
+	authFailed := t.authFailed
+	if t.recovery != nil {
+		t.recovery.Stop()
+		t.recovery = nil
+	}
 	t.supervising = false
 	st := State{Status: StatusDown, LastError: reason, Since: t.m.cfg.now()}
 	t.st = st
@@ -679,10 +726,35 @@ func (t *tunnel) httpTransport() *http.Transport {
 	return t.transport
 }
 
-// markAuthFailed records a token rejection that survived the single
-// rotation re-fetch.
+// markAuthFailed records a token rejection that survived the single rotation
+// re-fetch. It latches authFailed (so teardown drops the cached token even if
+// the supervisor later overwrites the state with degraded) and arms a short
+// recovery timer: a polling console keeps acquiring/releasing the refcount,
+// which would otherwise re-arm the full idle window forever, so instead the
+// recovery timer fires once and tears the tunnel down — dropping the cached
+// token so the next open re-fetches a possibly fixed one.
 func (t *tunnel) markAuthFailed(code int, detail string) {
 	t.setState(StatusAuthFailed, t.maskSecrets(fmt.Sprintf("admin request rejected with HTTP %d: %s", code, detail)))
+	t.mu.Lock()
+	t.authFailed = true
+	// Drop any pending idle close: while auth_failed the recovery timer, not
+	// the idle window, governs teardown.
+	if t.idle != nil {
+		t.idle.Stop()
+		t.idle = nil
+	}
+	if t.recovery == nil && t.supervising && t.stopReason == "" {
+		t.recovery = t.m.cfg.afterFunc(t.m.cfg.authRecovery, t.authRecover)
+	}
+	t.mu.Unlock()
+}
+
+// authRecover fires from the recovery timer: it winds the supervisor down with
+// a recovery reason. Teardown then drops the cached token (authFailed is
+// latched), leaving the tunnel down and lazily reopenable, so the next request
+// re-fetches the token instead of staying stuck in auth_failed.
+func (t *tunnel) authRecover() {
+	t.requestStop("auth_failed: recovery window elapsed; dropping cached token")
 }
 
 // maskErr wraps err so its message cannot leak the worker's token.
@@ -739,7 +811,7 @@ func (rt *roundTripper) roundTrip(req *http.Request) (*http.Response, error) {
 	if err := t.ensureUp(ctx); err != nil {
 		return nil, err
 	}
-	token, err := t.adminToken(ctx, "")
+	token, src, err := t.adminToken(ctx, "")
 	if err != nil {
 		return nil, t.maskErr(err)
 	}
@@ -751,17 +823,36 @@ func (rt *roundTripper) roundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	// Token rejected: re-fetch once (rotation), retry, then auth_failed.
+	// Token rejected. A request whose body cannot be replayed is surfaced
+	// untouched (no retry, no condemnation): we never re-attempt a half-sent
+	// body, and never auth_fail on a request we couldn't cleanly evaluate.
 	if req.Body != nil && req.GetBody == nil {
-		// The request body is consumed and cannot be replayed; surface the
-		// rejection untouched rather than retry with a half-sent request.
 		return resp, nil
 	}
 	code := resp.StatusCode
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 
-	fresh, err := t.adminToken(ctx, token)
+	// The recovery depends on where the token came from:
+	//   - explicit --token: the operator deliberately chose it, so a rejection
+	//     is terminal (auth_failed) with no silent remote override;
+	//   - remote-fetched: re-fetch once (token rotation on the host) and retry;
+	//   - env fallback: fall through to a remote fetch once and retry, since
+	//     the local env var was only ever a stand-in for the remote value.
+	if src == sourceOptions {
+		t.markAuthFailed(code, "explicit --token rejected")
+		return nil, fmt.Errorf("%w: worker %s: HTTP %d and the explicit --token was rejected", ErrAuthFailed, t.name, code)
+	}
+
+	// stale tells remoteToken which value to bypass the cache for. For a
+	// rejected remote token that is the token itself (force a rotation
+	// re-fetch); for a rejected env token there is no cached remote token to
+	// distrust, so any cached/fresh remote value is acceptable.
+	stale := ""
+	if src == sourceRemote {
+		stale = token
+	}
+	fresh, err := t.remoteToken(ctx, stale)
 	if err != nil {
 		t.markAuthFailed(code, "token re-fetch failed: "+err.Error())
 		return nil, fmt.Errorf("%w: worker %s: HTTP %d and token re-fetch failed: %w", ErrAuthFailed, t.name, code, t.maskErr(err))

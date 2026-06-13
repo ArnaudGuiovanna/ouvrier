@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 )
 
 // --- fakes -----------------------------------------------------------------
@@ -128,6 +129,7 @@ func (f *fakeRunner) lastProc(t *testing.T) *fakeProc {
 type fakeRemote struct {
 	mu     sync.Mutex
 	envFor func(call int) string // .env content for the call-th SSH (1-based)
+	errFor func(call int) error  // optional per-call error (1-based); nil = use err
 	err    error
 	cmds   []string
 }
@@ -136,7 +138,11 @@ func (f *fakeRemote) SSH(_ context.Context, _ deploy.ConnectOpts, command string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cmds = append(f.cmds, command)
-	if f.err != nil {
+	if f.errFor != nil {
+		if err := f.errFor(len(f.cmds)); err != nil {
+			return "", err
+		}
+	} else if f.err != nil {
 		return "", f.err
 	}
 	return f.envFor(len(f.cmds)), nil
@@ -678,6 +684,138 @@ func TestUnknownWorkerAndClose(t *testing.T) {
 	}
 	if _, err := m.Transport("w1"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Transport after Close = %v, want ErrClosed", err)
+	}
+}
+
+func TestAuthFailedRecoversAfterRecoveryWindowUnderPolling(t *testing.T) {
+	// A polling console keeps issuing fail-fast requests while the tunnel is
+	// auth_failed. Those must NOT re-arm the full idle window (which would keep
+	// auth_failed alive forever); instead the short recovery timer fires once,
+	// drops the cached token, and the next open re-fetches the now-fixed token.
+	t.Setenv(envnames.AdminToken, "")
+	handler := &authHandler{accept: "good-token"} // only the fixed token works
+	fr := &fakeRunner{handler: handler}
+	h := newHarness(fr)
+	// Calls 1-2 yield the bad token (initial + rotation re-fetch -> auth_failed);
+	// once the operator fixes the remote, later fetches yield the good token.
+	remote := &fakeRemote{envFor: func(call int) string {
+		if call <= 2 {
+			return dotenvWith("bad-token")
+		}
+		return dotenvWith("good-token")
+	}}
+	m := newTestManager(t, h, Options{Remote: remote})
+	rt, _ := m.Transport("w1")
+
+	if _, _, err := get(t, rt, "http://w1/admin/health"); !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("first request = %v, want ErrAuthFailed", err)
+	}
+	h.waitState(t, "w1", StatusAuthFailed)
+
+	// A burst of polling requests while auth_failed: all fail fast, none fetch,
+	// and the recovery timer must survive them (no re-arm, no cancel).
+	for i := 0; i < 5; i++ {
+		if _, _, err := get(t, rt, "http://w1/admin/health"); !errors.Is(err, ErrAuthFailed) {
+			t.Fatalf("polling request %d = %v, want fail-fast ErrAuthFailed", i, err)
+		}
+	}
+	if got := remote.calls(); got != 2 {
+		t.Fatalf("remote .env fetched %d times during polling, want still 2 (no fetch while auth_failed)", got)
+	}
+
+	// Fire the auth_failed recovery timer: the tunnel tears down, the cached
+	// (bad) token is dropped, and the next poll re-fetches the good token.
+	h.fireIdle(t)
+	h.waitState(t, "w1", StatusDown)
+
+	resp, body, err := get(t, rt, "http://w1/admin/health")
+	if err != nil || resp.StatusCode != http.StatusOK || body != "ok" {
+		t.Fatalf("request after recovery window = %v %v %q, want 200 ok", err, resp, body)
+	}
+	if got := remote.calls(); got < 3 {
+		t.Fatalf("remote .env fetched %d times after recovery, want a fresh fetch (>=3)", got)
+	}
+}
+
+func TestResetDropsEverything(t *testing.T) {
+	// Reset is the operator escape hatch: it kills the process, unlinks the
+	// socket, returns the state to down, and drops the cached token so the next
+	// open re-fetches from scratch.
+	t.Setenv(envnames.AdminToken, "")
+	handler := &authHandler{accept: "tok-1"}
+	fr := &fakeRunner{handler: handler}
+	h := newHarness(fr)
+	remote := &fakeRemote{envFor: func(int) string { return dotenvWith("tok-1") }}
+	m := newTestManager(t, h, Options{Remote: remote})
+	rt, _ := m.Transport("w1")
+
+	if resp, _, err := get(t, rt, "http://w1/admin/health"); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("round trip = %v/%v", resp, err)
+	}
+	h.waitState(t, "w1", StatusUp)
+	sock := filepath.Join(m.sockDir, "w1.sock")
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("socket missing while up: %v", err)
+	}
+
+	if err := m.Reset("w1"); err != nil {
+		t.Fatalf("Reset = %v, want nil", err)
+	}
+	if st := m.States()["w1"]; st.Status != StatusDown {
+		t.Fatalf("state after Reset = %s, want %s", st.Status, StatusDown)
+	}
+	if _, err := os.Stat(sock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket should be unlinked after Reset, stat err = %v", err)
+	}
+
+	// The cached token was dropped: the next open re-fetches it fresh.
+	if resp, _, err := get(t, rt, "http://w1/admin/health"); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("round trip after Reset = %v/%v", resp, err)
+	}
+	if got := remote.calls(); got != 2 {
+		t.Fatalf("remote .env fetched %d times, want 2 (fresh fetch after Reset dropped the cache)", got)
+	}
+
+	// Reset on an unknown worker surfaces ErrUnknownWorker.
+	if err := m.Reset("nope"); !errors.Is(err, ErrUnknownWorker) {
+		t.Fatalf("Reset(nope) = %v, want ErrUnknownWorker", err)
+	}
+}
+
+func TestAuthFailedLatchedDropsTokenWhenSupervisorOverwritesState(t *testing.T) {
+	// If ssh dies while auth_failed, the supervisor overwrites the state with
+	// degraded, so a final-state check would miss the token drop. The latched
+	// authFailed bool ensures teardown still drops the cached token.
+	t.Setenv(envnames.AdminToken, "")
+	handler := &authHandler{accept: ""} // rejects everything -> auth_failed
+	fr := &fakeRunner{handler: handler}
+	h := newHarness(fr)
+	remote := &fakeRemote{envFor: func(int) string { return dotenvWith("bad-token") }}
+	m := newTestManager(t, h, Options{Remote: remote})
+	rt, _ := m.Transport("w1")
+
+	if _, _, err := get(t, rt, "http://w1/admin/health"); !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("first request = %v, want ErrAuthFailed", err)
+	}
+	h.waitState(t, "w1", StatusAuthFailed)
+	if got := remote.calls(); got != 2 {
+		t.Fatalf("remote .env fetched %d times, want 2 (initial + re-fetch)", got)
+	}
+
+	// ssh dies while auth_failed: the supervisor records degraded, then backoff
+	// parks until stop (harness sleep). The latched authFailed must survive the
+	// degraded overwrite.
+	fr.lastProc(t).die("connection reset", errors.New("exit status 255"))
+	h.waitState(t, "w1", StatusDegraded)
+
+	// Tear the tunnel down: teardown must drop the cached token because
+	// auth_failed was latched, even though the final pre-teardown state was
+	// degraded, not auth_failed.
+	m.tunnels["w1"].stop("test teardown")
+	h.waitState(t, "w1", StatusDown)
+
+	if tok := m.tunnels["w1"].cachedToken(); tok != "" {
+		t.Fatalf("cached token = %q after teardown, want dropped (auth_failed was latched)", tok)
 	}
 }
 

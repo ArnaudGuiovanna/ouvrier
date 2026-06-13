@@ -1,9 +1,10 @@
 package tunnel
 
-// Token tests: resolution order (explicit, local env, remote fetch), the
-// single 401/403 rotation re-fetch, the auth_failed terminal state, and the
-// guarantee that nothing token-shaped ever reaches disk, argv, or any
-// surfaced output.
+// Token tests: resolution order (explicit --token wins; remote fetch is
+// primary; the local env var is only a fallback when the remote fetch fails),
+// the single 401/403 rotation re-fetch, the env-rejected -> remote-fetch
+// recovery, the auth_failed terminal state, and the guarantee that nothing
+// token-shaped ever reaches disk, argv, or any surfaced output.
 
 import (
 	"errors"
@@ -141,8 +142,10 @@ func TestPersistent401MarksAuthFailed(t *testing.T) {
 		t.Fatalf("remote .env fetched %d times during auth_failed, want still 2", got)
 	}
 
-	// Recovery path: an idle close tears the tunnel down and forgets the
-	// rejected token, so the next open re-fetches a possibly rotated one.
+	// Recovery path: the auth_failed recovery timer (not an idle close) tears
+	// the tunnel down and forgets the rejected token, so the next open
+	// re-fetches a possibly rotated one. In auth_failed the idle window is
+	// never armed; the only timer pending is the recovery timer.
 	h.fireIdle(t)
 	h.waitState(t, "w1", StatusDown)
 	if _, _, err := get(t, rt, "http://w1/admin/health"); !errors.Is(err, ErrAuthFailed) {
@@ -171,9 +174,12 @@ func TestExplicitTokenWinsOverEnvAndRemote(t *testing.T) {
 	}
 }
 
-func TestLocalEnvTokenFallback(t *testing.T) {
+func TestRemoteWinsOverLocalEnv(t *testing.T) {
+	// The remote fetch is primary: a local OUVRIER_ADMIN_TOKEN in the
+	// operator's shell must NOT outrank the worker's own remote token, so a
+	// stray local worker's token can never poison a remote tunnel.
 	t.Setenv(envnames.AdminToken, "env-token")
-	handler := &authHandler{accept: "env-token"}
+	handler := &authHandler{accept: "remote-token"}
 	fr := &fakeRunner{handler: handler}
 	h := newHarness(fr)
 	remote := &fakeRemote{envFor: func(int) string { return dotenvWith("remote-token") }}
@@ -182,10 +188,72 @@ func TestLocalEnvTokenFallback(t *testing.T) {
 	rt, _ := m.Transport("w1")
 	resp, _, err := get(t, rt, "http://w1/admin/health")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("round trip = %v/%v, want 200 with the env token", resp, err)
+		t.Fatalf("round trip = %v/%v, want 200 with the remote token", resp, err)
 	}
-	if got := remote.calls(); got != 0 {
-		t.Fatalf("remote .env fetched %d times despite local env token, want 0", got)
+	if got := remote.calls(); got != 1 {
+		t.Fatalf("remote .env fetched %d times, want 1 (remote is primary over env)", got)
+	}
+	if got := handler.headers(); len(got) != 1 || got[0] != "Bearer remote-token" {
+		t.Fatalf("authorization headers = %v, want the remote token, not the env token", got)
+	}
+}
+
+func TestLocalEnvFallsBackWhenRemoteFetchFails(t *testing.T) {
+	// The local env var is a fallback used only when the remote fetch fails
+	// (e.g. SSH down, no remote path); it must never silently override a
+	// successful remote fetch.
+	t.Setenv(envnames.AdminToken, "env-token")
+	handler := &authHandler{accept: "env-token"}
+	fr := &fakeRunner{handler: handler}
+	h := newHarness(fr)
+	remote := &fakeRemote{
+		envFor: func(int) string { return "" },
+		err:    errors.New("ssh: connect to host: connection refused"),
+	}
+	m := newTestManager(t, h, Options{Remote: remote})
+
+	rt, _ := m.Transport("w1")
+	resp, _, err := get(t, rt, "http://w1/admin/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("round trip = %v/%v, want 200 with the env fallback after the remote fetch failed", resp, err)
+	}
+	if got := handler.headers(); len(got) != 1 || got[0] != "Bearer env-token" {
+		t.Fatalf("authorization headers = %v, want the env fallback token", got)
+	}
+}
+
+func TestEnvTokenRejectedFallsThroughToRemoteFetch(t *testing.T) {
+	// An env-sourced token (used because the first remote fetch failed) that is
+	// then rejected falls through to a remote fetch once before auth_failed:
+	// the remote fetch recovers once SSH is reachable again.
+	t.Setenv(envnames.AdminToken, "stale-env-token")
+	handler := &authHandler{accept: "remote-token"} // only the remote token works
+	fr := &fakeRunner{handler: handler}
+	h := newHarness(fr)
+	remote := &fakeRemote{
+		// First fetch fails (forcing the env fallback); the recovery fetch
+		// after the env token is rejected succeeds with the real remote token.
+		errFor: func(call int) error {
+			if call == 1 {
+				return errors.New("ssh: connection refused")
+			}
+			return nil
+		},
+		envFor: func(int) string { return dotenvWith("remote-token") },
+	}
+
+	m := newTestManager(t, h, Options{Remote: remote})
+	rt, _ := m.Transport("w1")
+	resp, body, err := get(t, rt, "http://w1/admin/health")
+	if err != nil || resp.StatusCode != http.StatusOK || body != "ok" {
+		t.Fatalf("round trip = %v %v %q, want 200 after env-rejected -> remote-fetch recovery", err, resp, body)
+	}
+	want := []string{"Bearer stale-env-token", "Bearer remote-token"}
+	if got := handler.headers(); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("authorization headers = %v, want %v (env tried, then remote)", got, want)
+	}
+	if st := m.States()["w1"]; st.Status != StatusUp {
+		t.Fatalf("state = %s, want %s after recovery", st.Status, StatusUp)
 	}
 }
 
