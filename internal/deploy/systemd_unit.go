@@ -2,10 +2,9 @@ package deploy
 
 // systemd_unit.go renders the hardened systemd unit for the release-layout
 // deploy target (issue #44): a fixed, auditable host layout under
-// /opt/ouvrier/<name> with a dedicated nologin system user. The legacy
-// single-binary flow in ssh.go keeps its own simpler unit until the
-// release-layout orchestration (#45) replaces it; this renderer is the
-// single source for the new layout.
+// /opt/ouvrier/<name> with a dedicated nologin system user. This renderer is
+// the single source for the deployed unit; deploy_env.go installs it when
+// its sha256 differs from the unit already on the host.
 
 import (
 	"crypto/sha256"

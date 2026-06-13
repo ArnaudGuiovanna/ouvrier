@@ -925,6 +925,8 @@ deploy-staging:
     - uses: actions/checkout@v4          # brings pip.yaml + ouvrier.known_hosts
     - uses: actions/setup-go@v5
       with: { go-version: stable }
+    - name: Install the ouvrier CLI
+      run: go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
     - name: Install the deploy key and env file
       env:
         DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}

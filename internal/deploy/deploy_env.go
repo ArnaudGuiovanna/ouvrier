@@ -542,7 +542,7 @@ func (p *envDeploy) upsertInventory(host, user string) error {
 // or degrade to stop+report on a first deploy. The returned error always
 // carries the original cause plus the rollback outcome.
 func (p *envDeploy) failAfterSwap(ctx context.Context, runner RemoteRunner, connect ConnectOpts, host, previous string, cause error) error {
-	fmt.Fprintf(p.out, "deploy to %s failed: %s\n", host, p.mask(cause.Error()))
+	fmt.Fprintf(p.errOut, "deploy to %s failed: %s\n", host, p.mask(cause.Error()))
 	if journal, jErr := runner.SSH(ctx, connect, JournalTailCommand(p.service)); jErr != nil {
 		fmt.Fprintf(p.errOut, "WARN: %s: journalctl capture failed: %s\n", host, p.mask(jErr.Error()))
 	} else {
