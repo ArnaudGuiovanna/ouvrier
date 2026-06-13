@@ -182,10 +182,10 @@ func TestReleaseCommandSequenceAgainstFakeRunner(t *testing.T) {
 		}
 	}
 
-	joined := strings.Join(remote.sshCommands, "\n")
+	joined := strings.Join(remote.sshCommands(), "\n")
 	// Every reference to the install root must be quoted: the bare root may
 	// only ever appear immediately after a quote character.
-	for _, line := range remote.sshCommands {
+	for _, line := range remote.sshCommands() {
 		for i := 0; ; {
 			j := strings.Index(line[i:], root)
 			if j < 0 {
@@ -345,6 +345,36 @@ func TestMkdirLayoutCommandsOwnershipAndQuoting(t *testing.T) {
 		if cmds[i] != want[i] {
 			t.Fatalf("MkdirLayoutCommands[%d] = %q, want %q", i, cmds[i], want[i])
 		}
+	}
+}
+
+// Carry-over (b): scp cannot mkdir, so the per-release skeleton helper must
+// create releases/<id>/bin and releases/<id>/skills, quoted, without sudo.
+func TestMkdirReleaseCommands(t *testing.T) {
+	cmds := MkdirReleaseCommands("/opt/ouvrier/demo", "20260612T101500Z-abc")
+	want := []string{
+		"mkdir -p -- '/opt/ouvrier/demo/releases/20260612T101500Z-abc/bin' '/opt/ouvrier/demo/releases/20260612T101500Z-abc/skills'",
+	}
+	if len(cmds) != len(want) {
+		t.Fatalf("MkdirReleaseCommands = %v, want %v", cmds, want)
+	}
+	for i := range want {
+		if cmds[i] != want[i] {
+			t.Fatalf("MkdirReleaseCommands[%d] = %q, want %q", i, cmds[i], want[i])
+		}
+	}
+	for _, cmd := range cmds {
+		if strings.Contains(cmd, "sudo") {
+			t.Fatalf("release skeleton must not need sudo: %q", cmd)
+		}
+	}
+}
+
+func TestVerifyReleaseBinaryCommand(t *testing.T) {
+	cmd := VerifyReleaseBinaryCommand("/opt/x/releases/r/bin/demo", "abc123")
+	want := `[ "$(sha256sum -- '/opt/x/releases/r/bin/demo' | cut -d' ' -f1)" = 'abc123' ] && chmod 0755 -- '/opt/x/releases/r/bin/demo'`
+	if cmd != want {
+		t.Fatalf("VerifyReleaseBinaryCommand = %q, want %q", cmd, want)
 	}
 }
 

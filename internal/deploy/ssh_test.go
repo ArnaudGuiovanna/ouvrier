@@ -1,7 +1,6 @@
 package deploy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,75 +12,145 @@ import (
 	"testing"
 )
 
-// fakeRemote records every SSH/SCP invocation and can inject failures keyed
-// by a substring match on either the SSH command or the SCP remote path.
+// remoteCall is one recorded RemoteRunner invocation, in order.
+type remoteCall struct {
+	Op      string // "ssh", "sshin", "scp", "scpdata"
+	Host    string
+	Command string // ssh/sshin remote command
+	Local   string // scp local path
+	Remote  string // scp/scpdata remote path
+	Data    []byte // scpdata payload / sshin stdin
+}
+
+// fakeRemote records every SSH/SSHIn/SCP/SCPData invocation in order and can
+// inject failures keyed by a substring match on the SSH command, a suffix
+// match on the SCP remote path, or (for SSHIn, the health gate) a count of
+// failing attempts. When failHost is set, injected failures only apply to
+// that host, so multi-host tests can break exactly one target.
 type fakeRemote struct {
 	mu          sync.Mutex
-	sshCommands []string
-	scpUploads  []scpUpload
-	scpDataKeys []scpDataUpload
+	calls       []remoteCall
 	lastConnect ConnectOpts
+	sshInCalls  int
 
 	failSSHContaining   string
 	failSCPRemoteSuffix string
+	failHost            string
+	failSSHInAll        bool
+	sshInFailures       int // fail the first N SSHIn calls, then succeed
+	// stdoutFor maps an SSH command substring to canned stdout (readlink,
+	// ls -1, id -un, ...).
+	stdoutFor map[string]string
 	// sshErr overrides the default injected SSH failure, so tests can mimic
 	// specific ssh stderr shapes (e.g. host key verification failures).
 	sshErr error
-	// echoCommandInError makes injected SSH failures embed the full remote
-	// command in the error, mimicking the shape the old defaultRemoteRunner
-	// produced (ssh <args...>: exit status N (stderr=...)).
+	// echoCommandInError makes injected failures embed the full remote
+	// command in the error, mimicking the shape a runner that echoes its
+	// argv would produce.
 	echoCommandInError bool
 }
 
-type scpUpload struct {
-	Local  string
-	Remote string
+func (f *fakeRemote) record(c remoteCall, opts ConnectOpts) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, c)
+	f.lastConnect = opts
 }
 
-type scpDataUpload struct {
-	Remote string
-	Data   []byte
+func (f *fakeRemote) failureApplies(opts ConnectOpts) bool {
+	return f.failHost == "" || f.failHost == opts.Host
+}
+
+func (f *fakeRemote) injectedErr(command string) error {
+	if f.sshErr != nil {
+		return f.sshErr
+	}
+	if f.echoCommandInError {
+		return fmt.Errorf("ssh -o BatchMode=yes h %s: exit status 22 (stderr=injected)", command)
+	}
+	return errors.New("ssh injected failure")
 }
 
 func (f *fakeRemote) SSH(_ context.Context, opts ConnectOpts, command string) (string, error) {
+	f.record(remoteCall{Op: "ssh", Host: opts.Host, Command: command}, opts)
+	if f.failSSHContaining != "" && strings.Contains(command, f.failSSHContaining) && f.failureApplies(opts) {
+		return "", f.injectedErr(command)
+	}
+	for sub, out := range f.stdoutFor {
+		if strings.Contains(command, sub) {
+			return out, nil
+		}
+	}
+	return "", nil
+}
+
+func (f *fakeRemote) SSHIn(_ context.Context, opts ConnectOpts, command string, stdin []byte) (string, error) {
+	buf := make([]byte, len(stdin))
+	copy(buf, stdin)
+	f.record(remoteCall{Op: "sshin", Host: opts.Host, Command: command, Data: buf}, opts)
+	if !f.failureApplies(opts) {
+		return "", nil
+	}
 	f.mu.Lock()
-	f.sshCommands = append(f.sshCommands, command)
-	f.lastConnect = opts
+	f.sshInCalls++
+	n := f.sshInCalls
 	f.mu.Unlock()
-	if f.failSSHContaining != "" && strings.Contains(command, f.failSSHContaining) {
-		if f.sshErr != nil {
-			return "", f.sshErr
-		}
-		if f.echoCommandInError {
-			return "", fmt.Errorf("ssh -o BatchMode=yes h %s: exit status 22 (stderr=curl: (22) The requested URL returned error: 401)", command)
-		}
-		return "", errors.New("ssh injected failure")
+	if f.failSSHInAll || n <= f.sshInFailures {
+		return "", f.injectedErr(command)
 	}
 	return "", nil
 }
 
 func (f *fakeRemote) SCP(_ context.Context, opts ConnectOpts, localPath, remotePath string) error {
-	f.mu.Lock()
-	f.scpUploads = append(f.scpUploads, scpUpload{Local: localPath, Remote: remotePath})
-	f.lastConnect = opts
-	f.mu.Unlock()
-	if f.failSCPRemoteSuffix != "" && strings.HasSuffix(remotePath, f.failSCPRemoteSuffix) {
+	f.record(remoteCall{Op: "scp", Host: opts.Host, Local: localPath, Remote: remotePath}, opts)
+	if f.failSCPRemoteSuffix != "" && strings.HasSuffix(remotePath, f.failSCPRemoteSuffix) && f.failureApplies(opts) {
 		return errors.New("scp injected failure")
 	}
 	return nil
 }
 
-func (f *fakeRemote) SCPData(_ context.Context, _ ConnectOpts, data []byte, remotePath string) error {
-	f.mu.Lock()
+func (f *fakeRemote) SCPData(_ context.Context, opts ConnectOpts, data []byte, remotePath string) error {
 	buf := make([]byte, len(data))
 	copy(buf, data)
-	f.scpDataKeys = append(f.scpDataKeys, scpDataUpload{Remote: remotePath, Data: buf})
-	f.mu.Unlock()
-	if f.failSCPRemoteSuffix != "" && strings.HasSuffix(remotePath, f.failSCPRemoteSuffix) {
+	f.record(remoteCall{Op: "scpdata", Host: opts.Host, Remote: remotePath, Data: buf}, opts)
+	if f.failSCPRemoteSuffix != "" && strings.HasSuffix(remotePath, f.failSCPRemoteSuffix) && f.failureApplies(opts) {
 		return errors.New("scp injected failure")
 	}
 	return nil
 }
+
+// sshCommands returns every recorded ssh/sshin remote command, in order.
+func (f *fakeRemote) sshCommands() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.calls {
+		if c.Op == "ssh" || c.Op == "sshin" {
+			out = append(out, c.Command)
+		}
+	}
+	return out
+}
+
+// callLog renders the ordered operation log ("ssh: <cmd>", "scp: <remote>",
+// "scpdata: <remote>", "sshin: <cmd>"), one entry per line, for ordered
+// sequence assertions.
+func (f *fakeRemote) callLog() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var b strings.Builder
+	for _, c := range f.calls {
+		switch c.Op {
+		case "ssh", "sshin":
+			fmt.Fprintf(&b, "%s@%s: %s\n", c.Op, c.Host, c.Command)
+		default:
+			fmt.Fprintf(&b, "%s@%s: %s\n", c.Op, c.Host, c.Remote)
+		}
+	}
+	return b.String()
+}
+
+const fixtureAdminToken = "fixture-admin-token"
 
 func writeDeployFixture(t *testing.T) string {
 	t.Helper()
@@ -89,12 +158,13 @@ func writeDeployFixture(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\nversion: 0.1.0\n"), 0o644); err != nil {
 		t.Fatalf("write pip.yaml: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("ANTHROPIC_API_KEY=test\n"), 0o600); err != nil {
+	env := "ANTHROPIC_API_KEY=test\n" + "OUVRIER_ADMIN_TOKEN=" + fixtureAdminToken + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(env), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 	// Deploys hard-fail against unpinned hosts; pin the hostnames the tests
-	// in this file deploy to.
-	pinHost(t, dir, "h", "server.example.com")
+	// in this package deploy to.
+	pinHost(t, dir, "h", "h1", "h2", "h3", "server.example.com")
 	return dir
 }
 
@@ -126,116 +196,6 @@ func stubGoRunner(t *testing.T) GoRunner {
 			}
 		}
 		return errors.New("stub go runner: no -o argument")
-	}
-}
-
-func TestDeploySSHRequiresHost(t *testing.T) {
-	err := DeploySSH(context.Background(), Opts{Dir: t.TempDir()}, ProgressWriter{})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), "host") {
-		t.Fatalf("DeploySSH() error = %v, want host message", err)
-	}
-}
-
-func TestDeploySSHRequiresEnvFile(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
-		t.Fatalf("write pip.yaml: %v", err)
-	}
-	pinHost(t, dir, "h")
-	opts := Opts{Dir: dir, Host: "h", HealthURL: "/admin/health", GoRun: stubGoRunner(t), Runner: &fakeRemote{}}
-	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), ".env") {
-		t.Fatalf("DeploySSH() error = %v, want .env message", err)
-	}
-}
-
-// Acceptance: deploy against an untrusted host fails fast — before the build
-// and before any remote command — naming `ouvrier server trust`.
-func TestDeploySSHFailsFastWhenHostNotTrusted(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "pip.yaml"), []byte("name: demo\n"), 0o644); err != nil {
-		t.Fatalf("write pip.yaml: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("A=b\n"), 0o600); err != nil {
-		t.Fatalf("write .env: %v", err)
-	}
-	remote := &fakeRemote{}
-	built := false
-	goRun := func(_ context.Context, _ string, _ []string, _ []string, _, _ io.Writer) error {
-		built = true
-		return errors.New("must not build against untrusted host")
-	}
-	opts := Opts{Dir: dir, Host: "untrusted.example.com", GoRun: goRun, Runner: remote}
-	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), "ouvrier server trust untrusted.example.com") {
-		t.Fatalf("DeploySSH() error = %v, want `ouvrier server trust <host>` hint", err)
-	}
-	if built {
-		t.Fatal("DeploySSH() built the binary before the trust gate")
-	}
-	if len(remote.sshCommands) != 0 || len(remote.scpUploads) != 0 || len(remote.scpDataKeys) != 0 {
-		t.Fatalf("DeploySSH() ran remote commands against untrusted host: ssh=%v scp=%v", remote.sshCommands, remote.scpUploads)
-	}
-}
-
-// A host pinned only under a different port token must also fail fast: ssh
-// would look up "[host]:2222", not "host".
-func TestDeploySSHTrustGateUsesPortQualifiedHostname(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{}
-	opts := Opts{Dir: dir, Host: "h", Port: 2222, GoRun: stubGoRunner(t), Runner: remote}
-	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), "[h]:2222") || !strings.Contains(err.Error(), "ouvrier server trust h --port 2222") {
-		t.Fatalf("DeploySSH() error = %v, want port-qualified trust hint", err)
-	}
-
-	pinHost(t, dir, "[h]:2222")
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
-		t.Fatalf("DeploySSH() with pinned [h]:2222 error = %v", err)
-	}
-}
-
-// A changed host key (ssh's "Host key verification failed") is remapped to a
-// hard error naming `ouvrier server trust --rotate`.
-func TestDeploySSHRemapsChangedHostKeyToRotate(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{failSSHContaining: "mkdir", sshErr: errors.New("ssh: exit status 255 (stderr=Host key verification failed.)")}
-	opts := Opts{Dir: dir, Host: "h", GoRun: stubGoRunner(t), Runner: remote}
-	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), "ouvrier server trust --rotate h") {
-		t.Fatalf("DeploySSH() error = %v, want `ouvrier server trust --rotate <host>` hint", err)
-	}
-}
-
-// The runner seam receives the identity file and pinned known_hosts path on
-// every ssh and scp invocation.
-func TestDeploySSHPlumbsIdentityAndKnownHosts(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{}
-	opts := Opts{Dir: dir, Host: "h", Identity: "/keys/ci_ed25519", GoRun: stubGoRunner(t), Runner: remote}
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
-		t.Fatalf("DeploySSH() error = %v", err)
-	}
-	if remote.lastConnect.Identity != "/keys/ci_ed25519" {
-		t.Fatalf("ConnectOpts.Identity = %q, want /keys/ci_ed25519", remote.lastConnect.Identity)
-	}
-	if remote.lastConnect.KnownHosts != filepath.Join(dir, KnownHostsFile) {
-		t.Fatalf("ConnectOpts.KnownHosts = %q, want %s", remote.lastConnect.KnownHosts, filepath.Join(dir, KnownHostsFile))
 	}
 }
 
@@ -285,272 +245,6 @@ func TestSSHAndSCPArgsHardenAuthentication(t *testing.T) {
 	}
 }
 
-func TestDeploySSHHappyPath(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{}
-	opts := Opts{
-		Dir:       dir,
-		Host:      "server.example.com",
-		User:      "ops",
-		Path:      "/opt/demo",
-		Service:   "demo.service",
-		HealthURL: "/admin/health",
-		GoRun:     stubGoRunner(t),
-		Runner:    remote,
-	}
-	var out, errOut bytes.Buffer
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &out, Err: &errOut}); err != nil {
-		t.Fatalf("DeploySSH() error = %v\nstderr=%s", err, errOut.String())
-	}
-
-	// Two SCPs: the binary and the .env.
-	if len(remote.scpUploads) != 2 {
-		t.Fatalf("scp uploads = %d, want 2: %+v", len(remote.scpUploads), remote.scpUploads)
-	}
-	if !strings.HasSuffix(remote.scpUploads[0].Remote, "/bin/demo.new") {
-		t.Fatalf("first scp = %+v, want bin/demo.new", remote.scpUploads[0])
-	}
-	if !strings.HasSuffix(remote.scpUploads[1].Remote, "/.env") {
-		t.Fatalf("second scp = %+v, want .env", remote.scpUploads[1])
-	}
-
-	// One SCPData upload: the systemd unit.
-	if len(remote.scpDataKeys) != 1 {
-		t.Fatalf("scp data uploads = %d, want 1: %+v", len(remote.scpDataKeys), remote.scpDataKeys)
-	}
-	// --service demo.service is canonicalized: the unit file gets exactly one
-	// .service suffix, never demo.service.service.
-	if !strings.HasSuffix(remote.scpDataKeys[0].Remote, "/demo.service") {
-		t.Fatalf("systemd unit upload remote = %q, want demo.service", remote.scpDataKeys[0].Remote)
-	}
-	if strings.HasSuffix(remote.scpDataKeys[0].Remote, ".service.service") {
-		t.Fatalf("systemd unit upload remote = %q, double .service suffix", remote.scpDataKeys[0].Remote)
-	}
-	unitText := string(remote.scpDataKeys[0].Data)
-	for _, want := range []string{
-		"[Unit]",
-		"Description=Ouvrier worker demo",
-		"User=ops",
-		"WorkingDirectory=/opt/demo",
-		"EnvironmentFile=/opt/demo/.env",
-		"ExecStart=/opt/demo/bin/demo",
-		"Restart=on-failure",
-		"WantedBy=multi-user.target",
-	} {
-		if !strings.Contains(unitText, want) {
-			t.Fatalf("systemd unit missing %q in:\n%s", want, unitText)
-		}
-	}
-
-	// SSH command sequence covers all required steps.
-	joined := strings.Join(remote.sshCommands, "\n")
-	for _, want := range []string{
-		"mkdir -p '/opt/demo'/bin",
-		"chmod 0600 '/opt/demo/.env'",
-		"sudo install -m 0644 '/opt/demo/demo.service' /etc/systemd/system/'demo'.service",
-		"sudo systemctl daemon-reload",
-		"sudo systemctl restart 'demo'",
-		"curl -fsS --max-time 5 'http://127.0.0.1:8080/admin/health'",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("ssh commands missing %q in:\n%s", want, joined)
-		}
-	}
-
-	// No secret should leak into logs.
-	if strings.Contains(out.String(), "ANTHROPIC_API_KEY") || strings.Contains(errOut.String(), "ANTHROPIC_API_KEY") {
-		t.Fatalf("env secret leaked into logs:\nstdout=%s\nstderr=%s", out.String(), errOut.String())
-	}
-}
-
-func TestDeploySSHUploadsSkillsRuntimeAssets(t *testing.T) {
-	dir := writeDeployFixture(t)
-	skillDir := filepath.Join(dir, "skills", "jorf")
-	if err := os.MkdirAll(filepath.Join(skillDir, "scripts"), 0o755); err != nil {
-		t.Fatalf("mkdir skill fixture: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: jorf\ndescription: Watch JORF.\n---\n\nBody\n"), 0o644); err != nil {
-		t.Fatalf("write skill: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "scripts", "parse.txt"), []byte("asset\n"), 0o644); err != nil {
-		t.Fatalf("write skill script: %v", err)
-	}
-
-	remote := &fakeRemote{}
-	opts := Opts{
-		Dir:       dir,
-		Host:      "h",
-		Path:      "/opt/demo",
-		Service:   "demo.service",
-		HealthURL: "/admin/health",
-		GoRun:     stubGoRunner(t),
-		Runner:    remote,
-	}
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
-		t.Fatalf("DeploySSH() error = %v", err)
-	}
-
-	uploads := map[string]bool{}
-	for _, upload := range remote.scpUploads {
-		uploads[upload.Remote] = true
-	}
-	for _, want := range []string{
-		"/opt/demo/skills/jorf/SKILL.md",
-		"/opt/demo/skills/jorf/scripts/parse.txt",
-	} {
-		if !uploads[want] {
-			t.Fatalf("scp uploads = %+v, want runtime asset %s", remote.scpUploads, want)
-		}
-	}
-	joined := strings.Join(remote.sshCommands, "\n")
-	for _, want := range []string{
-		"mkdir -p '/opt/demo/skills'",
-		"mkdir -p '/opt/demo/skills/jorf'",
-		"mkdir -p '/opt/demo/skills/jorf/scripts'",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("ssh commands missing %q in:\n%s", want, joined)
-		}
-	}
-}
-
-func TestDeploySSHDefaultsServiceAndPath(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{}
-	opts := Opts{Dir: dir, Host: "h", HealthURL: "/admin/health", GoRun: stubGoRunner(t), Runner: remote}
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
-		t.Fatalf("DeploySSH() error = %v", err)
-	}
-	if !strings.HasSuffix(remote.scpUploads[0].Remote, "/opt/ouvrier/demo/bin/demo.new") {
-		t.Fatalf("default path not used, got %q", remote.scpUploads[0].Remote)
-	}
-	if !strings.HasSuffix(remote.scpDataKeys[0].Remote, "/opt/ouvrier/demo/ouvrier-demo.service") {
-		t.Fatalf("default service unit path = %q", remote.scpDataKeys[0].Remote)
-	}
-}
-
-func TestDeploySSHRollsBackOnHealthFailure(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{failSSHContaining: "curl -fsS --max-time 5"}
-	opts := Opts{
-		Dir:       dir,
-		Host:      "h",
-		Path:      "/opt/demo",
-		Service:   "demo.service",
-		HealthURL: "/admin/health",
-		GoRun:     stubGoRunner(t),
-		Runner:    remote,
-	}
-	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), "health check failed") {
-		t.Fatalf("DeploySSH() error = %v, want health check failure", err)
-	}
-	joined := strings.Join(remote.sshCommands, "\n")
-	if !strings.Contains(joined, "mv '/opt/demo/bin/demo.previous' '/opt/demo/bin/demo'") {
-		t.Fatalf("expected rollback mv command, got:\n%s", joined)
-	}
-}
-
-func TestDeploySSHMasksAdminTokenInLogs(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{}
-	opts := Opts{
-		Dir:        dir,
-		Host:       "h",
-		Path:       "/opt/demo",
-		Service:    "demo.service",
-		HealthURL:  "/admin/health",
-		AdminToken: "super-secret-token",
-		GoRun:      stubGoRunner(t),
-		Runner:     remote,
-	}
-	var out, errOut bytes.Buffer
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &out, Err: &errOut}); err != nil {
-		t.Fatalf("DeploySSH() error = %v", err)
-	}
-	// Token is allowed to appear inside the remote ssh command, but must
-	// never appear in local stdout/stderr.
-	if strings.Contains(out.String(), "super-secret-token") {
-		t.Fatalf("admin token leaked into stdout: %s", out.String())
-	}
-	if strings.Contains(errOut.String(), "super-secret-token") {
-		t.Fatalf("admin token leaked into stderr: %s", errOut.String())
-	}
-	// The token should be present in the curl command we hand to ssh.
-	joined := strings.Join(remote.sshCommands, "\n")
-	if !strings.Contains(joined, "Authorization: Bearer super-secret-token") {
-		t.Fatalf("expected curl to include bearer token, got:\n%s", joined)
-	}
-}
-
-// TestDeploySSHMasksAdminTokenOnHealthFailure is the failure-path companion:
-// the runner fails the health check with an error that embeds the full remote
-// command (the shape the old defaultRemoteRunner produced), which carries
-// "Authorization: Bearer <token>". The token must never reach the progress
-// writers nor the returned error message.
-func TestDeploySSHMasksAdminTokenOnHealthFailure(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{
-		failSSHContaining:  "curl -fsS --max-time 5",
-		echoCommandInError: true,
-	}
-	opts := Opts{
-		Dir:        dir,
-		Host:       "h",
-		Path:       "/opt/demo",
-		Service:    "demo.service",
-		HealthURL:  "/admin/health",
-		AdminToken: "super-secret-token",
-		GoRun:      stubGoRunner(t),
-		Runner:     remote,
-	}
-	var out, errOut bytes.Buffer
-	err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &out, Err: &errOut})
-	if !errors.Is(err, ErrDeploy) {
-		t.Fatalf("DeploySSH() error = %v, want ErrDeploy", err)
-	}
-	if !strings.Contains(err.Error(), "health check failed") {
-		t.Fatalf("DeploySSH() error = %v, want health check failure", err)
-	}
-	if strings.Contains(err.Error(), "super-secret-token") {
-		t.Fatalf("admin token leaked into returned error: %v", err)
-	}
-	if strings.Contains(out.String(), "super-secret-token") {
-		t.Fatalf("admin token leaked into stdout: %s", out.String())
-	}
-	if strings.Contains(errOut.String(), "super-secret-token") {
-		t.Fatalf("admin token leaked into stderr: %s", errOut.String())
-	}
-	// The rollback message should still tell the operator what failed.
-	if !strings.Contains(out.String(), "deploy failed:") || !strings.Contains(out.String(), "rolling back") {
-		t.Fatalf("missing rollback progress line in stdout: %s", out.String())
-	}
-}
-
-func TestDeploySSHHealthURLFullURLOverride(t *testing.T) {
-	dir := writeDeployFixture(t)
-	remote := &fakeRemote{}
-	opts := Opts{
-		Dir:       dir,
-		Host:      "h",
-		Path:      "/opt/demo",
-		Service:   "demo.service",
-		HealthURL: "http://127.0.0.1:9000/healthz",
-		GoRun:     stubGoRunner(t),
-		Runner:    remote,
-	}
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
-		t.Fatalf("DeploySSH() error = %v", err)
-	}
-	joined := strings.Join(remote.sshCommands, "\n")
-	if !strings.Contains(joined, "curl -fsS --max-time 5 'http://127.0.0.1:9000/healthz'") {
-		t.Fatalf("custom health URL not forwarded:\n%s", joined)
-	}
-}
-
 func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 	cases := map[string]string{
 		"hello":      "'hello'",
@@ -564,20 +258,20 @@ func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 	}
 }
 
-func TestBuildHealthCheckCommandUsesDefaultBaseURL(t *testing.T) {
-	cmd := buildHealthCheckCommand("/admin/health", "")
-	if cmd != "curl -fsS --max-time 5 'http://127.0.0.1:8080/admin/health'" {
-		t.Fatalf("buildHealthCheckCommand() = %q", cmd)
+func TestMaskTokenErrKeepsChainAndMasks(t *testing.T) {
+	cause := fmt.Errorf("%w: health gate failed: Authorization: Bearer sekret", ErrDeploy)
+	masked := maskTokenErr(cause, "sekret")
+	if !errors.Is(masked, ErrDeploy) {
+		t.Fatal("maskTokenErr must keep the error chain intact")
 	}
-}
-
-func TestBuildHealthCheckCommandWithToken(t *testing.T) {
-	cmd := buildHealthCheckCommand("/admin/health", "tok")
-	if !strings.Contains(cmd, "Authorization: Bearer tok") {
-		t.Fatalf("buildHealthCheckCommand() = %q, missing bearer", cmd)
+	if strings.Contains(masked.Error(), "sekret") {
+		t.Fatalf("maskTokenErr leaked the token: %v", masked)
 	}
-	if !strings.Contains(cmd, "'http://127.0.0.1:8080/admin/health'") {
-		t.Fatalf("buildHealthCheckCommand() = %q, missing URL", cmd)
+	if got := maskTokenErr(cause, ""); got != cause {
+		t.Fatal("empty token must return the error unchanged")
+	}
+	if got := maskTokenErr(nil, "x"); got != nil {
+		t.Fatal("nil error must stay nil")
 	}
 }
 
@@ -585,7 +279,7 @@ func TestBuildHealthCheckCommandWithToken(t *testing.T) {
 func TestStubGoRunnerWritesBinary(t *testing.T) {
 	runner := stubGoRunner(t)
 	tmp := filepath.Join(t.TempDir(), "bin", "demo")
-	err := runner(context.Background(), "", nil, []string{"build", "-o", tmp}, &bytes.Buffer{}, &bytes.Buffer{})
+	err := runner(context.Background(), "", nil, []string{"build", "-o", tmp}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("stub runner error = %v", err)
 	}
@@ -593,59 +287,7 @@ func TestStubGoRunnerWritesBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stub output: %v", err)
 	}
-	if !bytes.Equal(data, []byte("ouvrier-test-binary")) {
+	if string(data) != "ouvrier-test-binary" {
 		t.Fatalf("stub binary content = %q", string(data))
 	}
-}
-
-func TestRenderSystemdUnitDefaultUser(t *testing.T) {
-	unit := renderSystemdUnit(systemdUnitParams{
-		Name: "demo", Service: "demo.service",
-		InstallPath: "/opt/demo",
-	})
-	if !strings.Contains(unit, "User=root") {
-		t.Fatalf("default user should be root; unit=\n%s", unit)
-	}
-}
-
-// Sanity: confirm the ssh deploy uses the static build env
-// (CGO_ENABLED=0, GOOS=linux, GOARCH=amd64).
-func TestDeploySSHUsesStaticLinuxBuildEnv(t *testing.T) {
-	dir := writeDeployFixture(t)
-	var capturedEnv []string
-	runner := func(_ context.Context, _ string, env []string, args []string, _, _ io.Writer) error {
-		capturedEnv = env
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "-o" {
-				_ = os.MkdirAll(filepath.Dir(args[i+1]), 0o755)
-				return os.WriteFile(args[i+1], []byte("x"), 0o755)
-			}
-		}
-		return fmt.Errorf("missing -o")
-	}
-	opts := Opts{Dir: dir, Host: "h", HealthURL: "/admin/health", GoRun: runner, Runner: &fakeRemote{}}
-	if err := DeploySSH(context.Background(), opts, ProgressWriter{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}); err != nil {
-		t.Fatalf("DeploySSH() error = %v", err)
-	}
-	want := map[string]bool{"CGO_ENABLED=0": false, "GOOS=linux": false, "GOARCH=amd64": false}
-	for _, kv := range capturedEnv {
-		if _, ok := want[kv]; ok {
-			want[kv] = true
-		}
-	}
-	for k, v := range want {
-		if !v {
-			t.Fatalf("env missing %q in %v", k, filterBuildEnv(capturedEnv))
-		}
-	}
-}
-
-func filterBuildEnv(env []string) []string {
-	out := make([]string, 0, 4)
-	for _, e := range env {
-		if strings.HasPrefix(e, "GOOS=") || strings.HasPrefix(e, "GOARCH=") || strings.HasPrefix(e, "CGO_ENABLED=") {
-			out = append(out, e)
-		}
-	}
-	return out
 }

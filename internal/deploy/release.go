@@ -191,6 +191,25 @@ func MkdirLayoutCommands(root, name, owner string) []string {
 	}
 }
 
+// MkdirReleaseCommands renders the per-release skeleton under
+// <root>/releases/<releaseID>: bin/ for the shipped binary and skills/ for
+// runtime assets. scp does not create directories, so the deploy runs this
+// before the uploads. releases/ is owned by the deploy user — no sudo.
+func MkdirReleaseCommands(root, releaseID string) []string {
+	dir := ReleaseDir(root, releaseID)
+	return []string{
+		fmt.Sprintf("mkdir -p -- %s %s", shellQuote(dir+"/bin"), shellQuote(dir+"/skills")),
+	}
+}
+
+// VerifyReleaseBinaryCommand checks the uploaded binary's sha256 against the
+// locally computed digest and only then marks it executable: a truncated or
+// corrupted upload can never become the running release.
+func VerifyReleaseBinaryCommand(binPath, sha string) string {
+	q := shellQuote(binPath)
+	return fmt.Sprintf(`[ "$(sha256sum -- %s | cut -d' ' -f1)" = %s ] && chmod 0755 -- %s`, q, shellQuote(sha), q)
+}
+
 // CreateServiceUserCommand creates the dedicated nologin system user the
 // unit runs as, idempotently: the unprivileged `id -u` guard means sudo only
 // runs on the first deploy.

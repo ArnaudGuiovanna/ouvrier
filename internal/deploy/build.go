@@ -122,14 +122,22 @@ func Build(ctx context.Context, cfg BuildConfig, out, errOut io.Writer, runner G
 	return BuildResult{Dir: dir, ProjectName: projectName, Output: output}, nil
 }
 
-// StaticBuild compiles a CGO-disabled, linux/amd64 binary for the project
-// under dir. The returned BuildResult carries the absolute output path so the
-// caller (deploy) can scp the artifact without re-resolving paths.
-func StaticBuild(ctx context.Context, dir string, out, errOut io.Writer, runner GoRunner) (BuildResult, error) {
+// StaticBuild compiles a CGO-disabled cross-compiled binary for the project
+// under dir. target is a GOOS/GOARCH pair (the deploy `--target` passthrough,
+// e.g. linux/arm64); empty means the linux/amd64 default. The returned
+// BuildResult carries the absolute output path so the caller (deploy) can scp
+// the artifact without re-resolving paths.
+func StaticBuild(ctx context.Context, dir, target string, out, errOut io.Writer, runner GoRunner) (BuildResult, error) {
+	if strings.TrimSpace(target) == "" {
+		target = "linux/amd64"
+	}
+	if _, _, err := SplitTarget(target); err != nil {
+		return BuildResult{}, fmt.Errorf("%w: %w", ErrBuild, err)
+	}
 	cfg := BuildConfig{
 		Dir:    dir,
 		Static: true,
-		Target: "linux/amd64",
+		Target: target,
 	}
 	return Build(ctx, cfg, out, errOut, runner)
 }

@@ -1,69 +1,175 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/envnames"
 )
 
-// sshConfig captures the resolved flag values for `ouvrier deploy ssh`. The
-// deploy itself lives in internal/deploy; this struct only exists so flag
-// parsing stays a CLI concern (and stays comparable in tests).
-type sshConfig struct {
-	Dir        string
-	Host       string
-	User       string
-	Port       int
-	Path       string // remote install path; defaults to /opt/ouvrier/<name>
-	Service    string // systemd unit name; defaults to ouvrier-<name>
-	HealthURL  string // path or full URL; defaults to /admin/health
-	AdminToken string // masked in logs/output
-	Identity   string // optional ssh identity file (-i) for agent-less CI
+// deployEnvConfig captures the resolved flag values for `ouvrier deploy <env>`
+// and its `deploy ssh --host` alias. The deploy engine lives in
+// internal/deploy; this struct only exists so flag parsing stays a CLI
+// concern (and stays comparable in tests).
+type deployEnvConfig struct {
+	Dir     string
+	Host    string // explicit single target; bypasses/overrides the registry
+	User    string
+	Port    int
+	Path    string // remote install root; defaults to /opt/ouvrier/<name>
+	Service string // systemd unit name; defaults to ouvrier-<name>
 
-	// UnitSandbox toggles the hardened release-layout unit's sandbox block
-	// ("on"/"off"; empty defers to pip.yaml deploy.sandbox, default on).
+	EnvFile  string // --env-file dotenv override
+	Identity string // ssh identity file (-i) for agent-less CI
+	Target   string // GOOS/GOARCH cross-compile target (default linux/amd64)
+	Keep     int    // releases kept after pruning (default 5)
+
+	Yes              bool // skip the prod/production confirmation
+	AllowSharedAdmin bool // permit a non-loopback OUVRIER_ADMIN_ADDR
+
+	// UnitSandbox toggles the hardened unit's sandbox block ("on"/"off";
+	// empty defers to pip.yaml deploy.<env> sandbox, default on).
 	UnitSandbox string
 	// PrintSudoers prints the least-privilege sudoers snippet for this
 	// project and exits without deploying (no host required).
 	PrintSudoers bool
 }
 
-func (app *App) runDeploySSHCommand(ctx context.Context, args []string) error {
+// runDeployEnvCommand implements `ouvrier deploy <env>` (envName from
+// pip.yaml deploy.<env>) and `ouvrier deploy ssh` (envName empty: --host is
+// required and the registry is bypassed). Both enter the same release flow.
+func (app *App) runDeployEnvCommand(ctx context.Context, envName string, args []string) error {
 	if hasHelpFlag(args) {
 		printDeploySSHHelp(app.out)
 		return nil
 	}
 
-	cfg, err := parseDeploySSHFlags(args)
+	cfg, err := parseDeployEnvFlags(args)
 	if err != nil {
 		return err
 	}
 	if cfg.PrintSudoers {
 		return app.printDeploySudoers(cfg)
 	}
-	return deploy.DeploySSH(ctx, deploy.Opts{
-		Dir:         cfg.Dir,
-		Host:        cfg.Host,
-		User:        cfg.User,
-		Port:        cfg.Port,
-		Path:        cfg.Path,
-		Service:     cfg.Service,
-		HealthURL:   cfg.HealthURL,
-		AdminToken:  cfg.AdminToken,
-		Identity:    cfg.Identity,
-		UnitSandbox: cfg.UnitSandbox,
-	}, deploy.ProgressWriter{Out: app.out, Err: app.errOut})
+	if envName == "" && strings.TrimSpace(cfg.Host) == "" {
+		return fmt.Errorf("%w: deploy ssh requires --host (or use `ouvrier deploy <env>` with a pip.yaml deploy.<env> block)", ErrUsage)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cfg.Dir, "pip.yaml"))
+	if err != nil {
+		return fmt.Errorf("%w: read pip.yaml in %s: %v (run this command from an Ouvrier project)", ErrDeploy, cfg.Dir, err)
+	}
+	summary := parsePipYAML(string(data))
+
+	opts, err := resolveDeployEnvOpts(cfg, envName, summary)
+	if err != nil {
+		return err
+	}
+
+	// Deploying to prod is deliberate: --yes, or an interactive confirm.
+	if isProdEnv(envName) && !cfg.Yes {
+		ok, err := app.confirmProdDeploy(envName, opts.Hosts)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: aborted; nothing was deployed to %s", ErrDeploy, envName)
+		}
+	}
+
+	return deploy.DeployEnvironment(ctx, opts, deploy.ProgressWriter{Out: app.out, Err: app.errOut})
+}
+
+// resolveDeployEnvOpts merges flags (highest precedence), the pip.yaml
+// deploy.<env> block, and process environment overrides into the deploy
+// engine's options. It is pure apart from one os.Getenv read
+// (OUVRIER_DEPLOY_ENV_FILE, the documented --env-file fallback).
+func resolveDeployEnvOpts(cfg deployEnvConfig, envName string, summary pipYAMLSummary) (deploy.EnvOpts, error) {
+	opts := deploy.EnvOpts{
+		Dir:              cfg.Dir,
+		EnvName:          envName,
+		User:             cfg.User,
+		Port:             cfg.Port,
+		Path:             cfg.Path,
+		Service:          cfg.Service,
+		Identity:         cfg.Identity,
+		Target:           cfg.Target,
+		Keep:             cfg.Keep,
+		EnvFile:          cfg.EnvFile,
+		EnvRequired:      summary.EnvReq,
+		AllowSharedAdmin: cfg.AllowSharedAdmin,
+		UnitSandbox:      cfg.UnitSandbox,
+	}
+	if opts.EnvFile == "" {
+		opts.EnvFile = strings.TrimSpace(os.Getenv(envnames.DeployEnvFile))
+	}
+
+	if envName == "" {
+		opts.Hosts = []string{cfg.Host}
+		return opts, nil
+	}
+
+	env, err := deploy.ResolveEnvironment(summary.DeployEnvs, envName)
+	if err != nil {
+		return deploy.EnvOpts{}, err
+	}
+	opts.Hosts = env.Hosts
+	if cfg.Host != "" {
+		// --host narrows an environment deploy to one explicit target.
+		opts.Hosts = []string{cfg.Host}
+	}
+	if opts.Port == 0 {
+		opts.Port = env.Port
+	}
+	if opts.Path == "" {
+		opts.Path = env.Path
+	}
+	if opts.Service == "" {
+		opts.Service = env.Service
+	}
+	if opts.Identity == "" {
+		opts.Identity = env.Identity
+	}
+	opts.EnvSandbox = env.Sandbox
+	return opts, nil
+}
+
+// isProdEnv reports whether the environment name demands a confirmation.
+func isProdEnv(envName string) bool {
+	switch strings.ToLower(strings.TrimSpace(envName)) {
+	case "prod", "production":
+		return true
+	default:
+		return false
+	}
+}
+
+// confirmProdDeploy asks the operator to confirm a production deploy on the
+// app's input reader. Only an explicit y/yes proceeds.
+func (app *App) confirmProdDeploy(envName string, hosts []string) (bool, error) {
+	if app.in == nil {
+		return false, fmt.Errorf("%w: deploying to %s requires confirmation; pass --yes in non-interactive runs (CI)", ErrDeploy, envName)
+	}
+	fmt.Fprintf(app.out, "Deploy to %s (%s)? [y/N]: ", envName, strings.Join(hosts, ", "))
+	line, err := bufio.NewReader(app.in).ReadString('\n')
+	if err != nil && line == "" {
+		return false, nil // EOF without an answer = decline
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 // printDeploySudoers renders the least-privilege sudoers snippet for the
 // project in cfg.Dir and exits without touching any host. The deploy user in
 // the snippet comes from --user, the user@ part of --host, or the "deploy"
 // placeholder.
-func (app *App) printDeploySudoers(cfg sshConfig) error {
+func (app *App) printDeploySudoers(cfg deployEnvConfig) error {
 	data, err := os.ReadFile(filepath.Join(cfg.Dir, "pip.yaml"))
 	if err != nil {
 		return fmt.Errorf("%w: --print-sudoers needs the project's pip.yaml: %v", ErrDeploy, err)
@@ -71,6 +177,9 @@ func (app *App) printDeploySudoers(cfg sshConfig) error {
 	name, err := deploy.ParseProjectName(data)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrDeploy, err)
+	}
+	if err := (deploy.UnitParams{Name: name, Service: cfg.Service, Root: cfg.Path}).Validate(); err != nil {
+		return err
 	}
 	user := cfg.User
 	if user == "" {
@@ -87,146 +196,96 @@ func (app *App) printDeploySudoers(cfg sshConfig) error {
 	return nil
 }
 
-func parseDeploySSHFlags(args []string) (sshConfig, error) {
-	cfg := sshConfig{
-		Dir:       ".",
-		HealthURL: "/admin/health",
+func parseDeployEnvFlags(args []string) (deployEnvConfig, error) {
+	cfg := deployEnvConfig{
+		Dir:  ".",
+		Keep: deploy.DefaultKeepReleases,
 	}
+	stringFlags := map[string]*string{
+		"--host":         &cfg.Host,
+		"--user":         &cfg.User,
+		"--path":         &cfg.Path,
+		"--service":      &cfg.Service,
+		"--dir":          &cfg.Dir,
+		"--env-file":     &cfg.EnvFile,
+		"--identity":     &cfg.Identity,
+		"--target":       &cfg.Target,
+		"--unit-sandbox": &cfg.UnitSandbox,
+	}
+	boolFlags := map[string]*bool{
+		"--yes":                &cfg.Yes,
+		"--allow-shared-admin": &cfg.AllowSharedAdmin,
+		"--print-sudoers":      &cfg.PrintSudoers,
+	}
+
 	i := 0
 	for i < len(args) {
 		arg := args[i]
-		switch {
-		case arg == "--host":
-			value, advance, err := flagValue(args, i, "--host")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.Host = value
-			i += advance
-		case strings.HasPrefix(arg, "--host="):
-			cfg.Host = strings.TrimPrefix(arg, "--host=")
+		name, inline, hasInline := strings.Cut(arg, "=")
+
+		if dst, ok := boolFlags[arg]; ok {
+			*dst = true
 			i++
-		case arg == "--user":
-			value, advance, err := flagValue(args, i, "--user")
-			if err != nil {
-				return sshConfig{}, err
+			continue
+		}
+		if dst, ok := stringFlags[name]; ok {
+			value := inline
+			if !hasInline {
+				v, advance, err := flagValue(args, i, name)
+				if err != nil {
+					return deployEnvConfig{}, err
+				}
+				value = v
+				i += advance
+			} else {
+				i++
 			}
-			cfg.User = value
-			i += advance
-		case strings.HasPrefix(arg, "--user="):
-			cfg.User = strings.TrimPrefix(arg, "--user=")
-			i++
-		case arg == "--port":
-			value, advance, err := flagValue(args, i, "--port")
-			if err != nil {
-				return sshConfig{}, err
+			*dst = value
+			continue
+		}
+		switch name {
+		case "--port", "--keep":
+			value := inline
+			if !hasInline {
+				v, advance, err := flagValue(args, i, name)
+				if err != nil {
+					return deployEnvConfig{}, err
+				}
+				value = v
+				i += advance
+			} else {
+				i++
 			}
-			port, perr := parsePort(value)
-			if perr != nil {
-				return sshConfig{}, perr
+			if name == "--port" {
+				port, err := parsePort(value)
+				if err != nil {
+					return deployEnvConfig{}, err
+				}
+				cfg.Port = port
+			} else {
+				keep, err := strconv.Atoi(strings.TrimSpace(value))
+				if err != nil || keep < 1 {
+					return deployEnvConfig{}, fmt.Errorf("%w: --keep must be a positive integer, got %q", ErrUsage, value)
+				}
+				cfg.Keep = keep
 			}
-			cfg.Port = port
-			i += advance
-		case strings.HasPrefix(arg, "--port="):
-			port, perr := parsePort(strings.TrimPrefix(arg, "--port="))
-			if perr != nil {
-				return sshConfig{}, perr
-			}
-			cfg.Port = port
-			i++
-		case arg == "--path":
-			value, advance, err := flagValue(args, i, "--path")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.Path = value
-			i += advance
-		case strings.HasPrefix(arg, "--path="):
-			cfg.Path = strings.TrimPrefix(arg, "--path=")
-			i++
-		case arg == "--service":
-			value, advance, err := flagValue(args, i, "--service")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.Service = value
-			i += advance
-		case strings.HasPrefix(arg, "--service="):
-			cfg.Service = strings.TrimPrefix(arg, "--service=")
-			i++
-		case arg == "--dir":
-			value, advance, err := flagValue(args, i, "--dir")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.Dir = value
-			i += advance
-		case strings.HasPrefix(arg, "--dir="):
-			cfg.Dir = strings.TrimPrefix(arg, "--dir=")
-			i++
-		case arg == "--health-url":
-			value, advance, err := flagValue(args, i, "--health-url")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.HealthURL = value
-			i += advance
-		case strings.HasPrefix(arg, "--health-url="):
-			cfg.HealthURL = strings.TrimPrefix(arg, "--health-url=")
-			i++
-		case arg == "--admin-token":
-			value, advance, err := flagValue(args, i, "--admin-token")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.AdminToken = value
-			i += advance
-		case strings.HasPrefix(arg, "--admin-token="):
-			cfg.AdminToken = strings.TrimPrefix(arg, "--admin-token=")
-			i++
-		case arg == "--identity":
-			value, advance, err := flagValue(args, i, "--identity")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			cfg.Identity = value
-			i += advance
-		case strings.HasPrefix(arg, "--identity="):
-			cfg.Identity = strings.TrimPrefix(arg, "--identity=")
-			i++
-		case arg == "--unit-sandbox":
-			value, advance, err := flagValue(args, i, "--unit-sandbox")
-			if err != nil {
-				return sshConfig{}, err
-			}
-			if err := validateUnitSandbox(value); err != nil {
-				return sshConfig{}, err
-			}
-			cfg.UnitSandbox = value
-			i += advance
-		case strings.HasPrefix(arg, "--unit-sandbox="):
-			value := strings.TrimPrefix(arg, "--unit-sandbox=")
-			if err := validateUnitSandbox(value); err != nil {
-				return sshConfig{}, err
-			}
-			cfg.UnitSandbox = value
-			i++
-		case arg == "--print-sudoers":
-			cfg.PrintSudoers = true
-			i++
 		default:
-			return sshConfig{}, fmt.Errorf("%w: deploy ssh does not accept argument %q", ErrUsage, arg)
+			return deployEnvConfig{}, fmt.Errorf("%w: deploy does not accept argument %q", ErrUsage, arg)
 		}
 	}
+
 	if cfg.Dir == "" {
 		cfg.Dir = "."
 	}
-	// --print-sudoers is a local render: no host needed.
-	if strings.TrimSpace(cfg.Host) == "" && !cfg.PrintSudoers {
-		return sshConfig{}, fmt.Errorf("%w: deploy ssh requires --host", ErrUsage)
+	if cfg.Target != "" {
+		if _, _, err := deploy.SplitTarget(cfg.Target); err != nil {
+			return deployEnvConfig{}, fmt.Errorf("%w: %v", ErrUsage, err)
+		}
 	}
-	if cfg.HealthURL == "" {
-		cfg.HealthURL = "/admin/health"
+	if cfg.UnitSandbox != "" {
+		if err := validateUnitSandbox(cfg.UnitSandbox); err != nil {
+			return deployEnvConfig{}, err
+		}
 	}
 	return cfg, nil
 }

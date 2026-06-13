@@ -21,6 +21,12 @@ const KnownHostsFile = "ouvrier.known_hosts"
 // failures, fingerprint mismatches, or a changed key without --rotate).
 var ErrTrust = errors.New("trust error")
 
+// ErrKeyChanged marks the specific UpdateKnownHosts refusal where the host is
+// already pinned with a different key. Callers gate their "rerun with
+// --rotate" hints on it so I/O failures are never decorated with rotation
+// advice.
+var ErrKeyChanged = errors.New("host key changed")
+
 // KeyscanRunner is the ssh-keyscan seam, mirroring GoRunner/RemoteRunner so
 // tests can substitute canned output without a network.
 type KeyscanRunner func(ctx context.Context, host string, port int) (output string, err error)
@@ -36,7 +42,7 @@ func DefaultKeyscan(ctx context.Context, host string, port int) (string, error) 
 		args = append(args, "-p", strconv.Itoa(port))
 	}
 	args = append(args, host)
-	stdout, _, err := runHostCommand(ctx, "ssh-keyscan", args)
+	stdout, _, err := runHostCommand(ctx, "ssh-keyscan", args, nil)
 	if err != nil {
 		return "", fmt.Errorf("%w: ssh-keyscan %s: %w", ErrTrust, host, err)
 	}
@@ -225,8 +231,8 @@ func UpdateKnownHosts(path, host string, keys []HostKey, rotate bool) (TrustResu
 		}
 		if !rotate {
 			return TrustUnchanged, fmt.Errorf(
-				"%w: %s is already trusted with a different key; rerun with --rotate to replace the pinned entry (nothing written)",
-				ErrTrust, host,
+				"%w: %w: %s is already trusted with a different key; rerun with --rotate to replace the pinned entry (nothing written)",
+				ErrTrust, ErrKeyChanged, host,
 			)
 		}
 		result = TrustRotated

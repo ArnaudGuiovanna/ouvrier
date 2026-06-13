@@ -103,7 +103,7 @@ What ships in the current codebase:
   tool, schema, and subagent spans.
 - The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
   `add agent|trigger|tool|skill`, `dev`, `build` (static cross-compile), and
-  `deploy ssh|docker`.
+  `deploy <env>|ssh|docker`.
 
 Operational notes: trace persistence uses the configured `StateStore` (SQLite
 by default), cost accounting depends on configured pricing and provider usage
@@ -513,7 +513,8 @@ ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]
 ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
-ouvrier deploy ssh --host HOST [--dir .]
+ouvrier deploy ENV [--env-file FILE] [--identity FILE] [--target os/arch] [--keep 5] [--yes]
+ouvrier deploy ssh --host HOST [--dir .] (same flags; bypasses the registry)
 ouvrier deploy docker [--dir .] [--image IMAGE] [--tag TAG] [--push]
 ouvrier fleet ls
 ouvrier fleet rm <name> [--host HOST]
@@ -530,10 +531,16 @@ compiles the worker; `--static` implies `CGO_ENABLED=0` with
 (`modernc.org/sqlite` is pure Go, so static cross-builds work without a C
 toolchain).
 
-`ouvrier deploy ssh` ships a static binary, `.env`, `skills/` runtime assets
-when present, and a systemd unit with health-check rollback. `ouvrier deploy
-docker` renders and builds a distroless container image that includes `skills/`
-when present. `ouvrier fleet` lists or prunes the recorded deployments
+`ouvrier deploy <env>` (and its `deploy ssh --host` alias) is the agentless
+SSH deploy: it cross-compiles a static binary, ships it into an immutable
+`releases/<ts>-<sha>/` directory on hosts pinned in the committed
+`ouvrier.known_hosts`, installs the env file and a hardened systemd unit,
+atomically swaps the `current` symlink, health-gates the loopback admin
+endpoint, and rolls back to the previous release on failure. Environments
+(hosts, port, path, service, identity) come from the committed pip.yaml
+`deploy:` block; see the handbook for the sudoers snippet and a CI example.
+`ouvrier deploy docker` renders and builds a distroless container image that
+includes `skills/` when present. `ouvrier fleet` lists or prunes the recorded deployments
 inventory at `~/.config/ouvrier/deployments.json` (override with
 `OUVRIER_FLEET_PATH` or `OUVRIER_CONFIG_DIR`); it is a secret-free cache for
 tooling — live `/admin/health` is truth.

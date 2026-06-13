@@ -767,7 +767,9 @@ ouvrier status [--url URL] [--token TOKEN]
 ouvrier logs [--url URL] [--token TOKEN] [--last N]
 ouvrier trace <exec-id> [--url URL] [--token TOKEN]
 ouvrier server trust HOST [--fingerprint SHA256:...] [--rotate] [--port 22] [--dir .]
-ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME] [--identity FILE]
+ouvrier deploy ENV [--env-file FILE] [--identity FILE] [--target GOOS/GOARCH] [--keep 5] [--yes] [--allow-shared-admin] [--unit-sandbox on|off]
+ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME] [...same flags]
+ouvrier deploy ssh --print-sudoers [--user USER] [--service NAME] [--path PATH]
 ouvrier deploy docker [--image IMAGE] [--tag TAG] [--push] [--force]
 ouvrier state migrate
 ```
@@ -804,22 +806,141 @@ disabled. Deploying to an unpinned host fails before any remote command; a
 changed host key is a hard error — re-pin deliberately with
 `ouvrier server trust --rotate HOST`.
 
-Deploy over SSH:
+### Deploy Environments
 
-```sh
-ouvrier deploy ssh \
-  --host app@example.com \
-  --path /opt/ouvrier/ticket-triage \
-  --service ouvrier-ticket-triage \
-  --admin-token "$OUVRIER_ADMIN_TOKEN"
+Declare your servers once, committed, in pip.yaml — clone + ssh key + env
+file is everything a teammate (or CI) needs to deploy:
+
+```yaml
+deploy:
+  staging:
+    hosts: [deploy@stg-1.example.com]
+    port: 22                       # optional
+    path: /opt/ouvrier/myworker    # optional
+    service: ouvrier-myworker      # optional
+    identity: ~/.ssh/ci_ed25519    # optional, for agent-less CI
+  prod:
+    hosts: [deploy@prod-1, deploy@prod-2]   # ~/.ssh/config aliases work too
 ```
 
-The SSH deploy builds a static Linux binary, uploads the binary, `.env`, and
-`skills/` runtime assets when present, renders a systemd unit, restarts the
-service, health checks `/admin/health`, and rolls back to the previous binary
-if the health check fails.
+Then:
 
-Build a distroless container image:
+```sh
+ouvrier deploy staging
+ouvrier deploy prod --yes        # prod/production requires --yes or a confirm
+ouvrier deploy ssh --host deploy@stg-1.example.com   # one-off, same flow
+```
+
+Secrets ship from a per-environment dotenv at the project root —
+`.env.staging`, `.env.prod`, falling back to `.env` (override with
+`--env-file` or `OUVRIER_DEPLOY_ENV_FILE`). The preflight refuses git-tracked
+env files and validates pip.yaml `env.required` plus `OUVRIER_ADMIN_TOKEN`,
+reporting missing names only.
+
+Each host deploy is an atomic release switch:
+
+1. Build a static binary (`--target linux/arm64` for ARM hosts), sha256 it.
+2. Remote preflight over one SSH session: passwordless-sudo probe, systemd
+   check, create the dedicated `ouvrier-<name>` nologin user, create the
+   layout under `<path>`, take the `.deploy.lock` flock.
+3. Upload into the immutable `releases/<UTCts>-<gitsha>/` directory (binary,
+   `RELEASE.json`, `skills/` assets), verify the remote sha256, chmod 0755.
+4. Ship the env file atomically to `shared/.env` (root:service 0640 — the
+   worker reads its secrets but cannot rewrite them). If the file does not
+   set `OUVRIER_ADMIN_ADDR`, the deploy appends
+   `OUVRIER_ADMIN_ADDR=127.0.0.1:9090` so the admin API stays
+   loopback-only; a non-loopback value is refused without
+   `--allow-shared-admin`.
+5. Install the hardened systemd unit only when its content changed
+   (+ `daemon-reload`), enable it. Disable the sandbox block with
+   `--unit-sandbox off` or pip.yaml `deploy.<env>.sandbox: off`.
+6. Atomically repoint the `current` symlink; `systemctl restart`.
+7. Health gate: on-host curl of `127.0.0.1:<admin port>/admin/health`, 10
+   attempts over ~30 seconds. The bearer token is fed to `curl -K -` as a
+   stdin config — never in argv, never on disk, masked in all output.
+8. On success: append `deploys.log`, prune to `--keep 5` releases, record
+   the deploy in `~/.config/ouvrier/deployments.json`. On failure: dump
+   `journalctl -u <service> -n 50`, repoint `current` to the recorded
+   previous release, restart, re-run the health gate, and exit nonzero with
+   both errors. A first deploy (nothing to roll back to) stops the service
+   and reports.
+
+Multi-host environments deploy sequentially, health-check each host, and
+abort on the first failure with a loud mixed-version summary. Roll back by
+deploying the previous git revision (the `current` symlink swap makes any
+release activation atomic).
+
+### Server Preparation (sudoers)
+
+The deploy logs in as an unprivileged user and uses `sudo -n` for exactly the
+privileged commands the flow runs — full paths, fixed arguments, no
+wildcards. Generate the matching least-privilege sudoers snippet:
+
+```sh
+ouvrier deploy ssh --print-sudoers --user deploy
+```
+
+which renders (for a worker named `myworker`):
+
+```text
+# Least-privilege sudoers for Ouvrier deploys of worker "myworker".
+# Install as /etc/sudoers.d/ouvrier-myworker (mode 0440); validate with visudo -cf.
+deploy ALL=(root) NOPASSWD: /usr/bin/true
+deploy ALL=(root) NOPASSWD: /usr/sbin/useradd --system --home-dir /opt/ouvrier/myworker --no-create-home --shell /usr/sbin/nologin ouvrier-myworker
+deploy ALL=(root) NOPASSWD: /usr/bin/install -d -m 0755 -o deploy -- /opt/ouvrier/myworker
+deploy ALL=(root) NOPASSWD: /usr/bin/install -d -m 0750 -o root -g ouvrier-myworker -- /opt/ouvrier/myworker/shared
+deploy ALL=(root) NOPASSWD: /usr/bin/install -d -m 0750 -o ouvrier-myworker -g ouvrier-myworker -- /opt/ouvrier/myworker/shared/state
+deploy ALL=(root) NOPASSWD: /usr/bin/install -o root -g ouvrier-myworker -m 0640 -- /opt/ouvrier/myworker/.env.new /opt/ouvrier/myworker/shared/.env
+deploy ALL=(root) NOPASSWD: /usr/bin/install -m 0644 -- /opt/ouvrier/myworker/ouvrier-myworker.service /etc/systemd/system/ouvrier-myworker.service
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl enable ouvrier-myworker.service
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart ouvrier-myworker.service
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl stop ouvrier-myworker.service
+deploy ALL=(root) NOPASSWD: /usr/bin/journalctl -u ouvrier-myworker.service -n 50 --no-pager
+```
+
+Install it once per worker on the server:
+
+```sh
+ouvrier deploy ssh --print-sudoers --user deploy | ssh root@stg-1.example.com \
+  'cat > /etc/sudoers.d/ouvrier-myworker && chmod 0440 /etc/sudoers.d/ouvrier-myworker && visudo -cf /etc/sudoers.d/ouvrier-myworker'
+```
+
+### Deploying From CI (from scratch)
+
+A fresh clone deploys with nothing but an SSH key and the env file. Pin the
+host once, locally, and commit the result:
+
+```sh
+ouvrier server trust stg-1.example.com --fingerprint SHA256:f/+IMT34E8qsxk2X...
+git add ouvrier.known_hosts && git commit -m "trust stg-1.example.com"
+```
+
+Then a complete GitHub Actions job:
+
+```yaml
+deploy-staging:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4          # brings pip.yaml + ouvrier.known_hosts
+    - uses: actions/setup-go@v5
+      with: { go-version: stable }
+    - name: Install the deploy key and env file
+      env:
+        DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
+        STAGING_ENV: ${{ secrets.STAGING_ENV_FILE }}   # full dotenv content
+      run: |
+        install -m 0600 /dev/null ci_ed25519 && printf '%s\n' "$DEPLOY_KEY" > ci_ed25519
+        install -m 0600 /dev/null .env.staging && printf '%s\n' "$STAGING_ENV" > .env.staging
+    - name: Deploy
+      run: ouvrier deploy staging --identity ./ci_ed25519 --yes
+```
+
+The committed `ouvrier.known_hosts` makes the host-key decision part of code
+review; `--fingerprint` keeps the initial pinning non-interactive; the deploy
+itself needs no further confirmation for non-production environments.
+
+Build a distroless container image instead:
 
 ```sh
 ouvrier deploy docker --image registry.example.com/ticket-triage --tag 0.1.0 --push

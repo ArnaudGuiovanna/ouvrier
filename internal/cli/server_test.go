@@ -193,6 +193,31 @@ func TestServerTrustChangedKeyRequiresRotate(t *testing.T) {
 	}
 }
 
+// Carry-over (d): only the changed-key refusal earns the --rotate hint. An
+// I/O failure (here: ouvrier.known_hosts is a directory) surfaces untouched —
+// rotating would not fix it.
+func TestServerTrustIOFailureGetsNoRotateHint(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "ouvrier.known_hosts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	app := New("dev", WithStreams(nil, &out, &errOut))
+	runner, _ := fakeKeyscan(keyscanFixture("h"))
+	app.keyscan = runner
+
+	err := app.Run(context.Background(), []string{"server", "trust", "h", "--fingerprint", testEd25519FP, "--dir", dir})
+	if err == nil {
+		t.Fatal("server trust against an unreadable known_hosts must fail")
+	}
+	if errors.Is(err, deploy.ErrKeyChanged) {
+		t.Fatalf("I/O failure wrongly marked as a changed key: %v", err)
+	}
+	if strings.Contains(err.Error(), "ouvrier server trust --rotate") {
+		t.Fatalf("I/O failure must not carry the --rotate hint: %v", err)
+	}
+}
+
 func TestServerTrustStripsUserAndPinsPortQualifiedHost(t *testing.T) {
 	app, _, dir, scanned := newTrustApp(t, nil, "[h]:2222 ssh-ed25519 "+testEd25519Key+"\n")
 	err := app.Run(context.Background(), []string{

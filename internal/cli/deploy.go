@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 )
@@ -17,18 +18,22 @@ func (app *App) runDeployCommand(ctx context.Context, args []string) error {
 	if len(args) == 0 || isHelpFlag(args[0]) {
 		printDeployHelp(app.out)
 		if len(args) == 0 {
-			return fmt.Errorf("%w: deploy requires a subcommand (ssh|docker)", ErrUsage)
+			return fmt.Errorf("%w: deploy requires an environment name from pip.yaml deploy.<env>, or a subcommand (ssh|docker)", ErrUsage)
 		}
 		return nil
 	}
 
-	switch args[0] {
-	case "ssh":
-		return app.runDeploySSHCommand(ctx, args[1:])
-	case "docker":
+	switch {
+	case args[0] == "ssh":
+		// `deploy ssh --host user@host` is the registry-bypass alias: the
+		// same release flow against an explicit single host.
+		return app.runDeployEnvCommand(ctx, "", args[1:])
+	case args[0] == "docker":
 		return app.runDeployDockerCommand(ctx, args[1:])
+	case strings.HasPrefix(args[0], "-"):
+		return fmt.Errorf("%w: deploy requires an environment name from pip.yaml deploy.<env>, or a subcommand (ssh|docker)", ErrUsage)
 	default:
-		return fmt.Errorf("%w: unknown deploy subcommand %q (expected ssh|docker)", ErrUsage, args[0])
+		return app.runDeployEnvCommand(ctx, args[0], args[1:])
 	}
 }
 

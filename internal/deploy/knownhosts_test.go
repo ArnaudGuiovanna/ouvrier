@@ -170,12 +170,33 @@ func TestUpdateKnownHostsChangedKeyRequiresRotate(t *testing.T) {
 	if !errors.Is(err, ErrTrust) {
 		t.Fatalf("UpdateKnownHosts() error = %v, want ErrTrust", err)
 	}
+	// The changed-key refusal is the only error marked ErrKeyChanged: callers
+	// gate their `--rotate` hints on it.
+	if !errors.Is(err, ErrKeyChanged) {
+		t.Fatalf("UpdateKnownHosts() error = %v, want ErrKeyChanged in the chain", err)
+	}
 	if !strings.Contains(err.Error(), "--rotate") {
 		t.Fatalf("UpdateKnownHosts() error = %v, want --rotate hint", err)
 	}
 	after, _ := os.ReadFile(path)
 	if string(before) != string(after) {
 		t.Fatalf("failed trust modified file:\nbefore=%q\nafter=%q", before, after)
+	}
+}
+
+// I/O failures are never marked ErrKeyChanged: rotating would not fix them.
+func TestUpdateKnownHostsIOFailureIsNotKeyChanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, KnownHostsFile)
+	if err := os.Mkdir(path, 0o755); err != nil { // a directory: ReadFile fails
+		t.Fatal(err)
+	}
+	_, err := UpdateKnownHosts(path, "example.com", scannedKeys(), false)
+	if err == nil {
+		t.Fatal("UpdateKnownHosts() on a directory must fail")
+	}
+	if errors.Is(err, ErrKeyChanged) {
+		t.Fatalf("I/O failure wrongly marked ErrKeyChanged: %v", err)
 	}
 }
 

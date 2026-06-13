@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -105,7 +106,13 @@ func (app *App) runServerTrustCommand(ctx context.Context, args []string) error 
 	path := filepath.Join(cfg.Dir, deploy.KnownHostsFile)
 	result, err := deploy.UpdateKnownHosts(path, canonical, keys, cfg.Rotate)
 	if err != nil {
-		return fmt.Errorf("%w; to replace the pinned key run `ouvrier server trust --rotate %s`", err, trustHostArgs(scanHost, cfg.Port))
+		// Only the changed-key refusal earns the --rotate hint; I/O failures
+		// (unwritable file, bad path) must surface untouched — rotating would
+		// not fix them.
+		if errors.Is(err, deploy.ErrKeyChanged) {
+			return fmt.Errorf("%w; to replace the pinned key run `ouvrier server trust --rotate %s`", err, trustHostArgs(scanHost, cfg.Port))
+		}
+		return err
 	}
 	switch result {
 	case deploy.TrustUnchanged:

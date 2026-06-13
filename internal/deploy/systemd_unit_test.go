@@ -364,6 +364,54 @@ func TestSudoersSnippetDefaults(t *testing.T) {
 	}
 }
 
+// Carry-over (a): UnitParams values feed the systemd unit, the shell command
+// helpers, and the unquoted sudoers grants; whitespace, control characters,
+// quotes, and relative roots are rejected before rendering.
+func TestUnitParamsValidate(t *testing.T) {
+	valid := []UnitParams{
+		{Name: "demo"},
+		{Name: "demo", Service: "custom-worker.service", Root: "/srv/workers/demo"},
+		{Name: "demo", Service: "w_1.2", Root: "/opt/ouvrier/demo"},
+	}
+	for _, p := range valid {
+		if err := p.Validate(); err != nil {
+			t.Fatalf("Validate(%+v) = %v, want nil", p, err)
+		}
+	}
+	invalid := []UnitParams{
+		{Name: ""},
+		{Name: " "},
+		{Name: "demo", Service: "bad name"},
+		{Name: "demo", Service: "bad\tname"},
+		{Name: "demo", Service: "bad\nname"},
+		{Name: "demo", Service: "bad'name"},
+		{Name: "demo", Service: `bad"name`},
+		{Name: "demo", Root: "/opt/bad path"},
+		{Name: "demo", Root: "/opt/bad\npath\n[Service]\nExecStart=/bin/sh"},
+		{Name: "demo", Root: "/opt/bad\rpath"},
+		{Name: "demo", Root: "relative/path"},
+		{Name: "bad name"},
+		{Name: "demo", Root: "/opt/bad\\path"},
+	}
+	for _, p := range invalid {
+		if err := p.Validate(); !errors.Is(err, ErrDeploy) {
+			t.Fatalf("Validate(%+v) = %v, want ErrDeploy", p, err)
+		}
+	}
+}
+
+func TestSystemdCheckCommandIsActionableAndSudoFree(t *testing.T) {
+	cmd := SystemdCheckCommand()
+	for _, want := range []string{"command -v systemctl", "exit 1", ">&2"} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("SystemdCheckCommand missing %q: %s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "sudo") {
+		t.Fatalf("systemd check must not need sudo: %s", cmd)
+	}
+}
+
 func TestUnitUser(t *testing.T) {
 	if got := UnitUser("demo"); got != "ouvrier-demo" {
 		t.Fatalf("UnitUser(demo) = %q", got)

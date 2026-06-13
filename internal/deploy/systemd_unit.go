@@ -45,6 +45,44 @@ func (p UnitParams) normalized() UnitParams {
 	return p
 }
 
+// Validate rejects UnitParams values that could break out of the rendered
+// systemd unit, the shell command helpers, or the sudoers snippet (whose
+// grants are unquoted): whitespace or control characters (a newline in the
+// root path would inject unit directives or sudoers lines), shell quotes, and
+// relative roots. Callers must validate before rendering or running any
+// remote command built from these values.
+func (p UnitParams) Validate() error {
+	p = p.normalized()
+	if strings.TrimSpace(p.Name) == "" {
+		return fmt.Errorf("%w: worker name is required", ErrDeploy)
+	}
+	for _, f := range []struct{ label, value string }{
+		{"worker name", p.Name},
+		{"service name", p.Service},
+		{"install root", p.Root},
+	} {
+		if err := rejectUnsafeUnitValue(f.label, f.value); err != nil {
+			return err
+		}
+	}
+	if !strings.HasPrefix(p.Root, "/") {
+		return fmt.Errorf("%w: install root %q must be an absolute path", ErrDeploy, p.Root)
+	}
+	return nil
+}
+
+// rejectUnsafeUnitValue refuses whitespace, control characters, and quote
+// characters in values that end up in systemd unit files, sudoers grants, and
+// remote shell commands.
+func rejectUnsafeUnitValue(label, value string) error {
+	for _, r := range value {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r < 0x20 || r == 0x7f || r == '\'' || r == '"' || r == '\\' {
+			return fmt.Errorf("%w: %s %q must not contain whitespace, quotes, or control characters", ErrDeploy, label, value)
+		}
+	}
+	return nil
+}
+
 // CanonicalServiceName strips a single trailing ".service" so the unit file
 // on disk, the install target in /etc/systemd/system, and systemctl
 // invocations all agree on one ".service" suffix (operators may pass
@@ -177,6 +215,12 @@ func JournalTailCommand(service string) string {
 // relies on.
 func SudoProbeCommand() string {
 	return "sudo -n /usr/bin/true"
+}
+
+// SystemdCheckCommand verifies systemctl exists on the target before the
+// deploy provisions anything, with an actionable stderr line. No sudo.
+func SystemdCheckCommand() string {
+	return "command -v systemctl >/dev/null 2>&1 || { echo 'ouvrier: systemd (systemctl) not found on this host; the SSH deploy requires a systemd-based Linux target' >&2; exit 1; }"
 }
 
 // ResolveSandbox merges the --unit-sandbox flag (highest precedence) with
