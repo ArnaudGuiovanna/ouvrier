@@ -55,3 +55,47 @@ func TestCheckAdminExposureHonorsInsecureOptIn(t *testing.T) {
 		t.Fatalf("checkAdminExposure with insecure opt-in = %v, want nil", err)
 	}
 }
+
+func TestCheckAdminAddrExposureAllowsLoopback(t *testing.T) {
+	t.Setenv("OUVRIER_ADMIN_INSECURE", "")
+	for _, addr := range []string{"127.0.0.1:9090", "localhost:9090", "[::1]:9090"} {
+		if err := checkAdminAddrExposure(addr); err != nil {
+			t.Fatalf("checkAdminAddrExposure(%q) = %v, want nil (loopback admin listener)", addr, err)
+		}
+	}
+}
+
+func TestCheckAdminAddrExposureRefusesNonLoopback(t *testing.T) {
+	// The dedicated admin listener exists so the admin surface is never
+	// network reachable: unlike the shared-port guard, a non-loopback bind is
+	// refused regardless of token or dev mode.
+	t.Setenv("OUVRIER_ADMIN_INSECURE", "")
+	for _, addr := range []string{"0.0.0.0:9090", ":9090", "192.168.1.10:9090"} {
+		err := checkAdminAddrExposure(addr)
+		if err == nil {
+			t.Fatalf("checkAdminAddrExposure(%q) = nil, want refusal for non-loopback admin listener", addr)
+		}
+		if !strings.Contains(err.Error(), "OUVRIER_ADMIN_ADDR") {
+			t.Fatalf("checkAdminAddrExposure(%q) error = %v, want it to name OUVRIER_ADMIN_ADDR", addr, err)
+		}
+		if !strings.Contains(err.Error(), "OUVRIER_ADMIN_INSECURE") {
+			t.Fatalf("checkAdminAddrExposure(%q) error = %v, want it to name the OUVRIER_ADMIN_INSECURE override", addr, err)
+		}
+	}
+}
+
+func TestCheckAdminAddrExposureHonorsInsecureOptIn(t *testing.T) {
+	t.Setenv("OUVRIER_ADMIN_INSECURE", "1")
+	if err := checkAdminAddrExposure("0.0.0.0:9090"); err != nil {
+		t.Fatalf("checkAdminAddrExposure with insecure opt-in = %v, want nil", err)
+	}
+	if warning := adminAddrExposureWarning("0.0.0.0:9090"); warning == "" {
+		t.Fatal("adminAddrExposureWarning = \"\", want a startup warning for a network-reachable admin listener")
+	}
+}
+
+func TestAdminAddrExposureWarningSilentOnLoopback(t *testing.T) {
+	if warning := adminAddrExposureWarning("127.0.0.1:9090"); warning != "" {
+		t.Fatalf("adminAddrExposureWarning(loopback) = %q, want empty", warning)
+	}
+}

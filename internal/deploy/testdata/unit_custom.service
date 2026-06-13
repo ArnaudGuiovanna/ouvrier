@@ -1,0 +1,26 @@
+[Unit]
+Description=Ouvrier worker demo
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ouvrier-demo
+Group=ouvrier-demo
+WorkingDirectory=/srv/workers/demo/current
+Environment=OUVRIER_STATE_PATH=/srv/workers/demo/shared/state/state.db
+EnvironmentFile=/srv/workers/demo/shared/.env
+ExecStart=/srv/workers/demo/current/bin/demo
+Restart=always
+RestartSec=2s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+ReadWritePaths=/srv/workers/demo/shared
+
+[Install]
+WantedBy=multi-user.target

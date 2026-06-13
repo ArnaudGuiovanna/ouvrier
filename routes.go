@@ -1204,15 +1204,37 @@ func adminDevModeEnabled() bool {
 
 const adminInsecureEnv = "OUVRIER_ADMIN_INSECURE"
 
-// adminInsecureOptIn reports whether the operator explicitly accepted serving
-// unauthenticated admin endpoints on a network-reachable address.
-func adminInsecureOptIn() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(adminInsecureEnv))) {
+// envOptIn reports whether the named environment variable carries an explicit
+// truthy opt-in value.
+func envOptIn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:
 		return false
 	}
+}
+
+// adminInsecureOptIn reports whether the operator explicitly accepted serving
+// unauthenticated admin endpoints on a network-reachable address.
+func adminInsecureOptIn() bool {
+	return envOptIn(adminInsecureEnv)
+}
+
+// adminAddrFromEnv returns the OUVRIER_ADMIN_ADDR bind address for the
+// dedicated admin listener, or "" when the admin surface stays on the public
+// port (the v0.2 shared-port layout).
+func adminAddrFromEnv() string {
+	return strings.TrimSpace(os.Getenv(envnames.AdminAddr))
+}
+
+// metricsPublicOptIn reports whether OUVRIER_METRICS_PUBLIC keeps /metrics
+// registered on the public port even when OUVRIER_ADMIN_ADDR moves the admin
+// surface to its own listener, for Prometheus scrapers that cannot traverse
+// SSH to the loopback admin port. It parses the same truthy values as
+// OUVRIER_ADMIN_INSECURE and has no effect while OUVRIER_ADMIN_ADDR is unset.
+func metricsPublicOptIn() bool {
+	return envOptIn(envnames.MetricsPublic)
 }
 
 // loopbackBindAddr reports whether addr binds only the loopback interface. An
@@ -1254,6 +1276,31 @@ func checkAdminExposure(addr, adminToken string) error {
 		return nil
 	}
 	return fmt.Errorf("refusing to start: admin endpoints are unauthenticated (%s=dev, no %s) and %q is reachable from the network; set %s for production, bind to localhost for local dev, or set %s=1 to override", envnames.Env, envnames.AdminToken, addr, envnames.AdminToken, adminInsecureEnv)
+}
+
+// checkAdminAddrExposure guards the dedicated admin listener requested via
+// OUVRIER_ADMIN_ADDR. The split listener exists so the admin surface is never
+// reachable from the network (operators tunnel to it over SSH), so a
+// non-loopback admin bind defeats its purpose and is refused regardless of
+// token or dev mode — unless the operator explicitly opts in with the same
+// OUVRIER_ADMIN_INSECURE override that checkAdminExposure honors for the
+// shared-port layout.
+func checkAdminAddrExposure(adminAddr string) error {
+	if loopbackBindAddr(adminAddr) || adminInsecureOptIn() {
+		return nil
+	}
+	return fmt.Errorf("refusing to start: %s=%q binds the dedicated admin listener to a non-loopback address reachable from the network; bind it to 127.0.0.1, or set %s=1 to override", envnames.AdminAddr, adminAddr, adminInsecureEnv)
+}
+
+// adminAddrExposureWarning returns a non-empty warning when the dedicated
+// admin listener was permitted on a non-loopback bind via the insecure
+// opt-in, so the operator is told loudly at startup. It returns "" for a
+// loopback-only bind.
+func adminAddrExposureWarning(adminAddr string) string {
+	if loopbackBindAddr(adminAddr) {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: dedicated admin listener %s=%q is reachable from the network (%s=1)", envnames.AdminAddr, adminAddr, adminInsecureEnv)
 }
 
 // adminExposureWarning returns a non-empty warning when admin auth is disabled

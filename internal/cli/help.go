@@ -18,7 +18,9 @@ Commands:
   status    Show health and counters for a running worker
   logs      List the last N traced executions of a running worker
   trace     Print the full event timeline for one execution
-  deploy    Ship the project to a remote host (ssh) or build a container image (docker)
+  deploy    Ship the project to a deploy environment or host over SSH, or build a container image
+  server    Manage trusted deploy hosts (trust pins SSH host keys)
+  fleet     Inspect or prune the recorded deployments inventory (ls|rm)
   state     Manage the worker's durable state backend (migrate)
   version   Print the ouvrier CLI version
 
@@ -212,42 +214,149 @@ overridden, and .env values are never printed. This is dev-only; deployed
 binaries are unaffected. Pass --no-dotenv to disable.
 `
 
-const deployHelp = `Ship a project to a remote host or build an image for it.
+const deployHelp = `Ship a project to its deploy environment, a host, or a container image.
 
-Usage: ouvrier deploy <ssh|docker> [flags]
+Usage: ouvrier deploy <env> [flags]
+       ouvrier deploy ssh --host HOST [flags]
+       ouvrier deploy rollback <env> [flags]
+       ouvrier deploy docker [flags]
 
-Subcommands:
-  ssh      Build statically, scp the binary and .env, install systemd, restart and health-check
-  docker   Generate a distroless Dockerfile, build, optionally push the image
+<env> names a committed pip.yaml deploy.<env> block (the server registry),
+e.g. "ouvrier deploy staging". "deploy ssh" runs the same release flow
+against a single explicit --host, bypassing the registry. "deploy rollback"
+repoints each host at the previous release recorded in its deploys.log — no
+build. "deploy docker" builds a distroless OCI image instead.
 
-Run "ouvrier deploy <subcommand> --help" for details.
+Run "ouvrier deploy ssh --help", "ouvrier deploy rollback --help", or
+"ouvrier deploy docker --help" for details.
 `
 
-const deploySSHHelp = `Deploy the project to a remote Linux host over SSH.
+const deploySSHHelp = `Deploy the project to remote Linux hosts over plain SSH.
 
-Usage: ouvrier deploy ssh --host HOST [flags]
+Usage: ouvrier deploy <env> [flags]
+       ouvrier deploy ssh --host HOST [flags]
 
-Pipeline:
-  1. ouvrier build --static --target linux/amd64
-  2. scp the binary to <path>/bin/<name>.new and .env to <path>/.env (chmod 0600)
-  3. Generate <path>/<service>.service and install it; sudo systemctl daemon-reload
-  4. Promote .new into place; sudo systemctl restart <service>
-  5. Probe http://127.0.0.1:8080<health-url> with curl --max-time 5 on the remote
-  6. On health failure: roll back to <name>.previous and restart
+<env> resolves hosts and defaults (port/path/service/identity/sandbox) from
+the committed pip.yaml deploy.<env> block; "deploy ssh --host user@host" is
+the registry-bypass alias for one explicit host. Both run the same flow:
+
+  1. Local preflight: resolve the env file (.env.<env>, .env, --env-file or
+     OUVRIER_DEPLOY_ENV_FILE), validate pip.yaml env.required plus
+     OUVRIER_ADMIN_TOKEN, refuse git-tracked env files, then build a static
+     binary (--target, default linux/amd64) and compute its sha256
+  2. Remote preflight: passwordless-sudo probe, systemd check, create the
+     ouvrier-<name> system user, create the release layout, take the
+     .deploy.lock flock
+  3. Upload the release into <path>/releases/<ts>-<sha>/ (binary,
+     RELEASE.json, skills/ assets); verify the remote sha256; chmod 0755
+  4. Ship the env file atomically to <path>/shared/.env (root:svc 0640),
+     appending OUVRIER_ADMIN_ADDR=127.0.0.1:9090 when it sets none; a
+     non-loopback admin addr is refused without --allow-shared-admin
+  5. Install the systemd unit only when it changed (+ daemon-reload), enable
+  6. Atomically repoint <path>/current; sudo systemctl restart
+  7. Health gate: on-host curl of 127.0.0.1:<admin port>/admin/health, 10
+     attempts over ~30s; the token travels via curl stdin config, never argv
+  8. Success: append deploys.log, prune to --keep releases, record the
+     deploy in the local inventory. Failure: dump journalctl, roll back to
+     the previous release, restart, re-check; a first deploy stops the unit
+
+Multiple hosts deploy sequentially and abort on the first failure (with a
+loud mixed-version warning). Deploying to "prod"/"production" asks for
+confirmation unless --yes.
 
 Options:
-      --host string         Remote host (required); user can be embedded as user@host
-      --user string         SSH user (falls back to the host's default)
+      --host string         Explicit target (user@host); required for "deploy ssh",
+                            narrows "deploy <env>" to one host
+      --user string         SSH user (overrides any user@ in the host)
       --port int            SSH port (default: ssh's default, usually 22)
-      --path string         Remote install path (default "/opt/ouvrier/<name>")
+      --path string         Remote install root (default "/opt/ouvrier/<name>")
       --service string      systemd unit name (default "ouvrier-<name>")
       --dir string          Project directory containing pip.yaml (default ".")
-      --health-url string   Health endpoint path or full URL (default "/admin/health")
-      --admin-token string  Admin bearer token forwarded to the health probe (masked in logs)
+      --env-file string     Dotenv file to ship (default ".env.<env>" then ".env";
+                            also OUVRIER_DEPLOY_ENV_FILE)
+      --identity string     SSH identity file passed as -i to ssh/scp (agent-less
+                            CI; pip.yaml deploy.<env> identity is the default)
+      --target string       Cross-compile target GOOS/GOARCH (default "linux/amd64")
+      --keep int            Releases to keep on the host after pruning (default 5)
+      --yes                 Skip the prod/production confirmation prompt (CI)
+      --allow-shared-admin  Permit an env file whose OUVRIER_ADMIN_ADDR binds the
+                            admin API beyond loopback (off by default)
+      --unit-sandbox string Systemd hardening: "on" (default) or "off" (escape
+                            hatch, same as pip.yaml deploy sandbox: off)
+      --print-sudoers       Print the least-privilege sudoers snippet for this
+                            project's deploy flow and exit (no host needed)
   -h, --help                Show this help message
 
-A local .env in --dir is required. Secrets are never written to the local
-logs and the --admin-token value is masked in any printed output.
+Every target host must first be pinned with "ouvrier server trust <host>":
+every ssh/scp invocation runs with -o UserKnownHostsFile=ouvrier.known_hosts
+-o StrictHostKeyChecking=yes -o BatchMode=yes and password/keyboard-interactive
+authentication disabled. A deploy against an unpinned host fails before any
+remote command, and a changed host key is a hard error pointing at
+"ouvrier server trust --rotate".
+
+The admin token is read from the shipped env file (never from a flag), is fed
+to the remote health probe over stdin (never argv), and is masked in all
+output.
+`
+
+const deployRollbackHelp = `Roll hosts back to the previous release from their deploys.log ledger.
+
+Usage: ouvrier deploy rollback <env> [flags]
+       ouvrier deploy rollback --host HOST [flags]
+
+<env> resolves hosts and defaults from the committed pip.yaml deploy.<env>
+block exactly like "ouvrier deploy <env>"; --host targets one explicit host.
+Rollback never builds or uploads anything. Per host it:
+
+  1. Takes the same <path>/.deploy.lock as a deploy (rollback mutates the
+     current symlink), released on every exit path
+  2. Reads the LAST <path>/deploys.log entry and resolves the release that
+     entry replaced (recorded as previous=<target> at deploy time — rollback
+     never guesses from timestamps)
+  3. Verifies that release directory still exists, BEFORE touching current
+  4. Atomically repoints <path>/current; sudo systemctl restart
+  5. Runs the same health gate as deploy: on-host curl of
+     127.0.0.1:<admin port>/admin/health, 10 attempts over ~30s; the token
+     travels via curl stdin config, never argv, and is masked in all output
+  6. Appends a distinguishable "rollback" entry to deploys.log and records
+     the rollback in the local inventory (result "rollback-ok")
+
+It refuses with an actionable error — leaving current untouched — when there
+is no deploy history, when the last deploy recorded no previous release (a
+first deploy), or when the previous release directory was pruned by --keep;
+redeploy a known-good revision with "ouvrier deploy <env>" instead.
+
+The host's shared/.env is intentionally NOT rolled back: the latest shipped
+secrets stay in place (per-release env snapshotting is a pending design
+decision). The local env file (.env.<env>, .env, --env-file or
+OUVRIER_DEPLOY_ENV_FILE) is read only for the OUVRIER_ADMIN_TOKEN and
+OUVRIER_ADMIN_ADDR the health gate needs, so its token must match the one
+already deployed to the host.
+
+Multiple hosts roll back sequentially and abort on the first failure (with a
+loud mixed-version warning). Rolling back "prod"/"production" asks for
+confirmation unless --yes.
+
+Options:
+      --host string         Explicit target (user@host); required without <env>,
+                            narrows "deploy rollback <env>" to one host
+      --user string         SSH user (overrides any user@ in the host)
+      --port int            SSH port (default: ssh's default, usually 22)
+      --path string         Remote install root (default "/opt/ouvrier/<name>")
+      --service string      systemd unit name (default "ouvrier-<name>")
+      --dir string          Project directory containing pip.yaml (default ".")
+      --env-file string     Dotenv file read for the health-gate token/addr
+                            (default ".env.<env>" then ".env";
+                            also OUVRIER_DEPLOY_ENV_FILE)
+      --identity string     SSH identity file passed as -i to ssh (agent-less
+                            CI; pip.yaml deploy.<env> identity is the default)
+      --yes                 Skip the prod/production confirmation prompt (CI)
+      --allow-shared-admin  Permit an env file whose OUVRIER_ADMIN_ADDR binds the
+                            admin API beyond loopback (off by default)
+  -h, --help                Show this help message
+
+Every target host must be pinned with "ouvrier server trust <host>", exactly
+like a deploy.
 `
 
 const deployDockerHelp = `Build a distroless OCI image for the project.
@@ -266,6 +375,84 @@ Options:
       --force          Overwrite an existing Dockerfile
       --dir string     Project directory containing pip.yaml (default ".")
   -h, --help           Show this help message
+`
+
+const serverHelp = `Manage trusted deploy hosts.
+
+Usage: ouvrier server <trust> [flags]
+
+Subcommands:
+  trust   Pin a host's SSH public keys into the committed ouvrier.known_hosts
+
+Run "ouvrier server <subcommand> --help" for details.
+`
+
+const serverTrustHelp = `Pin a remote host's SSH public keys into ouvrier.known_hosts.
+
+Usage: ouvrier server trust <host> [flags]
+
+Runs ssh-keyscan against the host, displays the SHA256 key fingerprint, and
+after confirmation appends every scanned key line to ouvrier.known_hosts at
+the project root. Host public keys are not secrets: commit the file so the
+trust decision is shared by the whole team and CI, and every
+"ouvrier deploy ssh" verifies the host against it (StrictHostKeyChecking=yes).
+
+The fingerprint shown and checked by --fingerprint is the host's ed25519 key
+when it offers one, otherwise the first scanned key; all scanned key types
+are pinned either way. Verify it out-of-band (e.g. "ssh-keygen -lf
+/etc/ssh/ssh_host_ed25519_key.pub" on the server console).
+
+Trusting an already-pinned host with the same key is a no-op. If the host's
+key has changed, the command refuses unless --rotate is given, which replaces
+the pinned entries with the fresh scan.
+
+Options:
+      --fingerprint string  Expected SHA256 fingerprint (with or without the
+                            "SHA256:" prefix) for non-interactive use (CI);
+                            a mismatch aborts and writes nothing
+      --rotate              Replace existing pinned keys for this host
+      --port int            SSH port; non-default ports pin "[host]:port"
+      --dir string          Project root holding ouvrier.known_hosts (default ".")
+  -h, --help                Show this help message
+`
+
+const fleetHelp = `Inspect or prune the recorded deployments inventory.
+
+Usage: ouvrier fleet <ls|rm> [flags]
+
+The inventory at ~/.config/ouvrier/deployments.json records one entry per
+deployed worker and host. It is a disposable cache for tooling — the live
+/admin/health endpoint is truth — and never contains secrets. Override its
+location with OUVRIER_FLEET_PATH (full path) or OUVRIER_CONFIG_DIR.
+
+Subcommands:
+  ls   List recorded deployments
+  rm   Remove recorded deployments for a worker
+
+Run "ouvrier fleet <subcommand> --help" for details.
+`
+
+const fleetLsHelp = `List recorded deployments.
+
+Usage: ouvrier fleet ls
+
+Prints one line per recorded deployment (name, host, service, deploy time,
+result). An empty inventory is not an error.
+
+Options:
+  -h, --help   Show this help message
+`
+
+const fleetRmHelp = `Remove recorded deployments for a worker.
+
+Usage: ouvrier fleet rm <name> [flags]
+
+Removes the inventory entries for the named worker. This only edits the local
+inventory file; it never touches the remote host.
+
+Options:
+      --host string   Only remove the entry for this host
+  -h, --help          Show this help message
 `
 
 const stateHelp = `Manage the worker's durable state backend.
@@ -365,8 +552,32 @@ func printDeploySSHHelp(w io.Writer) {
 	fmt.Fprint(w, deploySSHHelp)
 }
 
+func printDeployRollbackHelp(w io.Writer) {
+	fmt.Fprint(w, deployRollbackHelp)
+}
+
 func printDeployDockerHelp(w io.Writer) {
 	fmt.Fprint(w, deployDockerHelp)
+}
+
+func printServerHelp(w io.Writer) {
+	fmt.Fprint(w, serverHelp)
+}
+
+func printServerTrustHelp(w io.Writer) {
+	fmt.Fprint(w, serverTrustHelp)
+}
+
+func printFleetHelp(w io.Writer) {
+	fmt.Fprint(w, fleetHelp)
+}
+
+func printFleetLsHelp(w io.Writer) {
+	fmt.Fprint(w, fleetLsHelp)
+}
+
+func printFleetRmHelp(w io.Writer) {
+	fmt.Fprint(w, fleetRmHelp)
 }
 
 func printStateHelp(w io.Writer) {

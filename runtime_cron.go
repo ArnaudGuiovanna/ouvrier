@@ -218,7 +218,7 @@ func serveCronPlansWithContext(ctx context.Context, addr string, rt httpRuntime,
 	}
 	return runSupervisedRuntimes(ctx,
 		func(ctx context.Context) error {
-			return serveHTTPWithContext(ctx, addr, handler)
+			return serveAdminOnlyHTTPWithContext(ctx, addr, handler)
 		},
 		func(ctx context.Context) error {
 			return runCronPlansWithSchedules(ctx, rt, plans, schedules)

@@ -277,22 +277,49 @@ func (r *Runner) Run(addr string, nodes ...Node) error {
 		return fmt.Errorf("state store: %w", err)
 	}
 
-	if err := checkAdminExposure(addr, runtime.adminToken); err != nil {
-		_ = closeRuntime()
-		return err
-	}
-	if warning := adminExposureWarning(addr, runtime.adminToken); warning != "" {
-		log.Println(warning)
+	// With OUVRIER_ADMIN_ADDR set, the admin surface moves to its own
+	// listener, so the exposure guards apply to the admin bind instead of the
+	// public one: a non-loopback admin bind is refused outright, and the
+	// unauthenticated-dev warning follows the admin routes to their listener.
+	adminAddr := adminAddrFromEnv()
+	if adminAddr == "" {
+		if err := checkAdminExposure(addr, runtime.adminToken); err != nil {
+			_ = closeRuntime()
+			return err
+		}
+		if warning := adminExposureWarning(addr, runtime.adminToken); warning != "" {
+			log.Println(warning)
+		}
+	} else {
+		if err := checkAdminAddrExposure(adminAddr); err != nil {
+			_ = closeRuntime()
+			return err
+		}
+		if warning := adminAddrExposureWarning(adminAddr); warning != "" {
+			log.Println(warning)
+		}
+		if warning := adminExposureWarning(adminAddr, runtime.adminToken); warning != "" {
+			log.Println(warning)
+		}
 	}
 
 	var serveErr error
 	if plansHTTPCompatible(plans) {
-		handler, err := newHTTPCompatibleHandlerWithRuntime(nodes, runtime)
-		if err != nil {
-			_ = closeRuntime()
-			return err
+		if adminAddr == "" {
+			handler, err := newHTTPCompatibleHandlerWithRuntime(nodes, runtime)
+			if err != nil {
+				_ = closeRuntime()
+				return err
+			}
+			serveErr = serveHTTP(addr, handler)
+		} else {
+			publicHandler, adminHandler, err := newSplitHTTPCompatibleHandlersWithRuntime(nodes, runtime)
+			if err != nil {
+				_ = closeRuntime()
+				return err
+			}
+			serveErr = serveSplitHTTP(addr, publicHandler, adminAddr, adminHandler)
 		}
-		serveErr = serveHTTP(addr, handler)
 	} else if plansTriggerKind(plans) == runtimeplan.TriggerCron {
 		serveErr = serveCronPlans(addr, runtime, plans)
 	} else if plansTriggerKind(plans) == runtimeplan.TriggerStream {
