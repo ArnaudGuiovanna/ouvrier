@@ -21,6 +21,7 @@ Commands:
   deploy    Ship the project to a deploy environment or host over SSH, or build a container image
   server    Manage trusted deploy hosts (trust pins SSH host keys)
   fleet     Inspect or prune the recorded deployments inventory (ls|rm)
+  console   Start the loopback web console over the federated admin APIs
   state     Manage the worker's durable state backend (migrate)
   version   Print the ouvrier CLI version
 

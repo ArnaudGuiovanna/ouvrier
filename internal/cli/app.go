@@ -115,6 +115,8 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runServerCommand(ctx, args[1:])
 	case "fleet":
 		return app.runFleetCommand(ctx, args[1:])
+	case "console":
+		return app.runConsoleCommand(ctx, args[1:])
 	case "state":
 		return app.runStateCommand(ctx, args[1:])
 	default:
