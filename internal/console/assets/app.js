@@ -2,9 +2,13 @@
 // The per-session bearer token is read once from the URL fragment
 // (location.hash) and held only in memory — never localStorage, never a cookie
 // — then sent as Authorization: Bearer on every /api/v1 call.
-import { h, render } from "preact";
-import { useState, useEffect, useRef, useCallback } from "preact/hooks";
-import htm from "htm";
+// Absolute /vendor paths (not bare "preact"/"htm" specifiers) so the SPA needs
+// no inline import map — an inline <script type=importmap> is blocked by the
+// console's strict CSP (default-src 'self'). These external modules load under
+// 'self'.
+import { h, render } from "/vendor/preact.module.js";
+import { useState, useEffect, useRef, useCallback } from "/vendor/hooks.module.js";
+import htm from "/vendor/htm.module.js";
 
 const html = htm.bind(h);
 
@@ -307,6 +311,22 @@ ${lines
 // ---- shell ------------------------------------------------------------------
 function App() {
   const route = useRoute();
+  if (!TOKEN) {
+    // Opened without the #token=… fragment (e.g. the bare address was typed
+    // instead of the URL ouvrier printed). Every API call would 401; show a
+    // clear instruction instead of a blank page or a cryptic error.
+    return html`
+      <header class="topbar"><h1>ouvrier console</h1></header>
+      <main>
+        <div class="empty">
+          <p>No session token.</p>
+          <p>Open the full URL printed by <span class="mono">ouvrier console</span> — it ends
+          with <span class="mono">#token=…</span>. The token is required and is shown only in
+          that command's output.</p>
+        </div>
+      </main>
+    `;
+  }
   let view;
   if (route.startsWith("/worker/")) {
     view = html`<${Worker} name=${decodeURIComponent(route.slice("/worker/".length))} />`;

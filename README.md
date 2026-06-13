@@ -55,8 +55,8 @@ func main() {
 
 ## Status
 
-Ouvrier `main` includes the completed v0.1 and v0.2 milestone backlog. The
-latest tagged release is still `v0.1.0` until v0.2 is tagged.
+Ouvrier `main` includes the completed v0.1, v0.2, and v0.3 milestone backlog.
+The latest tagged release is `v0.3.0` (Deploy & Scale).
 The public Go module path is:
 
 ```txt
@@ -141,12 +141,33 @@ The repository is currently verified with:
 go version go1.25.6 linux/amd64
 ```
 
-## Install From Source
+## Install
 
-Clone the repository and build the CLI from the checkout:
+Download a prebuilt binary (Linux/macOS, amd64/arm64) with the install script;
+it fetches the latest release, verifies the checksum, and installs `ouvrier`:
 
 ```sh
-git clone git@github.com:ArnaudGuiovanna/ouvrier.git
+curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/ouvrier/main/install.sh | sh
+```
+
+Pin a version with `OUVRIER_VERSION=v0.3.1` and the target directory with
+`OUVRIER_BIN_DIR=~/.local/bin`. Re-running the script updates an existing
+install in place.
+
+Or install with `go install` (Go 1.25+); it places `ouvrier` in
+`$(go env GOPATH)/bin`:
+
+```sh
+go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
+ouvrier version
+```
+
+Use `@v0.3.1` instead of `@latest` to pin a specific release.
+
+To build from a checkout instead (for contributing or running the tests):
+
+```sh
+git clone https://github.com/ArnaudGuiovanna/ouvrier.git
 cd ouvrier
 go test ./...
 go install ./cmd/ouvrier
