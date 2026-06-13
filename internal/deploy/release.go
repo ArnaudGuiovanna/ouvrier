@@ -184,10 +184,10 @@ func ReleaseDir(root, releaseID string) string {
 func MkdirLayoutCommands(root, name, owner string) []string {
 	svc := UnitUser(name)
 	return []string{
-		fmt.Sprintf("sudo /usr/bin/install -d -m 0755 -o %s -- %s", shellQuote(owner), shellQuote(root)),
-		fmt.Sprintf("mkdir -p -- %s", shellQuote(root+"/releases")),
-		fmt.Sprintf("sudo /usr/bin/install -d -m 0750 -o root -g %s -- %s", shellQuote(svc), shellQuote(root+"/shared")),
-		fmt.Sprintf("sudo /usr/bin/install -d -m 0750 -o %s -g %s -- %s", shellQuote(svc), shellQuote(svc), shellQuote(root+"/shared/state")),
+		fmt.Sprintf("sudo /usr/bin/install -d -m 0755 -o %s -- %s", ShellQuote(owner), ShellQuote(root)),
+		fmt.Sprintf("mkdir -p -- %s", ShellQuote(root+"/releases")),
+		fmt.Sprintf("sudo /usr/bin/install -d -m 0750 -o root -g %s -- %s", ShellQuote(svc), ShellQuote(root+"/shared")),
+		fmt.Sprintf("sudo /usr/bin/install -d -m 0750 -o %s -g %s -- %s", ShellQuote(svc), ShellQuote(svc), ShellQuote(root+"/shared/state")),
 	}
 }
 
@@ -198,7 +198,7 @@ func MkdirLayoutCommands(root, name, owner string) []string {
 func MkdirReleaseCommands(root, releaseID string) []string {
 	dir := ReleaseDir(root, releaseID)
 	return []string{
-		fmt.Sprintf("mkdir -p -- %s %s", shellQuote(dir+"/bin"), shellQuote(dir+"/skills")),
+		fmt.Sprintf("mkdir -p -- %s %s", ShellQuote(dir+"/bin"), ShellQuote(dir+"/skills")),
 	}
 }
 
@@ -206,8 +206,8 @@ func MkdirReleaseCommands(root, releaseID string) []string {
 // locally computed digest and only then marks it executable: a truncated or
 // corrupted upload can never become the running release.
 func VerifyReleaseBinaryCommand(binPath, sha string) string {
-	q := shellQuote(binPath)
-	return fmt.Sprintf(`[ "$(sha256sum -- %s | cut -d' ' -f1)" = %s ] && chmod 0755 -- %s`, q, shellQuote(sha), q)
+	q := ShellQuote(binPath)
+	return fmt.Sprintf(`[ "$(sha256sum -- %s | cut -d' ' -f1)" = %s ] && chmod 0755 -- %s`, q, ShellQuote(sha), q)
 }
 
 // CreateServiceUserCommand creates the dedicated nologin system user the
@@ -217,7 +217,7 @@ func CreateServiceUserCommand(root, name string) string {
 	svc := UnitUser(name)
 	return fmt.Sprintf(
 		"id -u %s >/dev/null 2>&1 || sudo /usr/sbin/useradd --system --home-dir %s --no-create-home --shell /usr/sbin/nologin %s",
-		shellQuote(svc), shellQuote(root), shellQuote(svc),
+		ShellQuote(svc), ShellQuote(root), ShellQuote(svc),
 	)
 }
 
@@ -235,8 +235,8 @@ func InstallEnvCommands(root, name string) []string {
 	stage := EnvStagePath(root)
 	return []string{
 		fmt.Sprintf("sudo /usr/bin/install -o root -g %s -m 0640 -- %s %s",
-			shellQuote(svc), shellQuote(stage), shellQuote(root+"/shared/.env")),
-		fmt.Sprintf("rm -f -- %s", shellQuote(stage)),
+			ShellQuote(svc), ShellQuote(stage), ShellQuote(root+"/shared/.env")),
+		fmt.Sprintf("rm -f -- %s", ShellQuote(stage)),
 	}
 }
 
@@ -245,7 +245,7 @@ func InstallEnvCommands(root, name string) []string {
 // first deploy. The caller records it in deploys.log so rollback can resolve
 // the previous release without trusting timestamps.
 func ReadCurrentTargetCommand(root string) string {
-	return fmt.Sprintf("readlink -- %s || true", shellQuote(root+"/current"))
+	return fmt.Sprintf("readlink -- %s || true", ShellQuote(root+"/current"))
 }
 
 // SwapCurrentCommands atomically repoints <root>/current at the new release:
@@ -256,9 +256,9 @@ func ReadCurrentTargetCommand(root string) string {
 // documented micro-race where current briefly does not resolve. The symlink
 // target is relative so the layout survives a root move.
 func SwapCurrentCommands(root, releaseID string) []string {
-	target := shellQuote("releases/" + releaseID)
-	tmp := shellQuote(root + "/current.tmp")
-	current := shellQuote(root + "/current")
+	target := ShellQuote("releases/" + releaseID)
+	tmp := ShellQuote(root + "/current.tmp")
+	current := ShellQuote(root + "/current")
 	return []string{
 		fmt.Sprintf(
 			"if mv -T --help >/dev/null 2>&1; then ln -sfn -- %s %s && mv -T -- %s %s; else ln -sfn -- %s %s; fi",
@@ -289,7 +289,7 @@ func appendDeployLogCommand(root, releaseID, previousTarget string, now time.Tim
 		prev = "-"
 	}
 	line := fmt.Sprintf("%s %s previous=%s%s", now.UTC().Format(time.RFC3339), releaseID, prev, marker)
-	return fmt.Sprintf("printf '%%s\\n' %s >> %s", shellQuote(line), shellQuote(root+"/deploys.log"))
+	return fmt.Sprintf("printf '%%s\\n' %s >> %s", ShellQuote(line), ShellQuote(root+"/deploys.log"))
 }
 
 // ReadLastDeployLogCommand prints the last <root>/deploys.log line, or
@@ -297,7 +297,7 @@ func appendDeployLogCommand(root, releaseID, previousTarget string, now time.Tim
 // resolves its target from this entry — the recorded previous `current`
 // target is clock-skew-proof, unlike timestamp sorting.
 func ReadLastDeployLogCommand(root string) string {
-	return fmt.Sprintf("tail -n 1 -- %s 2>/dev/null || true", shellQuote(root+"/deploys.log"))
+	return fmt.Sprintf("tail -n 1 -- %s 2>/dev/null || true", ShellQuote(root+"/deploys.log"))
 }
 
 // parseDeployLogLine parses one deploys.log line as written by
@@ -322,7 +322,7 @@ func parseDeployLogLine(line string) (releaseID, previous string, ok bool) {
 // pruned by --keep). Rollback verifies its target still exists with this
 // before touching the `current` symlink.
 func ReleaseDirExistsCommand(root, releaseID string) string {
-	return fmt.Sprintf("test -d %s", shellQuote(ReleaseDir(root, releaseID)))
+	return fmt.Sprintf("test -d %s", ShellQuote(ReleaseDir(root, releaseID)))
 }
 
 // AcquireLockCommand takes the per-root deploy lock. The flock(1) on
@@ -334,24 +334,24 @@ func ReleaseDirExistsCommand(root, releaseID string) string {
 // exit path; a deploy killed mid-flight leaves a stale holder that the
 // diagnostic makes easy to identify and clear (truncate the file).
 func AcquireLockCommand(root, holder string) string {
-	lock := shellQuote(root + "/.deploy.lock")
+	lock := ShellQuote(root + "/.deploy.lock")
 	inner := fmt.Sprintf(
 		"if [ -s %s ]; then echo deploy lock %s held by: \"$(cat %s)\" >&2; exit 1; fi; printf '%%s\\n' %s > %s",
-		lock, lock, lock, shellQuote(holder), lock,
+		lock, lock, lock, ShellQuote(holder), lock,
 	)
-	return fmt.Sprintf("flock -n %s -c %s", lock, shellQuote(inner))
+	return fmt.Sprintf("flock -n %s -c %s", lock, ShellQuote(inner))
 }
 
 // ReleaseLockCommand releases the deploy lock by truncating the holder
 // marker (the file itself stays, keeping the flock inode stable).
 func ReleaseLockCommand(root string) string {
-	return fmt.Sprintf(": > %s", shellQuote(root+"/.deploy.lock"))
+	return fmt.Sprintf(": > %s", ShellQuote(root+"/.deploy.lock"))
 }
 
 // ListReleasesCommand lists the release directory entries one per line; its
 // output feeds PruneReleasesCommands.
 func ListReleasesCommand(root string) string {
-	return fmt.Sprintf("ls -1 -- %s", shellQuote(root+"/releases"))
+	return fmt.Sprintf("ls -1 -- %s", ShellQuote(root+"/releases"))
 }
 
 // PruneReleasesCommands builds the rm commands that keep only the newest
@@ -378,7 +378,7 @@ func PruneReleasesCommands(root, lsOutput string, keep int) []string {
 	stale := ids[:len(ids)-keep]
 	cmds := make([]string, 0, len(stale))
 	for _, id := range stale {
-		cmds = append(cmds, "rm -rf -- "+shellQuote(ReleaseDir(root, id)))
+		cmds = append(cmds, "rm -rf -- "+ShellQuote(ReleaseDir(root, id)))
 	}
 	return cmds
 }

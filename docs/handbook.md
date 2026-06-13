@@ -718,6 +718,24 @@ Outside `OUVRIER_ENV=dev`, set `OUVRIER_ADMIN_TOKEN` and send
 `Authorization: Bearer <token>`. All admin output is redacted before it leaves
 the process.
 
+### Fleet CLI
+
+`ouvrier status`, `ouvrier logs`, and `ouvrier trace` target a single local
+worker via `--url`/`--token` by default. To reach deployed workers instead,
+add `--worker NAME` (one worker) or `--all` (every worker in the deployments
+inventory). Fleet mode resolves targets from
+`~/.config/ouvrier/deployments.json`, opens a one-shot SSH tunnel per worker
+(host keys pinned against the project's `ouvrier.known_hosts`, admin token
+fetched over SSH and held in memory only), runs the same admin call, and
+prefixes every output line with the worker name. `--all` fans out
+concurrently with a per-worker timeout: each worker's result is printed under
+a `=== <name> [<tunnel-state>] ===` header, and the command exits nonzero if
+any worker failed while still printing the successes. `status` fleet mode also
+shows each worker's tunnel state and `cron_leases`. `--url` cannot be combined
+with `--worker`/`--all`, and `--worker` and `--all` are mutually exclusive.
+SSH remains the only operator credential — admin ports never leave the host's
+loopback, and no token is ever printed.
+
 By default the admin surface shares the public port. Set `OUVRIER_ADMIN_ADDR`
 (e.g. `127.0.0.1:9090`) and `Run` serves `/admin/*`, `/metrics`, and `/dev` on
 a dedicated second listener instead; the public port answers 404 for them
@@ -763,9 +781,9 @@ ouvrier add skill --name ticket-triage [--description TEXT]
 ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
-ouvrier status [--url URL] [--token TOKEN]
-ouvrier logs [--url URL] [--token TOKEN] [--last N]
-ouvrier trace <exec-id> [--url URL] [--token TOKEN]
+ouvrier status [--url URL] [--token TOKEN] [--worker NAME | --all]
+ouvrier logs [--url URL] [--token TOKEN] [--last N] [--worker NAME | --all]
+ouvrier trace <exec-id> [--url URL] [--token TOKEN] [--worker NAME | --all]
 ouvrier server trust HOST [--fingerprint SHA256:...] [--rotate] [--port 22] [--dir .]
 ouvrier deploy ENV [--env-file FILE] [--identity FILE] [--target GOOS/GOARCH] [--keep 5] [--yes] [--allow-shared-admin] [--unit-sandbox on|off]
 ouvrier deploy ssh --host HOST [--user USER] [--port 22] [--path PATH] [--service NAME] [...same flags]

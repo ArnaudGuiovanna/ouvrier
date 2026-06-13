@@ -122,7 +122,7 @@ func DeployEnvironment(ctx context.Context, opts EnvOpts, progress ProgressWrite
 	}
 	// Defense in depth: whatever layer produced an error, the rendered
 	// message never contains the admin token read from the env file.
-	return maskTokenErr(p.run(ctx), p.token)
+	return MaskTokenErr(p.run(ctx), p.token)
 }
 
 // envDeploy is the fully resolved deploy plan: everything local is done
@@ -158,7 +158,7 @@ type envDeploy struct {
 	invPath  string
 }
 
-func (p *envDeploy) mask(s string) string { return maskToken(s, p.token) }
+func (p *envDeploy) mask(s string) string { return MaskToken(s, p.token) }
 
 // planEnvDeploy performs step 1 (local preflight + build) and resolves every
 // value the per-host loop needs. It fails fast — before the build — when any
@@ -179,7 +179,7 @@ func planEnvDeploy(ctx context.Context, opts EnvOpts, progress ProgressWriter) (
 	// remote command, so an untrusted host fails fast.
 	for _, raw := range opts.Hosts {
 		_, host := splitUserHost(raw)
-		if _, _, err := requirePinnedHost(opts.Dir, host, opts.Port); err != nil {
+		if _, _, err := RequirePinnedHost(opts.Dir, host, opts.Port); err != nil {
 			return nil, err
 		}
 	}
@@ -377,7 +377,7 @@ func (p *envDeploy) deployHost(ctx context.Context, rawHost string) error {
 	if p.opts.User != "" {
 		hostUser = p.opts.User
 	}
-	knownHosts, pinnedHost, err := requirePinnedHost(p.opts.Dir, host, p.opts.Port)
+	knownHosts, pinnedHost, err := RequirePinnedHost(p.opts.Dir, host, p.opts.Port)
 	if err != nil {
 		return err
 	}
@@ -442,7 +442,7 @@ func (p *envDeploy) deployHost(ctx context.Context, rawHost string) error {
 		}
 	}
 	remoteBin := p.releaseDir + "/bin/" + p.name
-	fmt.Fprintf(p.out, "scp %s -> %s:%s\n", p.binPath, connect.userHost(), remoteBin)
+	fmt.Fprintf(p.out, "scp %s -> %s:%s\n", p.binPath, connect.UserHost(), remoteBin)
 	if err := runner.SCP(ctx, connect, p.binPath, remoteBin); err != nil {
 		return fmt.Errorf("%w: %s: upload release binary: %w", ErrDeploy, host, err)
 	}
@@ -459,7 +459,7 @@ func (p *envDeploy) deployHost(ctx context.Context, rawHost string) error {
 	// Step 4: ship the dotenv atomically — stage under <root>, then the
 	// privileged install promotes it to shared/.env with root:svc 0640.
 	stage := EnvStagePath(p.root)
-	fmt.Fprintf(p.out, "ship env file -> %s:%s/shared/.env\n", connect.userHost(), p.root)
+	fmt.Fprintf(p.out, "ship env file -> %s:%s/shared/.env\n", connect.UserHost(), p.root)
 	if err := runner.SCPData(ctx, connect, p.envPayload, stage); err != nil {
 		return fmt.Errorf("%w: %s: stage env file: %w", ErrDeploy, host, err)
 	}
@@ -620,7 +620,7 @@ func runHealthGate(ctx context.Context, runner RemoteRunner, connect ConnectOpts
 // healthGateCommand renders the on-host probe. -K - makes curl read its
 // config (the Authorization header) from stdin; -f maps non-2xx to a failure.
 func healthGateCommand(port string) string {
-	return "curl -fsS -o /dev/null --max-time 5 -K - " + shellQuote("http://127.0.0.1:"+port+"/admin/health")
+	return "curl -fsS -o /dev/null --max-time 5 -K - " + ShellQuote("http://127.0.0.1:"+port+"/admin/health")
 }
 
 // curlAuthConfig renders the curl config carrying the bearer token, with
@@ -693,7 +693,7 @@ func uploadRuntimeAssets(ctx context.Context, ssh RemoteRunner, connect ConnectO
 		}
 		remoteAssetPath := remoteRoot + "/" + filepath.ToSlash(rel)
 		if entry.IsDir() {
-			mkdirCmd := fmt.Sprintf("mkdir -p -- %s", shellQuote(remoteAssetPath))
+			mkdirCmd := fmt.Sprintf("mkdir -p -- %s", ShellQuote(remoteAssetPath))
 			if _, err := ssh.SSH(ctx, connect, mkdirCmd); err != nil {
 				return fmt.Errorf("%w: create remote runtime asset directory: %w", ErrDeploy, err)
 			}
@@ -706,7 +706,7 @@ func uploadRuntimeAssets(ctx context.Context, ssh RemoteRunner, connect ConnectO
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		fmt.Fprintf(out, "scp %s -> %s:%s\n", rel, connect.userHost(), remoteAssetPath)
+		fmt.Fprintf(out, "scp %s -> %s:%s\n", rel, connect.UserHost(), remoteAssetPath)
 		if err := ssh.SCP(ctx, connect, path, remoteAssetPath); err != nil {
 			return fmt.Errorf("%w: upload runtime asset %s: %w", ErrDeploy, rel, err)
 		}

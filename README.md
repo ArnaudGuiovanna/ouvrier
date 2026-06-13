@@ -518,6 +518,7 @@ ouvrier deploy ssh --host HOST [--dir .] (same flags; bypasses the registry)
 ouvrier deploy docker [--dir .] [--image IMAGE] [--tag TAG] [--push]
 ouvrier fleet ls
 ouvrier fleet rm <name> [--host HOST]
+ouvrier console [--addr 127.0.0.1:7333] [--fleet PATH] [--token TOKEN] [--no-open]
 ```
 
 `ouvrier new` opens the Bubble Tea v2 project wizard. The wizard and
@@ -544,6 +545,26 @@ includes `skills/` when present. `ouvrier fleet` lists or prunes the recorded de
 inventory at `~/.config/ouvrier/deployments.json` (override with
 `OUVRIER_FLEET_PATH` or `OUVRIER_CONFIG_DIR`); it is a secret-free cache for
 tooling — live `/admin/health` is truth.
+
+`ouvrier console` starts a loopback-only web console (default
+`127.0.0.1:7333`, override with `--addr` / `OUVRIER_CONSOLE_ADDR`) that layers
+over the exact same SSH tunnels and `/admin/*` APIs as the headless commands:
+fleet overview with live tunnel state (`fleet ls` + tunnel status), a worker
+detail view (status/plans/traces, an SSE event tail, approvals, manual
+trigger — proxied to `/admin/*`), a fan-out overview (`status --all`), an event
+fan-in (`logs`), and a streamed deploy (`deploy <env>`). Every console
+capability has a headless CLI equivalent, enforced by a parity test. Security:
+the bind is refused on a non-loopback address unless `OUVRIER_CONSOLE_INSECURE=1`;
+a random 256-bit per-session token is printed in the URL fragment, held only in
+browser memory, sent as `Authorization: Bearer`, and constant-time compared;
+there are zero cookies, a Host-header allowlist and Origin rejection
+(DNS-rebinding defense), `Cache-Control: no-store` on the API, and a strict CSP
+plus `X-Frame-Options: DENY` on the SPA. The worker admin token is fetched into
+memory by the tunnel manager and injected server-side — it never reaches the
+browser. The SPA is vendored Preact + HTM ESM served from `//go:embed`: `go
+build` alone produces the whole console, with no npm/bundler in the repo or CI.
+`--fleet` overrides the inventory path and `--no-open` suppresses the browser
+auto-open.
 
 ## Reference Examples
 

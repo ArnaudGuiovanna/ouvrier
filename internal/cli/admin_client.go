@@ -1,96 +1,35 @@
 package cli
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"strings"
-	"time"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/adminapi"
 )
 
-const (
-	defaultAdminURL     = "http://127.0.0.1:8080"
-	defaultAdminTimeout = 10 * time.Second
-)
+// defaultAdminURL is re-exported from adminapi for the flag defaults.
+const defaultAdminURL = adminapi.DefaultAdminURL
 
-// adminClient performs authenticated GET requests against a worker's
-// /admin/* endpoints.
-type adminClient struct {
-	baseURL string
-	token   string
-	http    *http.Client
-}
+// adminClient is a thin CLI-side alias over adminapi.Client. The request
+// building, auth header, redaction, and JSON decoding all live in adminapi so
+// the future console shares them; the CLI keeps this name so its call sites and
+// tests read unchanged.
+type adminClient = adminapi.Client
 
+// adminHTTPError aliases adminapi.HTTPError so existing CLI error handling and
+// tests (errors.As against adminHTTPError) keep working after the extraction.
+type adminHTTPError = adminapi.HTTPError
+
+// newAdminClient builds a local --url-mode client: it targets baseURL and adds
+// Authorization: Bearer <token> itself (token may be empty). This is the
+// byte-identical local path; fleet mode builds the Client over a tunnel
+// transport with an empty token instead (see fleet_run.go).
 func newAdminClient(baseURL, token string) *adminClient {
-	url := strings.TrimSpace(baseURL)
-	if url == "" {
-		url = defaultAdminURL
-	}
-	url = strings.TrimRight(url, "/")
-	return &adminClient{
-		baseURL: url,
-		token:   strings.TrimSpace(token),
-		http:    &http.Client{Timeout: defaultAdminTimeout},
-	}
+	return adminapi.NewClient(nil, baseURL, token)
 }
 
-// getJSON issues GET against the supplied path (with optional raw query
-// string) and decodes the JSON response into out. The Authorization header
-// is sent when a token is configured; nothing about the header is logged or
-// returned to callers.
-func (c *adminClient) getJSON(ctx context.Context, path string, out any) error {
-	if c == nil {
-		return fmt.Errorf("admin client is nil")
-	}
-	endpoint := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("build admin request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("call %s: %w", redactURL(endpoint), err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return adminHTTPError{
-			Status: resp.StatusCode,
-			URL:    redactURL(endpoint),
-			Body:   strings.TrimSpace(string(body)),
-		}
-	}
-
-	if out == nil {
-		return nil
-	}
-	dec := json.NewDecoder(resp.Body)
-	dec.UseNumber()
-	if err := dec.Decode(out); err != nil {
-		return fmt.Errorf("decode admin response: %w", err)
-	}
-	return nil
-}
-
-type adminHTTPError struct {
-	Status int
-	URL    string
-	Body   string
-}
-
-func (e adminHTTPError) Error() string {
-	if e.Body == "" {
-		return fmt.Sprintf("admin request %s returned HTTP %d", e.URL, e.Status)
-	}
-	return fmt.Sprintf("admin request %s returned HTTP %d: %s", e.URL, e.Status, e.Body)
+// redactURL is retained for callers/tests in the cli package.
+func redactURL(raw string) string {
+	return adminapi.RedactURL(raw)
 }
 
 // reorderFlagsFirst returns args with all -flag/--flag tokens (and their
@@ -102,7 +41,9 @@ func reorderFlagsFirst(args []string) []string {
 	flags := make([]string, 0, len(args))
 	positional := make([]string, 0, len(args))
 
-	knownBool := map[string]struct{}{} // none of our commands use bool flags positionally today.
+	// --all is the only boolean flag these commands accept; it never consumes
+	// the following token as a value.
+	knownBool := map[string]struct{}{"all": {}}
 	i := 0
 	for i < len(args) {
 		a := args[i]
@@ -127,18 +68,4 @@ func reorderFlagsFirst(args []string) []string {
 		i++
 	}
 	return append(flags, positional...)
-}
-
-// redactURL strips userinfo from a URL so we never leak credentials embedded
-// in baseURL via error messages.
-func redactURL(raw string) string {
-	at := strings.Index(raw, "@")
-	if at < 0 {
-		return raw
-	}
-	scheme := strings.Index(raw, "://")
-	if scheme < 0 || scheme > at {
-		return raw
-	}
-	return raw[:scheme+3] + "***@" + raw[at+1:]
 }
