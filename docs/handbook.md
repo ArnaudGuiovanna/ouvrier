@@ -14,7 +14,7 @@ commands.
 ## Version And Requirements
 
 - Ouvrier version: current `main` includes v0.1, v0.2, and v0.3 milestone work;
-  the latest tagged release is `v0.3.0`.
+  the latest tagged release is `v0.3.1`.
 - Go version: Go 1.25 or newer.
 - Public module path: `github.com/ArnaudGuiovanna/ouvrier`.
 - Runtime package name: `ovr`.
