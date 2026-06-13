@@ -70,18 +70,18 @@ type ConnectOpts struct {
 	KnownHosts string
 }
 
-// userHost renders the host portion in user@host form. Empty user yields
+// UserHost renders the host portion in user@host form. Empty user yields
 // just the host, matching ssh/scp's default behavior.
-func (o ConnectOpts) userHost() string {
+func (o ConnectOpts) UserHost() string {
 	if o.User == "" {
 		return o.Host
 	}
 	return o.User + "@" + o.Host
 }
 
-// maskToken returns s with every occurrence of token replaced by "***" so
+// MaskToken returns s with every occurrence of token replaced by "***" so
 // the admin token never reaches operator terminals or CI logs.
-func maskToken(s, token string) string {
+func MaskToken(s, token string) string {
 	if token == "" {
 		return s
 	}
@@ -95,23 +95,23 @@ type maskedError struct {
 	token string
 }
 
-func (e *maskedError) Error() string { return maskToken(e.err.Error(), e.token) }
+func (e *maskedError) Error() string { return MaskToken(e.err.Error(), e.token) }
 func (e *maskedError) Unwrap() error { return e.err }
 
-// maskTokenErr wraps err so its message never contains token. It returns err
+// MaskTokenErr wraps err so its message never contains token. It returns err
 // unchanged when there is nothing to mask.
-func maskTokenErr(err error, token string) error {
+func MaskTokenErr(err error, token string) error {
 	if err == nil || token == "" || !strings.Contains(err.Error(), token) {
 		return err
 	}
 	return &maskedError{err: err, token: token}
 }
 
-// requirePinnedHost enforces host-key pinning: the committed
+// RequirePinnedHost enforces host-key pinning: the committed
 // ouvrier.known_hosts at the project root must already hold an entry for the
 // deploy target. It returns the absolute known_hosts path and the canonical
 // hostname used for pinning.
-func requirePinnedHost(dir, host string, port int) (string, string, error) {
+func RequirePinnedHost(dir, host string, port int) (string, string, error) {
 	knownHosts, err := filepath.Abs(filepath.Join(dir, KnownHostsFile))
 	if err != nil {
 		return "", "", fmt.Errorf("%w: resolve %s: %w", ErrDeploy, KnownHostsFile, err)
@@ -185,33 +185,37 @@ func remapHostKeyErr(err error, host string) error {
 	return err
 }
 
-// shellQuote returns a single-quoted POSIX shell literal. Inner single quotes
+// ShellQuote returns a single-quoted POSIX shell literal. Inner single quotes
 // are encoded using the standard '\” trick. This is safer than relying on
 // the caller to pick characters compatible with bare ssh strings.
-func shellQuote(s string) string {
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// DefaultRemoteRunner returns the OpenSSH-backed RemoteRunner used when a
+// caller supplies no seam of its own (internal/tunnel's remote token fetch).
+func DefaultRemoteRunner() RemoteRunner { return defaultRemoteRunner{} }
 
 // defaultRemoteRunner shells out to the system ssh/scp binaries.
 type defaultRemoteRunner struct{}
 
 func (defaultRemoteRunner) SSH(ctx context.Context, opts ConnectOpts, command string) (string, error) {
 	args := sshBaseArgs(opts)
-	args = append(args, opts.userHost(), command)
+	args = append(args, opts.UserHost(), command)
 	stdout, _, err := runHostCommand(ctx, "ssh", args, nil)
 	return stdout, err
 }
 
 func (defaultRemoteRunner) SSHIn(ctx context.Context, opts ConnectOpts, command string, stdin []byte) (string, error) {
 	args := sshBaseArgs(opts)
-	args = append(args, opts.userHost(), command)
+	args = append(args, opts.UserHost(), command)
 	stdout, _, err := runHostCommand(ctx, "ssh", args, stdin)
 	return stdout, err
 }
 
 func (defaultRemoteRunner) SCP(ctx context.Context, opts ConnectOpts, localPath, remotePath string) error {
 	args := scpBaseArgs(opts)
-	args = append(args, localPath, opts.userHost()+":"+remotePath)
+	args = append(args, localPath, opts.UserHost()+":"+remotePath)
 	_, _, err := runHostCommand(ctx, "scp", args, nil)
 	return err
 }
@@ -241,7 +245,7 @@ func sshBaseArgs(opts ConnectOpts) []string {
 	if opts.Port != 0 {
 		args = append(args, "-p", fmt.Sprintf("%d", opts.Port))
 	}
-	return append(args, connectionHardeningArgs(opts)...)
+	return append(args, ConnectionHardeningArgs(opts)...)
 }
 
 func scpBaseArgs(opts ConnectOpts) []string {
@@ -249,13 +253,13 @@ func scpBaseArgs(opts ConnectOpts) []string {
 	if opts.Port != 0 {
 		args = append(args, "-P", fmt.Sprintf("%d", opts.Port))
 	}
-	return append(args, connectionHardeningArgs(opts)...)
+	return append(args, ConnectionHardeningArgs(opts)...)
 }
 
-// connectionHardeningArgs are the non-negotiable ssh/scp options shared by
+// ConnectionHardeningArgs are the non-negotiable ssh/scp options shared by
 // every remote invocation: strict pinned host-key checking and no interactive
 // or password-based authentication path, ever.
-func connectionHardeningArgs(opts ConnectOpts) []string {
+func ConnectionHardeningArgs(opts ConnectOpts) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=yes",
