@@ -10,6 +10,10 @@ package deploy
 //     static cross-compile (--target passthrough), sha256 + RELEASE.json.
 //  2. Remote preflight: sudo -n probe (actionable error), then one ssh:
 //     systemd check, service user, layout mkdir, .deploy.lock flock.
+//
+// Deliberate file-size exception (AGENTS.md): the plan + per-host loop +
+// rollback form one sequential protocol whose steps are only meaningful in
+// order; splitting them across files would hide the sequence the tests pin.
 //  3. Upload the release (binary, RELEASE.json, skills/ assets) into the
 //     immutable releases/<id>/ dir; verify the remote sha256; chmod 0755.
 //  4. Ship the dotenv atomically: stage <root>/.env.new, then a privileged
@@ -407,6 +411,8 @@ func (p *envDeploy) deployHost(ctx context.Context, rawHost string) error {
 		if owner == "" || len(strings.Fields(owner)) != 1 {
 			return fmt.Errorf("%w: %s: could not determine the remote deploy user (`id -un` returned %q); pass --user or use user@host", ErrDeploy, host, owner)
 		}
+		// Keep the inventory record faithful to the account actually used.
+		hostUser = owner
 	}
 
 	// Step 2b: one ssh — systemd check, service user, layout, deploy lock.
