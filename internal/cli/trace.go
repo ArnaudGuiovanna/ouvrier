@@ -20,6 +20,8 @@ func (app *App) runTraceCommand(ctx context.Context, args []string) error {
 	flags.SetOutput(io.Discard)
 	urlFlag := flags.String("url", defaultAdminURL, "worker base URL")
 	token := flags.String("token", "", "admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)")
+	worker := flags.String("worker", "", "target a deployed worker by name via a one-shot tunnel")
+	all := flags.Bool("all", false, "fan out across every deployed worker")
 	// Move flag tokens ahead of any positional <exec-id> so the std flag
 	// package parses them. Without this, `trace exec-42 --url ...` would
 	// stop at the positional and ignore --url.
@@ -34,6 +36,27 @@ func (app *App) runTraceCommand(ctx context.Context, args []string) error {
 	if execID == "" {
 		return fmt.Errorf("%w: <exec-id> cannot be empty", ErrUsage)
 	}
+	endpoint := "/admin/traces/" + url.PathEscape(execID)
+
+	sel := fleetSelector{worker: *worker, all: *all}
+	if err := sel.validate(flagWasSet(flags, "url")); err != nil {
+		return err
+	}
+	if sel.active() {
+		targets, err := resolveFleetTargets(sel)
+		if err != nil {
+			return err
+		}
+		call := func(ctx context.Context, _ string, client *adminClient, out io.Writer) error {
+			var payload map[string]any
+			if err := client.GetJSON(ctx, endpoint, &payload); err != nil {
+				return err
+			}
+			printTraceDetail(out, execID, payload)
+			return nil
+		}
+		return app.runFleet(ctx, targets, fleetOptions{token: *token}, call)
+	}
 
 	adminToken, err := resolveAdminToken(*token)
 	if err != nil {
@@ -42,8 +65,7 @@ func (app *App) runTraceCommand(ctx context.Context, args []string) error {
 	client := newAdminClient(*urlFlag, adminToken)
 
 	var payload map[string]any
-	endpoint := "/admin/traces/" + url.PathEscape(execID)
-	if err := client.getJSON(ctx, endpoint, &payload); err != nil {
+	if err := client.GetJSON(ctx, endpoint, &payload); err != nil {
 		return err
 	}
 

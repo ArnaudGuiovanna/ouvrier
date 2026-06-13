@@ -81,7 +81,16 @@ Usage: ouvrier status [flags]
 Options:
       --url string     Worker base URL (default "http://localhost:8080")
       --token string   Admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)
+      --worker string  Target a deployed worker by name over a one-shot tunnel
+      --all            Fan out across every deployed worker (partial failures
+                       are reported per worker; the command exits nonzero if any
+                       worker failed)
   -h, --help           Show this help message
+
+In fleet mode (--worker/--all) the worker base URL and token come from the
+deployments inventory and the SSH tunnel; --url cannot be combined with
+--worker/--all, and --worker and --all are mutually exclusive. Fleet status also
+surfaces each worker's tunnel state and cron_leases.
 `
 
 const logsHelp = `List the last N traced executions of a running worker.
@@ -92,7 +101,14 @@ Options:
       --url string     Worker base URL (default "http://localhost:8080")
       --token string   Admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)
       --last int       Number of executions to fetch (default 20)
+      --worker string  Target a deployed worker by name over a one-shot tunnel
+      --all            Fan out across every deployed worker (partial failures
+                       are reported per worker; nonzero exit if any failed)
   -h, --help           Show this help message
+
+In fleet mode (--worker/--all) targets come from the deployments inventory over
+SSH tunnels; --url cannot be combined with --worker/--all, and --worker and
+--all are mutually exclusive.
 `
 
 const traceHelp = `Print the full event timeline for one execution.
@@ -102,7 +118,14 @@ Usage: ouvrier trace [flags] <exec-id>
 Options:
       --url string     Worker base URL (default "http://localhost:8080")
       --token string   Admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)
+      --worker string  Target a deployed worker by name over a one-shot tunnel
+      --all            Fan out across every deployed worker (partial failures
+                       are reported per worker; nonzero exit if any failed)
   -h, --help           Show this help message
+
+In fleet mode (--worker/--all) targets come from the deployments inventory over
+SSH tunnels; --url cannot be combined with --worker/--all, and --worker and
+--all are mutually exclusive.
 `
 
 const addHelp = `Add an agent, trigger, tool, or skill to an existing Ouvrier project.
