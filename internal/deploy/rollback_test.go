@@ -127,20 +127,7 @@ func TestRollbackAfterDeployUsesRecordedPrevious(t *testing.T) {
 	if _, _, err := runDeployEnv(t, baseEnvOpts(t, dir, deployRemote)); err != nil {
 		t.Fatalf("DeployEnvironment() error = %v", err)
 	}
-	var ledgerLine string
-	for _, cmd := range deployRemote.sshCommands() {
-		if !strings.Contains(cmd, ">> '/opt/ouvrier/demo/deploys.log'") {
-			continue
-		}
-		_, rest, ok := strings.Cut(cmd, `printf '%s\n' '`)
-		if !ok {
-			t.Fatalf("unexpected ledger append shape: %q", cmd)
-		}
-		ledgerLine, _, _ = strings.Cut(rest, `' >> `)
-	}
-	if ledgerLine == "" {
-		t.Fatalf("deploy appended no ledger line:\n%s", deployRemote.callLog())
-	}
+	ledgerLine := appendedLedgerLine(t, deployRemote)
 
 	rbRemote := &fakeRemote{stdoutFor: map[string]string{
 		"tail -n 1": ledgerLine + "\n",
@@ -157,6 +144,65 @@ func TestRollbackAfterDeployUsesRecordedPrevious(t *testing.T) {
 	)
 }
 
+// appendedLedgerLine extracts the line a flow appended to deploys.log from
+// the recorded printf command — the cross-flow ledger format contract.
+func appendedLedgerLine(t *testing.T, remote *fakeRemote) string {
+	t.Helper()
+	var line string
+	for _, cmd := range remote.sshCommands() {
+		if !strings.Contains(cmd, ">> '/opt/ouvrier/demo/deploys.log'") {
+			continue
+		}
+		_, rest, ok := strings.Cut(cmd, `printf '%s\n' '`)
+		if !ok {
+			t.Fatalf("unexpected ledger append shape: %q", cmd)
+		}
+		line, _, _ = strings.Cut(rest, `' >> `)
+	}
+	if line == "" {
+		t.Fatalf("no ledger line appended:\n%s", remote.callLog())
+	}
+	return line
+}
+
+// Acceptance: chained rollback toggles like `cd -`. A first rollback moves
+// current B→A and appends a rollback ledger entry recording previous=
+// releases/<B>; running rollback again against that updated ledger repoints
+// current back at B — fed verbatim from the first rollback's own append, not
+// a hand-written fixture.
+func TestRollbackTwiceTogglesBetweenReleases(t *testing.T) {
+	dir := writeDeployFixture(t)
+
+	// First rollback: the ledger says B replaced A, so current goes B→A.
+	first := rollbackRemote()
+	if _, _, err := runRollback(t, baseRollbackOpts(t, dir, first)); err != nil {
+		t.Fatalf("first RollbackEnvironment() error = %v", err)
+	}
+	line := appendedLedgerLine(t, first)
+	if want := fixturePrevReleaseID + " previous=releases/" + fixtureReleaseID + " rollback"; !strings.Contains(line, want) {
+		t.Fatalf("first rollback ledger line = %q, want it to contain %q", line, want)
+	}
+
+	// Second rollback: the host now serves the rollback entry as its last
+	// ledger line, and current points at A.
+	second := &fakeRemote{stdoutFor: map[string]string{
+		"tail -n 1": line + "\n",
+		"readlink":  "releases/" + fixturePrevReleaseID + "\n",
+	}}
+	out, _, err := runRollback(t, baseRollbackOpts(t, dir, second))
+	if err != nil {
+		t.Fatalf("second RollbackEnvironment() error = %v", err)
+	}
+	assertInOrder(t, second.callLog(),
+		"ln -sfn -- 'releases/"+fixtureReleaseID+"'",
+		"sshin@h: curl",
+		"printf '%s\\n' '2026-06-12T10:15:00Z "+fixtureReleaseID+" previous=releases/"+fixturePrevReleaseID+" rollback' >> '/opt/ouvrier/demo/deploys.log'",
+	)
+	if !strings.Contains(out.String(), "rolled back demo on h to "+fixtureReleaseID) {
+		t.Fatalf("missing toggle-back success line:\n%s", out.String())
+	}
+}
+
 // Acceptance: no previous release (first deploy, previous=-) refuses with an
 // actionable message and leaves current untouched; the lock is still
 // acquired and released.
@@ -169,7 +215,34 @@ func TestRollbackRefusesWhenNoPrevious(t *testing.T) {
 	if !errors.Is(err, ErrDeploy) {
 		t.Fatalf("error = %v, want ErrDeploy", err)
 	}
-	for _, want := range []string{"no previous release", "first deploy", "current is untouched", "ouvrier deploy"} {
+	for _, want := range []string{"release " + fixtureReleaseID, "no previous release", "first deploy", "current is untouched", "ouvrier deploy"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	}
+	assertCurrentUntouched(t, remote)
+}
+
+// Acceptance: a previous= value that is not a release this deploy created
+// (hand-edited or corrupted ledger) refuses with corruption framing — fix or
+// remove the line — distinct from the first-deploy previous=- refusal, and
+// leaves current untouched.
+func TestRollbackRefusesNonReleasePrevious(t *testing.T) {
+	dir := writeDeployFixture(t)
+	remote := &fakeRemote{stdoutFor: map[string]string{
+		"tail -n 1": "2026-06-12T10:15:00Z " + fixtureReleaseID + " previous=releases/garbage\n",
+	}}
+	_, _, err := runRollback(t, baseRollbackOpts(t, dir, remote))
+	if !errors.Is(err, ErrDeploy) {
+		t.Fatalf("error = %v, want ErrDeploy", err)
+	}
+	for _, want := range []string{
+		`previous="releases/garbage"`,
+		"not a release this deploy created",
+		"current is untouched",
+		"fix or remove the line",
+		"ouvrier deploy",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %v, want %q", err, want)
 		}

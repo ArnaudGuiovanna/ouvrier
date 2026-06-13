@@ -327,9 +327,15 @@ func (p *envRollback) rollbackHost(ctx context.Context, rawHost string) (string,
 	}
 	prevID, ok := previousReleaseID(p.root, previousTarget)
 	if !ok {
+		if previousTarget == "-" {
+			return "", fmt.Errorf(
+				"%w: %s: the last deploy (release %s) recorded no previous release — a first deploy has nothing to roll back to; current is untouched. Deploy a known-good revision instead with `ouvrier deploy`",
+				ErrDeploy, host, deployedID,
+			)
+		}
 		return "", fmt.Errorf(
-			"%w: %s: the last deploy (release %s) recorded no previous release (previous=%s) — a first deploy has nothing to roll back to; current is untouched. Deploy a known-good revision instead with `ouvrier deploy`",
-			ErrDeploy, host, deployedID, previousTarget,
+			"%w: %s: the last %s entry records previous=%q, which is not a release this deploy created; current is untouched — fix or remove the line, or redeploy a known-good revision with `ouvrier deploy`",
+			ErrDeploy, host, logPath, previousTarget,
 		)
 	}
 
