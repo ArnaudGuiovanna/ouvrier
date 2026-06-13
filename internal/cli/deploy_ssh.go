@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
@@ -21,6 +23,13 @@ type sshConfig struct {
 	HealthURL  string // path or full URL; defaults to /admin/health
 	AdminToken string // masked in logs/output
 	Identity   string // optional ssh identity file (-i) for agent-less CI
+
+	// UnitSandbox toggles the hardened release-layout unit's sandbox block
+	// ("on"/"off"; empty defers to pip.yaml deploy.sandbox, default on).
+	UnitSandbox string
+	// PrintSudoers prints the least-privilege sudoers snippet for this
+	// project and exits without deploying (no host required).
+	PrintSudoers bool
 }
 
 func (app *App) runDeploySSHCommand(ctx context.Context, args []string) error {
@@ -33,17 +42,49 @@ func (app *App) runDeploySSHCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.PrintSudoers {
+		return app.printDeploySudoers(cfg)
+	}
 	return deploy.DeploySSH(ctx, deploy.Opts{
-		Dir:        cfg.Dir,
-		Host:       cfg.Host,
-		User:       cfg.User,
-		Port:       cfg.Port,
-		Path:       cfg.Path,
-		Service:    cfg.Service,
-		HealthURL:  cfg.HealthURL,
-		AdminToken: cfg.AdminToken,
-		Identity:   cfg.Identity,
+		Dir:         cfg.Dir,
+		Host:        cfg.Host,
+		User:        cfg.User,
+		Port:        cfg.Port,
+		Path:        cfg.Path,
+		Service:     cfg.Service,
+		HealthURL:   cfg.HealthURL,
+		AdminToken:  cfg.AdminToken,
+		Identity:    cfg.Identity,
+		UnitSandbox: cfg.UnitSandbox,
 	}, deploy.ProgressWriter{Out: app.out, Err: app.errOut})
+}
+
+// printDeploySudoers renders the least-privilege sudoers snippet for the
+// project in cfg.Dir and exits without touching any host. The deploy user in
+// the snippet comes from --user, the user@ part of --host, or the "deploy"
+// placeholder.
+func (app *App) printDeploySudoers(cfg sshConfig) error {
+	data, err := os.ReadFile(filepath.Join(cfg.Dir, "pip.yaml"))
+	if err != nil {
+		return fmt.Errorf("%w: --print-sudoers needs the project's pip.yaml: %v", ErrDeploy, err)
+	}
+	name, err := deploy.ParseProjectName(data)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrDeploy, err)
+	}
+	user := cfg.User
+	if user == "" {
+		if at := strings.Index(cfg.Host, "@"); at > 0 {
+			user = cfg.Host[:at]
+		}
+	}
+	fmt.Fprint(app.out, deploy.SudoersSnippet(deploy.SudoersParams{
+		DeployUser: user,
+		Name:       name,
+		Service:    cfg.Service,
+		Root:       cfg.Path,
+	}))
+	return nil
 }
 
 func parseDeploySSHFlags(args []string) (sshConfig, error) {
@@ -153,6 +194,26 @@ func parseDeploySSHFlags(args []string) (sshConfig, error) {
 		case strings.HasPrefix(arg, "--identity="):
 			cfg.Identity = strings.TrimPrefix(arg, "--identity=")
 			i++
+		case arg == "--unit-sandbox":
+			value, advance, err := flagValue(args, i, "--unit-sandbox")
+			if err != nil {
+				return sshConfig{}, err
+			}
+			if err := validateUnitSandbox(value); err != nil {
+				return sshConfig{}, err
+			}
+			cfg.UnitSandbox = value
+			i += advance
+		case strings.HasPrefix(arg, "--unit-sandbox="):
+			value := strings.TrimPrefix(arg, "--unit-sandbox=")
+			if err := validateUnitSandbox(value); err != nil {
+				return sshConfig{}, err
+			}
+			cfg.UnitSandbox = value
+			i++
+		case arg == "--print-sudoers":
+			cfg.PrintSudoers = true
+			i++
 		default:
 			return sshConfig{}, fmt.Errorf("%w: deploy ssh does not accept argument %q", ErrUsage, arg)
 		}
@@ -160,13 +221,25 @@ func parseDeploySSHFlags(args []string) (sshConfig, error) {
 	if cfg.Dir == "" {
 		cfg.Dir = "."
 	}
-	if strings.TrimSpace(cfg.Host) == "" {
+	// --print-sudoers is a local render: no host needed.
+	if strings.TrimSpace(cfg.Host) == "" && !cfg.PrintSudoers {
 		return sshConfig{}, fmt.Errorf("%w: deploy ssh requires --host", ErrUsage)
 	}
 	if cfg.HealthURL == "" {
 		cfg.HealthURL = "/admin/health"
 	}
 	return cfg, nil
+}
+
+// validateUnitSandbox rejects --unit-sandbox values other than on/off at
+// parse time so typos fail as usage errors before any work happens.
+func validateUnitSandbox(value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on", "off":
+		return nil
+	default:
+		return fmt.Errorf("%w: --unit-sandbox must be \"on\" or \"off\", got %q", ErrUsage, value)
+	}
 }
 
 func flagValue(args []string, i int, name string) (string, int, error) {

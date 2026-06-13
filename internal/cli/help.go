@@ -247,6 +247,10 @@ Options:
       --health-url string   Health endpoint path or full URL (default "/admin/health")
       --admin-token string  Admin bearer token forwarded to the health probe (masked in logs)
       --identity string     SSH identity file passed as -i to ssh/scp (agent-less CI)
+      --unit-sandbox string Systemd hardening for the release-layout unit: "on" (default) or
+                            "off" (escape hatch, same as pip.yaml deploy sandbox: off)
+      --print-sudoers       Print the least-privilege sudoers snippet for this project's
+                            deploy flow and exit without deploying (no --host needed)
   -h, --help                Show this help message
 
 The target host must first be pinned with "ouvrier server trust <host>": every

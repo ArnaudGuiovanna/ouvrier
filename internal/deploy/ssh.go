@@ -27,6 +27,12 @@ type Opts struct {
 	HealthURL  string // path or full URL; defaults to /admin/health
 	AdminToken string // masked in logs/output
 	Identity   string // optional ssh identity file (-i) for agent-less CI
+	// UnitSandbox is the systemd hardening toggle ("", "on" or "off",
+	// --unit-sandbox / pip.yaml deploy.sandbox). It is validated here but
+	// only takes effect with the hardened release-layout unit (RenderUnitFile)
+	// used by the orchestrated deploy flow; the legacy unit rendered by this
+	// flow has no hardening block to disable.
+	UnitSandbox string
 
 	// GoRun is the `go build` seam; nil means DefaultGoRunner.
 	GoRun GoRunner
@@ -110,6 +116,9 @@ func deploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	if opts.HealthURL == "" {
 		opts.HealthURL = "/admin/health"
 	}
+	if _, err := ResolveSandbox(opts.UnitSandbox, ""); err != nil {
+		return err
+	}
 	goRun := opts.GoRun
 	if goRun == nil {
 		goRun = DefaultGoRunner
@@ -149,7 +158,7 @@ func deploySSH(ctx context.Context, opts Opts, progress ProgressWriter) error {
 	// Strip the suffix once so the unit path on disk, the install target in
 	// /etc/systemd/system, and systemctl restart all agree on a single
 	// ".service".
-	serviceName := strings.TrimSuffix(service, ".service")
+	serviceName := CanonicalServiceName(service)
 
 	connect := ConnectOpts{
 		Host:       opts.Host,
@@ -351,9 +360,13 @@ func buildHealthCheckCommand(healthURL, adminToken string) string {
 	return fmt.Sprintf("curl -fsS --max-time 5%s %s", auth, shellQuote(url))
 }
 
-// systemdUnitParams collects values used to render the project's systemd
-// unit file. The unit is intentionally simple: it runs the binary out of the
-// install directory, loads .env via EnvironmentFile, and restarts on failure.
+// systemdUnitParams collects values used to render the legacy single-binary
+// flow's systemd unit file. The unit is intentionally simple: it runs the
+// binary out of the install directory, loads .env via EnvironmentFile, and
+// restarts on failure. The release-layout deploy flow (#45) uses the
+// hardened RenderUnitFile in systemd_unit.go instead; this one stays only
+// until DeploySSH is migrated to the release layout, because its unit points
+// at paths (<path>/bin/<name>, <path>/.env) that only this flow creates.
 type systemdUnitParams struct {
 	Name        string
 	Service     string
