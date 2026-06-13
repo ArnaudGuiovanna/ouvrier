@@ -22,11 +22,25 @@ func (app *App) runStatusCommand(ctx context.Context, args []string) error {
 	flags.SetOutput(io.Discard)
 	url := flags.String("url", defaultAdminURL, "worker base URL")
 	token := flags.String("token", "", "admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)")
+	worker := flags.String("worker", "", "target a deployed worker by name via a one-shot tunnel")
+	all := flags.Bool("all", false, "fan out across every deployed worker")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", ErrUsage, err)
 	}
 	if flags.NArg() > 0 {
 		return fmt.Errorf("%w: status does not accept positional arguments", ErrUsage)
+	}
+
+	sel := fleetSelector{worker: *worker, all: *all}
+	if err := sel.validate(flagWasSet(flags, "url")); err != nil {
+		return err
+	}
+	if sel.active() {
+		targets, err := resolveFleetTargets(sel)
+		if err != nil {
+			return err
+		}
+		return app.runFleet(ctx, targets, fleetOptions{token: *token}, fleetStatusCall)
 	}
 
 	adminToken, err := resolveAdminToken(*token)
@@ -36,11 +50,32 @@ func (app *App) runStatusCommand(ctx context.Context, args []string) error {
 	client := newAdminClient(*url, adminToken)
 
 	var payload map[string]any
-	if err := client.getJSON(ctx, "/admin/status", &payload); err != nil {
+	if err := client.GetJSON(ctx, "/admin/status", &payload); err != nil {
 		return err
 	}
 
 	printStatusSummary(app.out, payload)
+	return nil
+}
+
+// fleetStatusCall renders one worker's status in fleet mode. It also pulls
+// cron_leases from /admin/health so the fleet view surfaces leader leases even
+// when /admin/status omits them.
+func fleetStatusCall(ctx context.Context, _ string, client *adminClient, out io.Writer) error {
+	var status map[string]any
+	if err := client.GetJSON(ctx, "/admin/status", &status); err != nil {
+		return err
+	}
+	printStatusSummary(out, status)
+
+	// cron_leases live in /admin/health; merge them into the rendered view when
+	// /admin/status did not already carry them.
+	if _, ok := status["cron_leases"]; !ok {
+		var health map[string]any
+		if err := client.GetJSON(ctx, "/admin/health", &health); err == nil {
+			printCronLeases(out, health)
+		}
+	}
 	return nil
 }
 

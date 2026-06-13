@@ -252,25 +252,25 @@ func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 		"with'quote": `'with'\''quote'`,
 	}
 	for in, want := range cases {
-		if got := shellQuote(in); got != want {
-			t.Fatalf("shellQuote(%q) = %q, want %q", in, got, want)
+		if got := ShellQuote(in); got != want {
+			t.Fatalf("ShellQuote(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
 
 func TestMaskTokenErrKeepsChainAndMasks(t *testing.T) {
 	cause := fmt.Errorf("%w: health gate failed: Authorization: Bearer sekret", ErrDeploy)
-	masked := maskTokenErr(cause, "sekret")
+	masked := MaskTokenErr(cause, "sekret")
 	if !errors.Is(masked, ErrDeploy) {
-		t.Fatal("maskTokenErr must keep the error chain intact")
+		t.Fatal("MaskTokenErr must keep the error chain intact")
 	}
 	if strings.Contains(masked.Error(), "sekret") {
-		t.Fatalf("maskTokenErr leaked the token: %v", masked)
+		t.Fatalf("MaskTokenErr leaked the token: %v", masked)
 	}
-	if got := maskTokenErr(cause, ""); got != cause {
+	if got := MaskTokenErr(cause, ""); got != cause {
 		t.Fatal("empty token must return the error unchanged")
 	}
-	if got := maskTokenErr(nil, "x"); got != nil {
+	if got := MaskTokenErr(nil, "x"); got != nil {
 		t.Fatal("nil error must stay nil")
 	}
 }

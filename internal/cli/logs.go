@@ -23,6 +23,8 @@ func (app *App) runLogsCommand(ctx context.Context, args []string) error {
 	urlFlag := flags.String("url", defaultAdminURL, "worker base URL")
 	token := flags.String("token", "", "admin bearer token (defaults to $OUVRIER_ADMIN_TOKEN)")
 	last := flags.Int("last", defaultLogsLast, "number of executions to fetch")
+	worker := flags.String("worker", "", "target a deployed worker by name via a one-shot tunnel")
+	all := flags.Bool("all", false, "fan out across every deployed worker")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("%w: %w", ErrUsage, err)
 	}
@@ -33,17 +35,38 @@ func (app *App) runLogsCommand(ctx context.Context, args []string) error {
 		return fmt.Errorf("%w: --last must be positive", ErrUsage)
 	}
 
+	query := url.Values{}
+	query.Set("last", strconv.Itoa(*last))
+	endpoint := "/admin/traces?" + query.Encode()
+
+	sel := fleetSelector{worker: *worker, all: *all}
+	if err := sel.validate(flagWasSet(flags, "url")); err != nil {
+		return err
+	}
+	if sel.active() {
+		targets, err := resolveFleetTargets(sel)
+		if err != nil {
+			return err
+		}
+		call := func(ctx context.Context, _ string, client *adminClient, out io.Writer) error {
+			var payload map[string]any
+			if err := client.GetJSON(ctx, endpoint, &payload); err != nil {
+				return err
+			}
+			printLogsTable(out, payload)
+			return nil
+		}
+		return app.runFleet(ctx, targets, fleetOptions{token: *token}, call)
+	}
+
 	adminToken, err := resolveAdminToken(*token)
 	if err != nil {
 		return err
 	}
 	client := newAdminClient(*urlFlag, adminToken)
 
-	query := url.Values{}
-	query.Set("last", strconv.Itoa(*last))
-
 	var payload map[string]any
-	if err := client.getJSON(ctx, "/admin/traces?"+query.Encode(), &payload); err != nil {
+	if err := client.GetJSON(ctx, endpoint, &payload); err != nil {
 		return err
 	}
 

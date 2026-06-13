@@ -51,6 +51,21 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: No build chain in internal/console (no-CDN invariant)
+        run: |
+          # The console SPA is vendored Preact + HTM ESM served from //go:embed.
+          # There must be no npm/bundler footprint under internal/console, and
+          # `go build` alone must embed all assets.
+          offenders=$(find internal/console \
+            \( -name node_modules -o -name package.json -o -name package-lock.json \
+               -o -name yarn.lock -o -name pnpm-lock.yaml \) -print)
+          if [ -n "$offenders" ]; then
+            echo "internal/console must have no npm/bundler footprint:" >&2
+            echo "$offenders" >&2
+            exit 1
+          fi
+          go build ./internal/console
+
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
 
@@ -96,7 +111,9 @@ jobs:
             ./internal/state/... \
             ./internal/events/... \
             ./internal/tools/... \
-            ./internal/harness/...
+            ./internal/harness/... \
+            ./internal/tunnel/... \
+            ./internal/console/...
 
   build:
     runs-on: ubuntu-latest

@@ -83,7 +83,7 @@ func RollbackEnvironment(ctx context.Context, opts RollbackOpts, progress Progre
 	if err != nil {
 		return err
 	}
-	return maskTokenErr(p.run(ctx), p.token)
+	return MaskTokenErr(p.run(ctx), p.token)
 }
 
 // envRollback is the fully resolved rollback plan.
@@ -106,7 +106,7 @@ type envRollback struct {
 	invPath  string
 }
 
-func (p *envRollback) mask(s string) string { return maskToken(s, p.token) }
+func (p *envRollback) mask(s string) string { return MaskToken(s, p.token) }
 
 // planRollback performs the local preflight: pinned-host gate for every
 // target, project name from pip.yaml, root/service defaults and safety
@@ -120,7 +120,7 @@ func planRollback(opts RollbackOpts, progress ProgressWriter) (*envRollback, err
 	}
 	for _, raw := range opts.Hosts {
 		_, host := splitUserHost(raw)
-		if _, _, err := requirePinnedHost(opts.Dir, host, opts.Port); err != nil {
+		if _, _, err := RequirePinnedHost(opts.Dir, host, opts.Port); err != nil {
 			return nil, err
 		}
 	}
@@ -264,7 +264,7 @@ func (p *envRollback) rollbackHost(ctx context.Context, rawHost string) (string,
 	if p.opts.User != "" {
 		hostUser = p.opts.User
 	}
-	knownHosts, pinnedHost, err := requirePinnedHost(p.opts.Dir, host, p.opts.Port)
+	knownHosts, pinnedHost, err := RequirePinnedHost(p.opts.Dir, host, p.opts.Port)
 	if err != nil {
 		return "", err
 	}

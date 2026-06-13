@@ -183,29 +183,29 @@ func InstallUnitIfChangedCommand(root, service, sha string) string {
 	installed := InstalledUnitPath(service)
 	return fmt.Sprintf(
 		`if [ "$(sha256sum %s 2>/dev/null | cut -d' ' -f1)" != %s ]; then sudo /usr/bin/install -m 0644 -- %s %s && sudo /usr/bin/systemctl daemon-reload; fi`,
-		shellQuote(installed), shellQuote(sha), shellQuote(staged), shellQuote(installed),
+		ShellQuote(installed), ShellQuote(sha), ShellQuote(staged), ShellQuote(installed),
 	)
 }
 
 // EnableServiceCommand enables the unit so it starts on boot.
 func EnableServiceCommand(service string) string {
-	return "sudo /usr/bin/systemctl enable " + shellQuote(CanonicalServiceName(service)+".service")
+	return "sudo /usr/bin/systemctl enable " + ShellQuote(CanonicalServiceName(service)+".service")
 }
 
 // RestartServiceCommand (re)starts the unit after a symlink swap.
 func RestartServiceCommand(service string) string {
-	return "sudo /usr/bin/systemctl restart " + shellQuote(CanonicalServiceName(service)+".service")
+	return "sudo /usr/bin/systemctl restart " + ShellQuote(CanonicalServiceName(service)+".service")
 }
 
 // StopServiceCommand stops the unit (first-deploy failure path: no previous
 // release to roll back to, so the deploy degrades to stop+report).
 func StopServiceCommand(service string) string {
-	return "sudo /usr/bin/systemctl stop " + shellQuote(CanonicalServiceName(service)+".service")
+	return "sudo /usr/bin/systemctl stop " + ShellQuote(CanonicalServiceName(service)+".service")
 }
 
 // JournalTailCommand dumps the unit's recent log lines for failure reports.
 func JournalTailCommand(service string) string {
-	return "sudo /usr/bin/journalctl -u " + shellQuote(CanonicalServiceName(service)+".service") + " -n 50 --no-pager"
+	return "sudo /usr/bin/journalctl -u " + ShellQuote(CanonicalServiceName(service)+".service") + " -n 50 --no-pager"
 }
 
 // SudoProbeCommand is the cheap remote probe verifying passwordless sudo is
