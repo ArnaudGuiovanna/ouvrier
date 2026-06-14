@@ -44,7 +44,7 @@ func parseOperateFlags(args []string) (operateConfig, error) {
 				cfg.AllowFail = true
 			}
 			i++
-		case "--dir", "--agent", "--codex-mode", "--session", "--goal", "--scope", "--subject", "--env", "--env-file", "--target", "--mode", "--prompt", "--keep":
+		case "--dir", "--agent", "--codex-mode", "--session", "--goal", "--scope", "--subject", "--env", "--env-file", "--target", "--mode", "--prompt", "--model", "--keep":
 			value := inline
 			if !hasInline {
 				v, advance, err := flagValue(args, i, name)
@@ -129,6 +129,8 @@ func assignOperateFlag(cfg *operateConfig, name, value string) error {
 		cfg.Mode = value
 	case "--prompt":
 		cfg.Prompt = value
+	case "--model":
+		cfg.Model = value
 	case "--keep":
 		keep, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || keep < 0 {
