@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -578,6 +579,9 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
+	if strings.HasPrefix(text, "!") {
+		return m.runShell(text)
+	}
 	if m.err != nil {
 		m.blocks = append(m.blocks, opBlock{kind: blockError, text: m.err.Error()})
 		m.refreshViewport()
@@ -596,6 +600,36 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.startTurn(text)
+}
+
+func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
+	silent := strings.HasPrefix(text, "!!")
+	cmdline := strings.TrimSpace(strings.TrimLeft(text, "!"))
+	if cmdline == "" {
+		return m, nil
+	}
+	if !silent {
+		m.blocks = append(m.blocks, opBlock{kind: blockUser, text: "!" + cmdline})
+	}
+	dir := m.workspace.Dir
+	if dir == "" {
+		dir = m.opts.Dir
+	}
+	c := exec.CommandContext(m.ctx, "sh", "-c", cmdline)
+	c.Dir = dir
+	outBytes, err := c.CombinedOutput()
+	out := strings.TrimRight(string(outBytes), "\n")
+	if err != nil && out == "" {
+		out = err.Error()
+	}
+	if !silent {
+		if out == "" {
+			out = "(no output)"
+		}
+		m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: out})
+	}
+	m.refreshViewport()
+	return m, nil
 }
 
 func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {

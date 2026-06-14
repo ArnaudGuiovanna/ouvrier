@@ -236,6 +236,31 @@ func TestToolCardsCollapseByDefault(t *testing.T) {
 	}
 }
 
+func TestBangCommandRunsShell(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.submit("!echo hello-ouvrier")
+	out := m.render()
+	if !strings.Contains(out, "hello-ouvrier") {
+		t.Fatalf("!cmd output not shown in transcript:\n%s", out)
+	}
+}
+
+func TestBangBangCommandIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.submit("!!echo secret-output")
+	out := m.render()
+	if strings.Contains(out, "secret-output") {
+		t.Fatalf("!!cmd output must be suppressed:\n%s", out)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
