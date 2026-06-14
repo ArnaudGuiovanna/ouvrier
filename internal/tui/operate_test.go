@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tui/ide"
 )
 
 func TestOperateModelSelectsWorkerCandidate(t *testing.T) {
@@ -298,6 +299,35 @@ func TestManualEditorOpenSaveReaudit(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(wdir, "main.go"))
 	if !strings.Contains(string(data), "edited") {
 		t.Fatalf("file not saved with new content: %s", data)
+	}
+}
+
+func TestCockpitCtrlGOpensIDE(t *testing.T) {
+	dir := t.TempDir()
+	wdir := filepath.Join(dir, "demo")
+	writeOperateWorker(t, wdir, "demo")
+
+	m := newOperateModel(context.Background(), OperateOptions{Dir: wdir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// ctrl+g should open the IDE.
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
+	updated := result.(*operateModel)
+	if !updated.ideActive {
+		t.Fatal("ideActive should be true after ctrl+g")
+	}
+	if updated.ideModel == nil {
+		t.Fatal("ideModel should not be nil after ctrl+g")
+	}
+
+	// Sending ExitMsg should return to the cockpit.
+	result2, _ := updated.Update(ide.ExitMsg{})
+	returned := result2.(*operateModel)
+	if returned.ideActive {
+		t.Fatal("ideActive should be false after ExitMsg")
+	}
+	if returned.ideModel != nil {
+		t.Fatal("ideModel should be nil after ExitMsg")
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	lipgloss "charm.land/lipgloss/v2"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/tui/ide"
 )
 
 // OperateOptions configure the local Ouvrier worker-factory cockpit.
@@ -128,6 +129,10 @@ type operateModel struct {
 	showReview    bool
 	reviewIndex   int
 	findingState  map[int]string
+
+	// embedded IDE
+	ideActive bool
+	ideModel  tea.Model
 }
 
 // slashCmd is one accelerator surfaced in the composer's command menu.
@@ -156,6 +161,7 @@ var operateSlashCommands = []slashCmd{
 	{"/tools", "/tools", "List the native Ouvrier tools"},
 	{"/policy", "/policy", "Show the tool/safety policy"},
 	{"/help", "/help", "Show cockpit help"},
+	{"/ide", "/ide", "Open the Ouvrier IDE in-place (ctrl+g)"},
 }
 
 type opStreamMsg struct {
@@ -301,6 +307,25 @@ func defaultModelChoices(opts OperateOptions) []string {
 func (m *operateModel) Init() tea.Cmd { return m.composer.Focus() }
 
 func (m *operateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Snoop window sizes unconditionally so m.width/height are always current,
+	// even when the IDE is active (so the cockpit is correctly sized on return).
+	if sz, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = sz.Width
+		m.height = sz.Height
+	}
+
+	// Delegate all messages to the embedded IDE when it is active.
+	if m.ideActive {
+		if _, ok := msg.(ide.ExitMsg); ok {
+			m.ideActive = false
+			m.ideModel = nil
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.ideModel, cmd = m.ideModel.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -543,6 +568,13 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.openEditor("main.go")
 		}
 		return m, nil
+	case "ctrl+g":
+		if m.running {
+			m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: "finish or interrupt the current turn first"})
+			m.refreshViewport()
+			return m, nil
+		}
+		return m.openIDE()
 	case "up":
 		if m.slashActive {
 			if m.slashIndex > 0 {
@@ -602,6 +634,9 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 		m.showReview = false
 		m.refreshViewport()
 		return m, nil
+	}
+	if strings.TrimSpace(text) == "/ide" {
+		return m.openIDE()
 	}
 	if strings.HasPrefix(text, "/edit") {
 		path := strings.TrimSpace(strings.TrimPrefix(text, "/edit"))
@@ -957,6 +992,9 @@ func nextPosture(p operate.Posture) operate.Posture {
 }
 
 func (m *operateModel) View() tea.View {
+	if m.ideActive && m.ideModel != nil {
+		return m.ideModel.View()
+	}
 	view := tea.NewView(m.render())
 	view.AltScreen = true
 	view.BackgroundColor = backgroundColor
@@ -1037,6 +1075,24 @@ func (m *operateModel) openEditor(path string) (tea.Model, tea.Cmd) {
 	m.editorErr = ""
 	m.showEditor = true
 	return m, nil
+}
+
+func (m *operateModel) openIDE() (tea.Model, tea.Cmd) {
+	if m.workspace.Dir == "" {
+		m.blocks = append(m.blocks, opBlock{kind: blockError, text: "no worker selected — open or create one first"})
+		m.refreshViewport()
+		return m, nil
+	}
+	im := ide.NewIDEModel(m.ctx, ide.IDEOptions{
+		Workspace: m.workspace,
+		GoplsPath: ide.DiscoverGopls(),
+		Embedded:  true,
+	})
+	m.ideModel = im
+	m.ideActive = true
+	return m, tea.Batch(im.Init(), func() tea.Msg {
+		return tea.WindowSizeMsg{Width: m.width, Height: m.height}
+	})
 }
 
 func (m *operateModel) saveEditor() error {
