@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -69,6 +70,7 @@ type opBlock struct {
 	toolErr    bool
 	running    bool
 	streaming  bool
+	collapsed  bool
 }
 
 type operateModel struct {
@@ -104,8 +106,13 @@ type operateModel struct {
 	models     []string
 	modelIndex int
 
-	showHelp bool
-	status   string
+	showHelp      bool
+	showEditor    bool
+	editorPath    string
+	editor        textarea.Model
+	editorErr     string
+	status        string
+	toolsExpanded bool
 
 	authState   string
 	authAccount string
@@ -139,10 +146,12 @@ var operateSlashCommands = []slashCmd{
 	{"/build", "/build --target linux/amd64", "Compile the worker binary"},
 	{"/deploy", "/deploy staging", "Build then transfer through the deploy engine"},
 	{"/read", "/read main.go", "Read a worker file"},
+	{"/edit", "/edit main.go", "Open a worker file in the manual editor"},
 	{"/docs", "/docs <query>", "Search the Ouvrier docs & API"},
 	{"/workers", "/workers", "List detected workers"},
 	{"/login", "/login codex", "Probe/delegate Codex authentication"},
 	{"/accept-risk", "/accept-risk <rationale>", "Record an accepted risk"},
+	{"/clear", "/clear", "Clear the transcript view"},
 	{"/export", "/export", "Export the transcript to Markdown"},
 	{"/tools", "/tools", "List the native Ouvrier tools"},
 	{"/policy", "/policy", "Show the tool/safety policy"},
@@ -369,6 +378,7 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 		if m.runningToolIdx >= 0 && m.runningToolIdx < len(m.blocks) {
 			b := &m.blocks[m.runningToolIdx]
 			b.running = false
+			b.collapsed = !m.toolsExpanded
 			b.toolErr = ev.Err != nil
 			if ev.Entry != nil {
 				b.toolOutput = ev.Entry.Output
@@ -458,6 +468,9 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	}
+	if m.showEditor {
+		return m.handleEditorKey(msg)
+	}
 	if m.showHelp {
 		m.showHelp = false
 		m.resize()
@@ -517,6 +530,20 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+d":
 		m.vp.ScrollDown(m.vp.Height() / 2)
 		return m, nil
+	case "ctrl+o":
+		m.toolsExpanded = !m.toolsExpanded
+		for i := range m.blocks {
+			if m.blocks[i].kind == blockTool {
+				m.blocks[i].collapsed = !m.toolsExpanded
+			}
+		}
+		m.refreshViewport()
+		return m, nil
+	case "ctrl+e":
+		if m.workspace.Dir != "" {
+			return m.openEditor("main.go")
+		}
+		return m, nil
 	case "up":
 		if m.slashActive {
 			if m.slashIndex > 0 {
@@ -566,6 +593,21 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
+	if strings.HasPrefix(text, "!") {
+		return m.runShell(text)
+	}
+	if strings.TrimSpace(text) == "/clear" {
+		m.blocks = nil
+		m.findings = nil
+		m.diff = nil
+		m.showReview = false
+		m.refreshViewport()
+		return m, nil
+	}
+	if strings.HasPrefix(text, "/edit") {
+		path := strings.TrimSpace(strings.TrimPrefix(text, "/edit"))
+		return m.openEditor(path)
+	}
 	if m.err != nil {
 		m.blocks = append(m.blocks, opBlock{kind: blockError, text: m.err.Error()})
 		m.refreshViewport()
@@ -584,6 +626,39 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.startTurn(text)
+}
+
+func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
+	silent := strings.HasPrefix(text, "!!")
+	cmdline := text
+	cmdline = strings.TrimPrefix(cmdline, "!")
+	cmdline = strings.TrimPrefix(cmdline, "!")
+	cmdline = strings.TrimSpace(cmdline)
+	if cmdline == "" {
+		return m, nil
+	}
+	if !silent {
+		m.blocks = append(m.blocks, opBlock{kind: blockUser, text: "!" + cmdline})
+	}
+	dir := m.workspace.Dir
+	if dir == "" {
+		dir = m.opts.Dir
+	}
+	c := exec.CommandContext(m.ctx, "sh", "-c", cmdline)
+	c.Dir = dir
+	outBytes, err := c.CombinedOutput()
+	out := strings.TrimRight(string(outBytes), "\n")
+	if err != nil && out == "" {
+		out = err.Error()
+	}
+	if !silent {
+		if out == "" {
+			out = "(no output)"
+		}
+		m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: out})
+	}
+	m.refreshViewport()
+	return m, nil
 }
 
 func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
@@ -782,16 +857,17 @@ func blocksFromTranscript(entries []operate.TranscriptEntry) []opBlock {
 			}
 			lastTool = -1
 		case operate.TranscriptToolCall:
-			blocks = append(blocks, opBlock{kind: blockTool, toolName: e.ToolName, toolInput: e.Input})
+			blocks = append(blocks, opBlock{kind: blockTool, toolName: e.ToolName, toolInput: e.Input, collapsed: true})
 			lastTool = len(blocks) - 1
 		case operate.TranscriptToolResult:
 			if lastTool >= 0 && lastTool < len(blocks) && blocks[lastTool].toolName == e.ToolName {
 				blocks[lastTool].toolOutput = e.Output
+				blocks[lastTool].collapsed = true
 				if _, ok := e.Output["error"]; ok {
 					blocks[lastTool].toolErr = true
 				}
 			} else {
-				b := opBlock{kind: blockTool, toolName: e.ToolName, toolOutput: e.Output}
+				b := opBlock{kind: blockTool, toolName: e.ToolName, toolOutput: e.Output, collapsed: true}
 				if _, ok := e.Output["error"]; ok {
 					b.toolErr = true
 				}
@@ -938,6 +1014,57 @@ func fixPromptFor(f operate.Finding) string {
 		return fmt.Sprintf("fix this finding: %s", f.Title)
 	}
 	return fmt.Sprintf("fix this finding: %s (%s)", f.Title, loc)
+}
+
+func (m *operateModel) openEditor(path string) (tea.Model, tea.Cmd) {
+	if strings.TrimSpace(path) == "" {
+		path = "main.go"
+	}
+	content, err := operate.ReadWorkerFile(m.workspace, path)
+	if err != nil {
+		m.blocks = append(m.blocks, opBlock{kind: blockError, text: "open " + path + ": " + err.Error()})
+		m.refreshViewport()
+		return m, nil
+	}
+	ta := textarea.New()
+	ta.SetValue(content)
+	ta.ShowLineNumbers = true
+	ta.MaxHeight = 0
+	ta.SetWidth(max(m.width-2, 40))
+	ta.SetHeight(max(m.height-4, 6))
+	ta.Focus()
+	m.editor = ta
+	m.editorPath = path
+	m.editorErr = ""
+	m.showEditor = true
+	return m, nil
+}
+
+func (m *operateModel) saveEditor() error {
+	if err := operate.WriteWorkerFile(m.workspace, m.editorPath, m.editor.Value()); err != nil {
+		m.editorErr = err.Error()
+		return err
+	}
+	m.showEditor = false
+	m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: "saved " + m.editorPath + " — re-auditing"})
+	m.refreshViewport()
+	return nil
+}
+
+func (m *operateModel) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+s":
+		if err := m.saveEditor(); err != nil {
+			return m, nil
+		}
+		return m.submit("audit the worker")
+	case "esc":
+		m.showEditor = false
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.editor, cmd = m.editor.Update(msg)
+	return m, cmd
 }
 
 // RunOperate drives the local operate cockpit until the user exits.

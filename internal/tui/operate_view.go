@@ -21,6 +21,9 @@ func (m *operateModel) render() string {
 	if m.showHelp {
 		return m.renderHelp()
 	}
+	if m.showEditor {
+		return m.renderEditor()
+	}
 	if m.showReview {
 		return m.renderReview()
 	}
@@ -153,7 +156,6 @@ func (m *operateModel) renderBlockAssistant(width int, b opBlock) string {
 }
 
 func (m *operateModel) renderBlockTool(width int, b opBlock) string {
-	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(dimGreenHex))
 	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
@@ -168,7 +170,35 @@ func (m *operateModel) renderBlockTool(width int, b opBlock) string {
 		badge = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("✓")
 	}
 
-	header := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName) + "  " + badge
+	// Collapsed (and not currently running): render a single compact line.
+	if b.collapsed && !b.running {
+		summary := toolSummary(b.toolOutput)
+		if b.toolErr {
+			if e := stringFromMap(b.toolOutput, "error"); e != "" {
+				summary = e
+			}
+		}
+		triangle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▸")
+		gearName := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName)
+		var arrow string
+		if b.toolErr {
+			arrow = lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render("→ " + summary)
+		} else {
+			arrow = lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex)).Render("→ ") + valStyle.Render(summary)
+		}
+		line := triangle + " " + gearName + "  " + badge + "  " + arrow
+		return truncateANSI(line, width)
+	}
+
+	// Expanded (or currently running): render the full multi-line card.
+	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(dimGreenHex))
+	var triangle string
+	if b.running {
+		triangle = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▸")
+	} else {
+		triangle = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▾")
+	}
+	header := triangle + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName) + "  " + badge
 
 	var lines []string
 	lines = append(lines, header)
@@ -291,6 +321,9 @@ func (m *operateModel) renderHints(width int) string {
 		key.Render("enter") + hint.Render(" send"),
 		key.Render("alt+enter") + hint.Render(" newline"),
 		key.Render("esc") + hint.Render(" stop"),
+		key.Render("ctrl+e") + hint.Render(" edit"),
+		key.Render("ctrl+o") + hint.Render(" fold"),
+		key.Render("!cmd") + hint.Render(" shell"),
 		key.Render("ctrl+p") + hint.Render(" model"),
 		key.Render("/") + hint.Render(" cmds"),
 		key.Render("?") + hint.Render(" help"),
@@ -320,9 +353,13 @@ func (m *operateModel) renderHelp() string {
 		key.Render("  enter") + muted.Render("       send prompt / run selected command"),
 		key.Render("  alt+enter") + muted.Render("   insert newline (multiline prompt)"),
 		key.Render("  esc") + muted.Render("         interrupt the running turn / close menu"),
+		key.Render("  ctrl+e") + muted.Render("      open manual editor"),
+		key.Render("  ctrl+o") + muted.Render("      collapse / expand tool cards"),
 		key.Render("  ctrl+p") + muted.Render("      cycle model"),
 		key.Render("  pgup/pgdn") + muted.Render("   scroll transcript"),
 		key.Render("  /") + muted.Render("           open the command menu"),
+		key.Render("  !cmd") + muted.Render("        run shell command"),
+		key.Render("  !!cmd") + muted.Render("       run shell command silently"),
 		key.Render("  ?") + muted.Render("           toggle this help"),
 		key.Render("  ctrl+c") + muted.Render("      quit (session is saved)"),
 		"",
@@ -342,6 +379,17 @@ func (m *operateModel) renderHelp() string {
 		Padding(1, 3).
 		Width(max(m.width-4, 40))
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+func (m *operateModel) renderEditor() string {
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
+	header := title.Render("✎ "+m.editorPath) + muted.Render("   ctrl+s save & re-audit · esc cancel")
+	parts := []string{header, m.editor.View()}
+	if m.editorErr != "" {
+		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render(m.editorErr))
+	}
+	return strings.Join(parts, "\n")
 }
 
 // --- tool card formatting helpers ---

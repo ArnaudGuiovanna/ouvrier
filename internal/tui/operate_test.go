@@ -203,6 +203,104 @@ func TestOperateReviewOverlay(t *testing.T) {
 	}
 }
 
+func TestToolCardsCollapseByDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	start := &operate.TranscriptEntry{Kind: operate.TranscriptToolCall, ToolName: "read_ouvrier_api", Input: map[string]any{}}
+	m.applyStream(operate.StreamEvent{Kind: operate.StreamToolStart, Entry: start})
+	end := &operate.TranscriptEntry{Kind: operate.TranscriptToolResult, ToolName: "read_ouvrier_api", Output: map[string]any{"summary": "loaded API ref"}}
+	m.applyStream(operate.StreamEvent{Kind: operate.StreamToolEnd, Entry: end})
+	m.refreshViewport()
+
+	var tool *opBlock
+	for i := range m.blocks {
+		if m.blocks[i].kind == blockTool {
+			tool = &m.blocks[i]
+		}
+	}
+	if tool == nil || !tool.collapsed {
+		t.Fatalf("completed tool card should default to collapsed: %+v", tool)
+	}
+	out := m.render()
+	if !strings.Contains(out, "read_ouvrier_api") {
+		t.Fatalf("collapsed card should still show the tool name:\n%s", out)
+	}
+	m.handleKey(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	for i := range m.blocks {
+		if m.blocks[i].kind == blockTool && m.blocks[i].collapsed {
+			t.Fatal("ctrl+o should expand all tool cards")
+		}
+	}
+}
+
+func TestBangCommandRunsShell(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.submit("!echo hello-ouvrier")
+	out := m.render()
+	if !strings.Contains(out, "hello-ouvrier") {
+		t.Fatalf("!cmd output not shown in transcript:\n%s", out)
+	}
+}
+
+func TestBangBangCommandIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.submit("!!echo secret-output")
+	out := m.render()
+	if strings.Contains(out, "secret-output") {
+		t.Fatalf("!!cmd output must be suppressed:\n%s", out)
+	}
+}
+
+func TestSlashClearStartsFreshTranscript(t *testing.T) {
+	dir := t.TempDir()
+	wdir := filepath.Join(dir, "demo")
+	writeOperateWorker(t, wdir, "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: wdir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.blocks = append(m.blocks, opBlock{kind: blockUser, text: "old turn marker"})
+	m.submit("/clear")
+	for _, b := range m.blocks {
+		if strings.Contains(b.text, "old turn marker") {
+			t.Fatal("/clear should drop the previous transcript blocks")
+		}
+	}
+}
+
+func TestManualEditorOpenSaveReaudit(t *testing.T) {
+	dir := t.TempDir()
+	wdir := filepath.Join(dir, "demo")
+	writeOperateWorker(t, wdir, "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: wdir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.openEditor("main.go")
+	if !m.showEditor || m.editorPath != "main.go" {
+		t.Fatalf("editor not open: show=%v path=%q", m.showEditor, m.editorPath)
+	}
+	out := m.render()
+	if !strings.Contains(out, "main.go") {
+		t.Fatalf("editor overlay should show the path:\n%s", out)
+	}
+	m.editor.SetValue("package main\n\nfunc main() { /* edited */ }\n")
+	if err := m.saveEditor(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(wdir, "main.go"))
+	if !strings.Contains(string(data), "edited") {
+		t.Fatalf("file not saved with new content: %s", data)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
