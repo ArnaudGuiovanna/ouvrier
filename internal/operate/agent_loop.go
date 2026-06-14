@@ -135,7 +135,7 @@ func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn 
 			if len(call.Arguments) > 0 {
 				_ = json.Unmarshal(call.Arguments, &input)
 			}
-			result, runErr := r.callTool(ctx, session, plannedTool{Name: call.Name, Input: input}, turn, emit)
+			result, runErr := r.callTool(ctx, session, plannedTool{ID: call.ID, Name: call.Name, Input: input}, turn, emit)
 			msgs = append(msgs, provider.ToolResultText(
 				provider.ToolCall{ID: call.ID, Name: call.Name},
 				toolResultContent(result, runErr),
@@ -146,25 +146,103 @@ func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn 
 	return finish("reached the maximum number of tool steps for this turn", nil)
 }
 
-// historyMessages rebuilds a provider conversation from the persisted text
-// transcript. Tool-call/result pairs are replayed only within the live loop
-// (with real model-issued IDs), so prior tool turns are summarised as their
-// assistant text here to avoid emitting provider-invalid tool history.
+// historyMessages rebuilds a provider conversation from the persisted
+// transcript, including tool-call/result turns paired by their stable
+// tool_call_id. Assistant text that precedes a tool call is attached to the
+// same assistant message so the history is provider-valid.
 func historyMessages(entries []TranscriptEntry) []provider.Message {
 	var msgs []provider.Message
+	var pendingText string
+	lastCallID := ""
+	synth := 0
+
+	flushText := func() {
+		if t := strings.TrimSpace(pendingText); t != "" {
+			msgs = append(msgs, provider.AssistantText(t))
+		}
+		pendingText = ""
+	}
+
 	for _, e := range entries {
 		switch e.Kind {
 		case TranscriptUser:
+			flushText()
 			if t := strings.TrimSpace(e.Text); t != "" {
 				msgs = append(msgs, provider.UserText(t))
 			}
 		case TranscriptAssistant:
 			if t := strings.TrimSpace(e.Text); t != "" {
-				msgs = append(msgs, provider.AssistantText(t))
+				pendingText = t
 			}
+		case TranscriptToolCall:
+			id := metaString(e.Metadata, "tool_call_id")
+			if id == "" {
+				synth++
+				id = fmt.Sprintf("call_%d", synth)
+			}
+			lastCallID = id
+			args := json.RawMessage(`{}`)
+			if len(e.Input) > 0 {
+				if b, err := json.Marshal(e.Input); err == nil {
+					args = b
+				}
+			}
+			msgs = append(msgs, provider.AssistantToolCalls(
+				strings.TrimSpace(pendingText),
+				provider.ToolCall{ID: id, Name: e.ToolName, Arguments: args},
+			))
+			pendingText = ""
+		case TranscriptToolResult:
+			id := metaString(e.Metadata, "tool_call_id")
+			if id == "" {
+				id = lastCallID
+			}
+			msgs = append(msgs, provider.ToolResultText(
+				provider.ToolCall{ID: id, Name: e.ToolName},
+				toolResultContentFromOutput(e.Output),
+				outputIsError(e.Output),
+			))
 		}
 	}
+	flushText()
 	return msgs
+}
+
+func metaString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
+}
+
+func outputIsError(out map[string]any) bool {
+	if out == nil {
+		return false
+	}
+	_, ok := out["error"]
+	return ok
+}
+
+func toolResultContentFromOutput(out map[string]any) string {
+	if out == nil {
+		return "done"
+	}
+	if e, ok := out["error"].(string); ok && strings.TrimSpace(e) != "" {
+		return "error: " + e
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		if s, ok := out["summary"].(string); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+		return "done"
+	}
+	const limit = 8 * 1024
+	if len(data) > limit {
+		return string(data[:limit])
+	}
+	return string(data)
 }
 
 func (r *AgentRuntime) toolSpecs() []provider.ToolSpec {

@@ -138,3 +138,163 @@ func TestAgentLoopExecutesToolsThenFinishes(t *testing.T) {
 		t.Fatalf("transcript missing user entry: %v", kinds)
 	}
 }
+
+func TestAgentLoopPersistsToolCallID(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+
+	model := &scriptedModel{steps: []provider.Response{
+		{
+			Text:       "listing",
+			StopReason: provider.StopToolUse,
+			ToolCalls:  []provider.ToolCall{{ID: "call_abc", Name: "list_workers", Arguments: json.RawMessage(`{}`)}},
+		},
+		{Text: "done", StopReason: provider.StopEndTurn},
+	}}
+
+	rt, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}, Model: model, ModelID: "test/model"})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	started, err := rt.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ch, err := rt.RunTurn(context.Background(), started.Session.ID, "list", "prompt")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range ch {
+	}
+
+	entries, err := ReadTranscript(started.Session.TranscriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	var callID, resultID string
+	for _, e := range entries {
+		switch e.Kind {
+		case TranscriptToolCall:
+			callID, _ = e.Metadata["tool_call_id"].(string)
+		case TranscriptToolResult:
+			resultID, _ = e.Metadata["tool_call_id"].(string)
+		}
+	}
+	if callID == "" || callID != resultID {
+		t.Fatalf("tool_call_id mismatch: call=%q result=%q", callID, resultID)
+	}
+	if callID != "call_abc" {
+		t.Fatalf("expected model-supplied id call_abc, got %q", callID)
+	}
+}
+
+func TestHistoryMessagesMultipleToolCallsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+
+	model := &scriptedModel{steps: []provider.Response{
+		{
+			Text:       "I'll call two tools.",
+			StopReason: provider.StopToolUse,
+			ToolCalls: []provider.ToolCall{
+				{ID: "c1", Name: "list_workers", Arguments: json.RawMessage(`{}`)},
+				{ID: "c2", Name: "read_ouvrier_api", Arguments: json.RawMessage(`{}`)},
+			},
+		},
+		{Text: "done", StopReason: provider.StopEndTurn},
+	}}
+
+	rt, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}, Model: model, ModelID: "test/model"})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	started, err := rt.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ch, err := rt.RunTurn(context.Background(), started.Session.ID, "do two things", "prompt")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range ch {
+	}
+
+	entries, err := ReadTranscript(started.Session.TranscriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	msgs := historyMessages(entries)
+
+	// Every reconstructed message must be provider-valid.
+	for i, m := range msgs {
+		if err := m.Validate(); err != nil {
+			t.Fatalf("message %d invalid: %v\nfull history: %+v", i, err, msgs)
+		}
+	}
+	// Both tool calls and both results must be present and correctly paired.
+	calls := map[string]bool{}
+	results := map[string]bool{}
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == provider.BlockToolCall && b.ToolCall != nil {
+				calls[b.ToolCall.ID] = true
+			}
+			if b.Type == provider.BlockToolResult && b.ToolResult != nil {
+				results[b.ToolResult.ToolCallID] = true
+			}
+		}
+	}
+	for _, id := range []string{"c1", "c2"} {
+		if !calls[id] || !results[id] {
+			t.Fatalf("missing call/result for %s: call=%v result=%v\nhistory=%+v", id, calls[id], results[id], msgs)
+		}
+	}
+	// No two adjacent assistant messages (would be invalid alternation).
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i-1].Role == provider.RoleAssistant && msgs[i].Role == provider.RoleAssistant {
+			t.Fatalf("two adjacent assistant messages at %d-%d: %+v", i-1, i, msgs)
+		}
+	}
+}
+
+func TestHistoryMessagesReplaysToolTurns(t *testing.T) {
+	entries := []TranscriptEntry{
+		{Kind: TranscriptUser, Text: "list the workers"},
+		{Kind: TranscriptAssistant, Text: "I'll list them."},
+		{Kind: TranscriptToolCall, ToolName: "list_workers", Input: map[string]any{}, Metadata: map[string]any{"tool_call_id": "c1"}},
+		{Kind: TranscriptToolResult, ToolName: "list_workers", Output: map[string]any{"summary": "1 worker"}, Metadata: map[string]any{"tool_call_id": "c1"}},
+		{Kind: TranscriptAssistant, Text: "Found 1 worker."},
+		{Kind: TranscriptUser, Text: "now audit it"},
+	}
+
+	msgs := historyMessages(entries)
+
+	if len(msgs) != 5 {
+		t.Fatalf("want 5 messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Role != provider.RoleUser {
+		t.Fatalf("msg0 role = %q", msgs[0].Role)
+	}
+	var sawToolCall, sawToolResult bool
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == provider.BlockToolCall && b.ToolCall != nil && b.ToolCall.ID == "c1" {
+				sawToolCall = true
+			}
+			if b.Type == provider.BlockToolResult && b.ToolResult != nil && b.ToolResult.ToolCallID == "c1" {
+				sawToolResult = true
+			}
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Fatalf("missing tool call/result in history: call=%v result=%v", sawToolCall, sawToolResult)
+	}
+	if msgs[len(msgs)-1].Role != provider.RoleUser || msgs[len(msgs)-1].Text() != "now audit it" {
+		t.Fatalf("last message should be the new user prompt, got %+v", msgs[len(msgs)-1])
+	}
+	for i, m := range msgs {
+		if err := m.Validate(); err != nil {
+			t.Fatalf("msg %d invalid: %v", i, err)
+		}
+	}
+}

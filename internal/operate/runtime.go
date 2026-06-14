@@ -74,6 +74,7 @@ type RuntimeTurn struct {
 }
 
 type plannedTool struct {
+	ID    string
 	Name  string
 	Input map[string]any
 }
@@ -422,11 +423,19 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 	if emit == nil {
 		emit = func(StreamEvent) {}
 	}
+	if call.ID == "" {
+		id, err := randomID()
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("operate: generate tool_call_id: %w", err)
+		}
+		call.ID = id
+	}
 	callEntry, err := r.transcript(session).Append(TranscriptEntry{
 		SessionID: session.ID,
 		Kind:      TranscriptToolCall,
 		ToolName:  call.Name,
 		Input:     call.Input,
+		Metadata:  map[string]any{"tool_call_id": call.ID},
 	})
 	if err != nil {
 		return ToolResult{}, err
@@ -454,6 +463,7 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		Kind:      TranscriptToolResult,
 		ToolName:  call.Name,
 		Output:    output,
+		Metadata:  map[string]any{"tool_call_id": call.ID},
 	})
 	if err != nil {
 		return ToolResult{}, err

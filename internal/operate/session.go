@@ -76,6 +76,35 @@ func (s *Store) SessionDir(id string) string {
 	return filepath.Join(s.root, "sessions", id)
 }
 
+// LatestSessionID returns the id of the most recently updated session, by the
+// mtime of its session.json. It returns an error when no session exists.
+func (s *Store) LatestSessionID() (string, error) {
+	dir := filepath.Join(s.root, "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("operate: list sessions: %w", err)
+	}
+	var latestID string
+	var latestMod time.Time
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(dir, entry.Name(), "session.json"))
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latestMod) {
+			latestMod = info.ModTime()
+			latestID = entry.Name()
+		}
+	}
+	if latestID == "" {
+		return "", fmt.Errorf("operate: no sessions found")
+	}
+	return latestID, nil
+}
+
 // Create starts a durable session and writes session.json immediately.
 func (s *Store) Create(projectDir, driver, codexMode string) (*Session, error) {
 	id, err := randomID()

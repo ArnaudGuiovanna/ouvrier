@@ -77,15 +77,17 @@ func TestRunStateMigrateRejectsArguments(t *testing.T) {
 	}
 }
 
-func TestRootHelpListsStateCommand(t *testing.T) {
+func TestStateSubcommandStillReachable(t *testing.T) {
 	var out bytes.Buffer
 	app := New("dev", WithStreams(nil, &out, nil))
 
-	if err := app.Run(context.Background(), []string{"--help"}); err != nil {
-		t.Fatalf("Run() error = %v", err)
+	// The state subcommand is no longer advertised in root help (the agent is
+	// the product surface) but must remain dispatchable as a CI/debug escape hatch.
+	if err := app.Run(context.Background(), []string{"state", "--help"}); err != nil {
+		t.Fatalf("state --help error = %v", err)
 	}
-	if !strings.Contains(out.String(), "state") {
-		t.Fatalf("root help does not list the state command:\n%s", out.String())
+	if out.Len() == 0 {
+		t.Fatal("state --help printed nothing")
 	}
 }
 

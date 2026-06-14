@@ -5,28 +5,20 @@ import (
 	"io"
 )
 
-const rootHelp = `Ouvrier - Workers for your APIs.
+const rootHelp = `Ouvrier - the terminal agent that builds, reviews, and ships Go workers.
 
-Usage: ouvrier <command> [flags]
+Usage:
+  ouvrier              Open the agent cockpit (build/review/deploy by prompt)
+  ouvrier -p "<goal>"  Run one agent prompt non-interactively
+  ouvrier -c           Resume the latest session
+  ouvrier version      Print the ouvrier CLI version
 
-Commands:
-  new       Scaffold a new Ouvrier project
-  add       Add an agent, tool, or skill to an existing project
-  dev       Run the worker locally (go run .) until interrupted
-  build     Compile an Ouvrier project to a binary
-  show      Summarize the current project's pip.yaml
-  status    Show health and counters for a running worker
-  logs      List the last N traced executions of a running worker
-  trace     Print the full event timeline for one execution
-  deploy    Ship the project to a deploy environment or host over SSH, or build a container image
-  server    Manage trusted deploy hosts (trust pins SSH host keys)
-  fleet     Inspect or prune the recorded deployments inventory (ls|rm)
-  console   Start the loopback web console over the federated admin APIs
-  operate   Open the local agentic worker-builder cockpit
-  state     Manage the worker's durable state backend (migrate)
-  version   Print the ouvrier CLI version
+Inside the cockpit, describe the worker you want; the agent scaffolds it,
+audits, lets you review, builds, and deploys over SSH - pausing for your
+approval before anything irreversible.
 
-Run "ouvrier <command> --help" for command details.
+Advanced (CI/debug) subcommands remain available but are not the product
+surface; run "ouvrier <command> --help" for their details.
 `
 
 const operateHelp = `Open the local agentic worker-builder cockpit.
