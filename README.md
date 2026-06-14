@@ -57,10 +57,11 @@ func main() {
 
 Ouvrier `main` includes the completed v0.1, v0.2, v0.3, and v0.4 milestone
 backlog plus the v0.5 Ouvrier Agent Cockpit. The latest tagged release is
-`v0.5.2` — the Pi/Claude-Code-class agentic cockpit: streaming TUI with
-collapsible tool cards, an approval gate (prod double-confirm), Codex
-subscription auth, a review IDE (findings inbox + diff), and a manual editor.
-The public Go module path is:
+`v0.5.3` — the Pi/Claude-Code-class agentic cockpit plus a new **Ouvrier IDE**
+(`ouvrier ide`): a terminal IDE to review/edit/save/rebuild a worker with live
+**gopls** diagnostics, an Ouvrier API **snippet palette**, and a Catppuccin
+Macchiato theme. The cockpit keeps its streaming TUI, approval gate (prod
+double-confirm), and Codex subscription auth. The public Go module path is:
 
 ```txt
 module github.com/ArnaudGuiovanna/ouvrier
@@ -106,7 +107,8 @@ What ships in the current codebase:
   tool, schema, and subagent spans.
 - The `ouvrier` CLI: `version`, `new`, `show`, `status`, `logs`, `trace`,
   `add agent|trigger|tool|skill`, `dev`, `build` (static cross-compile), and
-  `deploy <env>|ssh|docker`, plus `operate` for local agentic worker building.
+  `deploy <env>|ssh|docker`, plus `operate` for local agentic worker building
+  and `ide` for the worker review/edit IDE (gopls diagnostics + Ouvrier snippets).
 
 Operational notes: trace persistence uses the configured `StateStore` (SQLite
 by default), cost accounting depends on configured pricing and provider usage
@@ -153,7 +155,7 @@ it fetches the latest release, verifies the checksum, and installs `ouvrier`:
 curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/ouvrier/main/install.sh | sh
 ```
 
-Pin a version with `OUVRIER_VERSION=v0.5.2` and the target directory with
+Pin a version with `OUVRIER_VERSION=v0.5.3` and the target directory with
 `OUVRIER_BIN_DIR=~/.local/bin`. Re-running the script updates an existing
 install in place.
 
@@ -165,7 +167,7 @@ go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
 ouvrier version
 ```
 
-Use `@v0.5.2` instead of `@latest` to pin a specific release.
+Use `@v0.5.3` instead of `@latest` to pin a specific release.
 
 To build from a checkout instead (for contributing or running the tests):
 
