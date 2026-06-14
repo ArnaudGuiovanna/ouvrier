@@ -96,6 +96,9 @@ func (app *App) run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return app.runOperateCommand(ctx, nil)
 	}
+	if args[0] == "-p" || args[0] == "--print" {
+		return app.runOperateCommand(ctx, append([]string{"--prompt"}, args[1:]...))
+	}
 
 	switch args[0] {
 	case "version":

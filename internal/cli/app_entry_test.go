@@ -38,3 +38,17 @@ func TestRunHelpFlagStillPrintsHelp(t *testing.T) {
 		t.Fatal("--help printed nothing")
 	}
 }
+
+func TestRunDashPRunsPromptMode(t *testing.T) {
+	tmp := t.TempDir()
+	out := &bytes.Buffer{}
+	app := New("test", WithStreams(bytes.NewReader(nil), out, &bytes.Buffer{}))
+	// -p maps to operate prompt mode (planner, no model). /help is deterministic.
+	err := app.run(context.Background(), []string{"-p", "/help", "--agent", "manual", "--dir", tmp})
+	if err != nil {
+		t.Fatalf("run -p: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("session ")) {
+		t.Fatalf("prompt mode produced no session output:\n%s", out.String())
+	}
+}
