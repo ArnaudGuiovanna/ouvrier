@@ -268,7 +268,7 @@ func newComposer() textarea.Model {
 	// Enter submits the prompt; newlines are inserted explicitly.
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
 	styles := ta.Styles()
-	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true)
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
 	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
@@ -280,7 +280,7 @@ func newComposer() textarea.Model {
 func newSpinner() spinner.Model {
 	s := spinner.New()
 	s.Spinner = spinner.MiniDot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex))
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(runningHex))
 	return s
 }
 

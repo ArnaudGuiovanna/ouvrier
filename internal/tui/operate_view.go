@@ -86,7 +86,7 @@ func (m *operateModel) hasUserTurn() bool {
 }
 
 func (m *operateModel) renderWelcome(width int) string {
-	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
 	lines := []string{
@@ -106,7 +106,7 @@ func (m *operateModel) renderWelcome(width int) string {
 }
 
 func (m *operateModel) renderCandidates(width int) string {
-	label := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	value := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
 	lines := []string{
@@ -140,7 +140,7 @@ func (m *operateModel) renderBlock(width int, b opBlock) string {
 }
 
 func renderBlockUser(width int, text string) string {
-	icon := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true).Render("❯")
+	icon := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true).Render("❯")
 	body := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex)).Bold(true).Render(wrapText(text, width-2))
 	return indentBlock(icon+" ", "  ", body)
 }
@@ -156,7 +156,7 @@ func (m *operateModel) renderBlockAssistant(width int, b opBlock) string {
 }
 
 func (m *operateModel) renderBlockTool(width int, b opBlock) string {
-	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(runningHex)).Bold(true)
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
 
@@ -179,7 +179,7 @@ func (m *operateModel) renderBlockTool(width int, b opBlock) string {
 			}
 		}
 		triangle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▸")
-		gearName := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName)
+		gearName := lipgloss.NewStyle().Foreground(lipgloss.Color(runningHex)).Render("⚙ ") + nameStyle.Render(b.toolName)
 		var arrow string
 		if b.toolErr {
 			arrow = lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render("→ " + summary)
@@ -198,7 +198,7 @@ func (m *operateModel) renderBlockTool(width int, b opBlock) string {
 	} else {
 		triangle = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▾")
 	}
-	header := triangle + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName) + "  " + badge
+	header := triangle + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(runningHex)).Render("⚙ ") + nameStyle.Render(b.toolName) + "  " + badge
 
 	var lines []string
 	lines = append(lines, header)
@@ -243,8 +243,8 @@ func renderBlockError(width int, text string) string {
 }
 
 func (m *operateModel) renderSlashMenu(width int) string {
-	selStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(blackHex)).Background(lipgloss.Color(greenHex)).Bold(true)
-	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex))
+	selStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(blackHex)).Background(lipgloss.Color(accentHex)).Bold(true)
+	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	var lines []string
 	n := min(len(m.slashMatches), 6)
@@ -271,11 +271,11 @@ func (m *operateModel) renderStatusBar(width int) string {
 	switch {
 	case m.running:
 		elapsed := time.Since(m.startedAt).Round(time.Second)
-		state = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render(m.spin.View() + " working " + elapsed.String())
+		state = lipgloss.NewStyle().Foreground(lipgloss.Color(runningHex)).Render(m.spin.View() + " working " + elapsed.String())
 	case m.status != "":
 		state = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render(m.status)
 	default:
-		state = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("ready")
+		state = lipgloss.NewStyle().Foreground(lipgloss.Color(okHex)).Render("ready")
 	}
 
 	worker := m.workspace.Name
@@ -286,7 +286,7 @@ func (m *operateModel) renderStatusBar(width int) string {
 	switch m.authState {
 	case "authed":
 		acct := shortAuthLabel(m.authAccount)
-		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("auth " + acct)
+		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(okHex)).Render("auth " + acct)
 	default:
 		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("sign in: /login codex")
 	}
@@ -338,7 +338,7 @@ func (m *operateModel) renderHints(width int) string {
 }
 
 func (m *operateModel) renderHelp() string {
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true)
 	key := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	val := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
@@ -372,14 +372,14 @@ func (m *operateModel) renderHelp() string {
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(greenHex)).
+		BorderForeground(lipgloss.Color(accentHex)).
 		Padding(1, 3).
 		Width(max(m.width-4, 40))
 	return box.Render(strings.Join(lines, "\n"))
 }
 
 func (m *operateModel) renderEditor() string {
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	header := title.Render("✎ "+m.editorPath) + muted.Render("   ctrl+s save & re-audit · esc cancel")
 	parts := []string{header, m.editor.View()}
@@ -632,9 +632,9 @@ func approvalDetailLines(ap *operate.ApprovalRequest) []kv {
 }
 
 func (m *operateModel) renderReview() string {
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex)).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
-	sel := lipgloss.NewStyle().Foreground(lipgloss.Color(blackHex)).Background(lipgloss.Color(greenHex))
+	sel := lipgloss.NewStyle().Foreground(lipgloss.Color(blackHex)).Background(lipgloss.Color(accentHex))
 	val := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
 
 	var lines []string
@@ -704,7 +704,7 @@ func severityGlyph(sev string) string {
 }
 
 func renderDiffLines(patch string) []string {
-	add := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex))
+	add := lipgloss.NewStyle().Foreground(lipgloss.Color(diffAddHex))
 	del := lipgloss.NewStyle().Foreground(lipgloss.Color(redHex))
 	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
