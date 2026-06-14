@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/operate/snippets"
 )
 
 // ToolRegistry owns the Ouvrier-native tools exposed to the operate agent.
@@ -156,18 +158,16 @@ func toolSearchDocs(_ context.Context, env ToolEnv, input map[string]any) (ToolR
 			}
 		}
 	}
+	// Also search the embedded snippet pack so results are always available
+	// regardless of whether the framework repo is checked out locally.
+	for _, m := range snippets.SearchDocs(query) {
+		matches = append(matches, map[string]any{"file": m.Source, "line": m.Line, "text": m.Text})
+	}
 	return ToolResult{Summary: fmt.Sprintf("found %d doc match(es)", len(matches)), Data: map[string]any{"matches": matches}}, nil
 }
 
 func toolReadAPI(_ context.Context, _ ToolEnv, _ map[string]any) (ToolResult, error) {
-	primitives := []string{
-		"ovr.Run(addr, nodes...) starts an HTTP/webhook/cron/stream worker.",
-		"ovr.From(\"METHOD /path\") declares a trigger.",
-		"ovr.Pipe(goal, ovr.Model(...), ovr.Tool(...), ovr.Output[T]()) declares an agent pipeline.",
-		"ovr.Tool(name, fn, ovr.ReadOnly()/SideEffecting()/Idempotent()/RequiresApproval()) governs tool calls.",
-		"ovr.Reply(ovr.JSON[T]()) returns typed HTTP JSON; ovr.Sink/ovr.Push handle non-HTTP outcomes.",
-		"ovr.SubAgent/ovr.Pipeline/ovr.MaxParallel compose governed child work.",
-	}
+	primitives := snippets.Primitives()
 	return ToolResult{Summary: "loaded compact Ouvrier API reference", Data: map[string]any{"primitives": primitives}}, nil
 }
 
