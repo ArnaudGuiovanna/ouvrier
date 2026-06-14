@@ -89,9 +89,12 @@ func (app *App) run(ctx context.Context, args []string) error {
 	default:
 	}
 
-	if len(args) == 0 || isHelpFlag(args[0]) {
+	if len(args) > 0 && isHelpFlag(args[0]) {
 		printRootHelp(app.out)
 		return nil
+	}
+	if len(args) == 0 {
+		return app.runOperateCommand(ctx, nil)
 	}
 
 	switch args[0] {
