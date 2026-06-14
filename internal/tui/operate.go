@@ -114,6 +114,13 @@ type operateModel struct {
 	decisions       chan<- operate.ApprovalDecision
 	posture         operate.Posture
 	prodConfirm     string
+
+	findings      []operate.Finding
+	diff          *operate.DiffData
+	reviewSummary string
+	showReview    bool
+	reviewIndex   int
+	findingState  map[int]string
 }
 
 // slashCmd is one accelerator surfaced in the composer's command menu.
@@ -189,6 +196,7 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 		posture:        operate.PostureManual,
 		authState:      opts.AuthState,
 		authAccount:    opts.AuthAccount,
+		findingState:   map[int]string{},
 	}
 
 	runtime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
@@ -386,6 +394,20 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 			return
 		}
 		m.blocks = append(m.blocks, opBlock{kind: blockError, text: ev.Entry.Text})
+	case operate.StreamReview:
+		if ev.Review != nil {
+			m.findings = ev.Review.Findings
+			m.reviewSummary = ev.Review.Summary
+			m.reviewIndex = 0
+			m.findingState = map[int]string{}
+			if len(m.findings) > 0 {
+				m.showReview = true
+			}
+		}
+	case operate.StreamDiff:
+		if ev.Diff != nil {
+			m.diff = ev.Diff
+		}
 	case operate.StreamDone:
 		m.pendingApproval = nil
 		m.prodConfirm = ""
@@ -446,6 +468,10 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleApprovalKey(keyStr)
 	}
 
+	if m.showReview {
+		return m.handleReviewKey(keyStr)
+	}
+
 	// Preserve the worker selection shortcut from the parent-directory factory.
 	if m.mode == "select" && len(m.candidates) > 0 && strings.TrimSpace(m.composer.Value()) == "" {
 		if idx, ok := candidateIndex(keyStr); ok {
@@ -468,6 +494,11 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+p":
 		m.cycleModel()
+		return m, nil
+	case "ctrl+r":
+		if len(m.findings) > 0 || m.diff != nil {
+			m.showReview = !m.showReview
+		}
 		return m, nil
 	case "?":
 		if strings.TrimSpace(m.composer.Value()) == "" {
@@ -857,6 +888,53 @@ func (m *operateModel) View() tea.View {
 	view.ForegroundColor = foregroundColor
 	view.WindowTitle = "ouvrier operate"
 	return view
+}
+
+func (m *operateModel) handleReviewKey(keyStr string) (tea.Model, tea.Cmd) {
+	switch keyStr {
+	case "esc", "q":
+		m.showReview = false
+		return m, nil
+	case "up", "k":
+		if m.reviewIndex > 0 {
+			m.reviewIndex--
+		}
+		return m, nil
+	case "down", "j":
+		if m.reviewIndex < len(m.findings)-1 {
+			m.reviewIndex++
+		}
+		return m, nil
+	case "a":
+		if m.reviewIndex < len(m.findings) {
+			m.findingState[m.reviewIndex] = "accepted"
+		}
+		return m, nil
+	case "x":
+		if m.reviewIndex < len(m.findings) {
+			m.findingState[m.reviewIndex] = "dismissed"
+		}
+		return m, nil
+	case "f":
+		if m.reviewIndex < len(m.findings) {
+			f := m.findings[m.reviewIndex]
+			m.showReview = false
+			return m.submit(fixPromptFor(f))
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func fixPromptFor(f operate.Finding) string {
+	loc := f.File
+	if f.Line > 0 {
+		loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+	}
+	if loc == "" {
+		return fmt.Sprintf("fix this finding: %s", f.Title)
+	}
+	return fmt.Sprintf("fix this finding: %s (%s)", f.Title, loc)
 }
 
 // RunOperate drives the local operate cockpit until the user exits.

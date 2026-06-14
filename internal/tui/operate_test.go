@@ -179,6 +179,28 @@ func TestOperateAuthShowsAccountWhenSignedIn(t *testing.T) {
 	}
 }
 
+func TestOperateReviewOverlay(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.applyStream(operate.StreamEvent{Kind: operate.StreamReview, Review: &operate.ReviewData{
+		Summary: "1 finding",
+		Findings: []operate.Finding{
+			{Severity: "high", File: "feeds.go", Line: 42, Title: "no timeout on HTTP", Body: "wrap in context"},
+		},
+	}})
+	if len(m.findings) != 1 {
+		t.Fatalf("findings not stored: %d", len(m.findings))
+	}
+	m.showReview = true
+	out := m.render()
+	if !strings.Contains(out, "feeds.go") || !strings.Contains(out, "no timeout") {
+		t.Fatalf("review overlay did not render the finding:\n%s", out)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
