@@ -57,7 +57,7 @@ func main() {
 
 Ouvrier `main` includes the completed v0.1, v0.2, v0.3, and v0.4 milestone
 backlog plus the v0.5 Ouvrier Agent Cockpit. The latest tagged release is
-`v0.5.4` — the Pi/Claude-Code-class agentic cockpit plus a new **Ouvrier IDE**
+`v0.5.5` — the Pi/Claude-Code-class agentic cockpit plus a new **Ouvrier IDE**
 (`ouvrier ide`): a terminal IDE to review/edit/save/rebuild a worker with live
 **gopls** diagnostics, hover, go-to-definition, completion, an Ouvrier API **snippet palette**, and a Catppuccin
 Macchiato theme. The cockpit keeps its streaming TUI, approval gate (prod
@@ -155,7 +155,7 @@ it fetches the latest release, verifies the checksum, and installs `ouvrier`:
 curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/ouvrier/main/install.sh | sh
 ```
 
-Pin a version with `OUVRIER_VERSION=v0.5.4` and the target directory with
+Pin a version with `OUVRIER_VERSION=v0.5.5` and the target directory with
 `OUVRIER_BIN_DIR=~/.local/bin`. Re-running the script updates an existing
 install in place.
 
@@ -167,7 +167,7 @@ go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
 ouvrier version
 ```
 
-Use `@v0.5.4` instead of `@latest` to pin a specific release.
+Use `@v0.5.5` instead of `@latest` to pin a specific release.
 
 To build from a checkout instead (for contributing or running the tests):
 
