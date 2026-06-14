@@ -63,7 +63,7 @@ func TestRunOperatePrintPromptCreatesWorker(t *testing.T) {
 	parent := t.TempDir()
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	app := New("dev", WithStreams(nil, &out, &errOut))
+	app := New("dev", WithStreams(nil, &out, &errOut), WithSignedIn(func() bool { return false }))
 
 	err := app.run(context.Background(), []string{
 		"operate",
@@ -89,7 +89,7 @@ func TestRunOperateJSONPrompt(t *testing.T) {
 	parent := t.TempDir()
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	app := New("dev", WithStreams(nil, &out, &errOut))
+	app := New("dev", WithStreams(nil, &out, &errOut), WithSignedIn(func() bool { return false }))
 
 	err := app.run(context.Background(), []string{
 		"operate",
@@ -115,7 +115,7 @@ func TestRunOperateRPCPrompt(t *testing.T) {
 			`{"type":"follow_up","text":"/policy"}` + "\n" +
 			`{"type":"compact"}` + "\n",
 	)
-	app := New("dev", WithStreams(input, &out, &errOut))
+	app := New("dev", WithStreams(input, &out, &errOut), WithSignedIn(func() bool { return false }))
 
 	err := app.run(context.Background(), []string{
 		"operate",

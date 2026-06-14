@@ -43,7 +43,7 @@ func TestRunHelpFlagStillPrintsHelp(t *testing.T) {
 func TestRunDashPRunsPromptMode(t *testing.T) {
 	tmp := t.TempDir()
 	out := &bytes.Buffer{}
-	app := New("test", WithStreams(bytes.NewReader(nil), out, &bytes.Buffer{}))
+	app := New("test", WithStreams(bytes.NewReader(nil), out, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
 	// -p maps to operate prompt mode (planner, no model). /help is deterministic.
 	err := app.run(context.Background(), []string{"-p", "/help", "--agent", "manual", "--dir", tmp})
 	if err != nil {

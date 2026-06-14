@@ -68,12 +68,12 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	model, err := operateModelFromEnv(cfg.Model)
+	model, modelID, err := resolveAgentModel(cfg.Model, app.signedIn)
 	if err != nil {
 		return err
 	}
 	if cfg.Mode != "tui" || cfg.Print || strings.TrimSpace(cfg.Prompt) != "" {
-		return app.runOperatePromptMode(ctx, cfg, driver, model)
+		return app.runOperatePromptMode(ctx, cfg, driver, model, modelID)
 	}
 	return app.runOperate(ctx, app.in, app.out, tui.OperateOptions{
 		Dir:       cfg.Dir,
@@ -88,11 +88,11 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 		Keep:      cfg.Keep,
 		AllowFail: cfg.AllowFail,
 		Model:     model,
-		ModelID:   cfg.Model,
+		ModelID:   modelID,
 	})
 }
 
-func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, driver operate.Driver, model operate.AgentModel) error {
+func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, driver operate.Driver, model operate.AgentModel, modelID string) error {
 	if driver != nil {
 		defer driver.Close()
 	}
@@ -107,7 +107,7 @@ func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, dri
 		Keep:      cfg.Keep,
 		AllowFail: cfg.AllowFail,
 		Model:     model,
-		ModelID:   cfg.Model,
+		ModelID:   modelID,
 	})
 	if err != nil {
 		return err
