@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/auth"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
 )
 
@@ -245,35 +246,29 @@ func toolExportSession(_ context.Context, env ToolEnv, _ map[string]any) (ToolRe
 }
 
 func toolLoginCodex(ctx context.Context, env ToolEnv, _ map[string]any) (ToolResult, error) {
-	if env.Harness == nil || env.Harness.Driver == nil {
-		return ToolResult{}, fmt.Errorf("operate: no driver configured")
-	}
-	caps, err := env.Harness.Driver.Probe(ctx)
+	state, account := (&auth.Codex{}).Probe(ctx)
 	profile := map[string]any{
 		"provider":      "codex",
-		"driver":        caps.Name,
-		"transport":     caps.Transport,
-		"version":       caps.Version,
-		"authenticated": caps.Authenticated,
+		"state":         string(state),
+		"account":       account,
 		"checked_at":    time.Now().UTC().Format(time.RFC3339Nano),
-		"token_storage": "owned by Codex; Ouvrier stores metadata only",
+		"token_storage": "owned by Codex; Ouvrier never reads or stores Codex tokens",
 	}
-	if err != nil {
-		profile["error"] = err.Error()
+	var summary string
+	switch state {
+	case auth.StateAuthed:
+		label := account
+		if label == "" {
+			label = "ChatGPT"
+		}
+		summary = "Signed in to Codex — " + label + ". OpenAI models ready (uses your ~/.codex default model)."
+	case auth.StateNoCodex:
+		summary = "Codex CLI not found. Install it (npm i -g @openai/codex), then run `codex login`."
+	default:
+		summary = "Not signed in. Run `codex login` (or `codex login --device-auth` on a headless host), then retry."
 	}
-	data, jsonErr := json.MarshalIndent(profile, "", "  ")
-	if jsonErr != nil {
-		return ToolResult{}, jsonErr
-	}
-	if writeErr := writeAtomic(env.Session.AuthProfilePath, append(data, '\n'), 0o600); writeErr != nil {
-		return ToolResult{}, writeErr
-	}
-	if err != nil {
-		return ToolResult{Summary: "Codex auth probe failed; run `codex login` and retry", Data: profile}, err
-	}
-	summary := "Codex profile detected"
-	if !caps.Authenticated {
-		summary = "Codex CLI detected; run `codex login` if the next turn reports auth failure"
+	if data, err := json.MarshalIndent(profile, "", "  "); err == nil {
+		_ = writeAtomic(env.Session.AuthProfilePath, append(data, '\n'), 0o600)
 	}
 	return ToolResult{Summary: summary, Data: profile}, nil
 }

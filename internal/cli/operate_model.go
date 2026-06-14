@@ -49,8 +49,6 @@ func operateModelFromEnv(modelID string) (operate.AgentModel, error) {
 	return operate.NewProviderModel(p, modelID), nil
 }
 
-const defaultCodexModel = "gpt-5-codex"
-
 // resolveAgentModel chooses the agent model transport, auth-first:
 //  1. an explicit --model provider/x when that provider's API key is present;
 //  2. a signed-in Codex subscription (zero key) via the codex exec transport;
@@ -70,11 +68,13 @@ func resolveAgentModel(modelID string, signedIn func() bool) (operate.AgentModel
 		}
 	}
 	if signedIn != nil && signedIn() {
+		// No specific model → use the account's configured Codex default (id
+		// "codex", empty model → no -m). An explicit codex/<model> overrides it.
 		name := strings.TrimPrefix(modelID, "codex/")
-		if name == "" {
-			name = defaultCodexModel
+		id := "codex"
+		if name != "" {
+			id = "codex/" + name
 		}
-		id := "codex/" + name
 		return operate.NewProviderModel(codexprovider.New(name), id), id, nil
 	}
 	if env := firstEnvModel(); env != "" {
