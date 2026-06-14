@@ -88,8 +88,30 @@ type ideModel struct {
 	showHover bool
 	hoverText string
 
+	// completion popup
+	showComplete      bool
+	completeItems     []completeItem
+	completeSel       int
+	completeWordStart int // rune col where the current identifier starts
+	docVersion        int // incremented on each DidChange after acceptCompletion
+
 	// definition jump stack
 	jumpStack []jumpLoc
+}
+
+// completeItem is one entry in the completion popup.
+type completeItem struct {
+	label   string
+	detail  string
+	insert  string        // text to insert when no TextEdit
+	edit    *lsp.TextEdit // gopls authoritative edit (may be nil)
+	addl    []lsp.TextEdit
+	snippet bool // true for Ouvrier snippets (mauve ◇, sorted first)
+}
+
+// completeMsg carries completion results from a gopls call.
+type completeMsg struct {
+	items []completeItem
 }
 
 // jumpLoc records a cursor position for jump-back (ctrl+t).
@@ -316,6 +338,25 @@ func (m *ideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case completeMsg:
+		if m.showComplete {
+			seen := make(map[string]bool, len(m.completeItems))
+			for _, it := range m.completeItems {
+				seen[it.label] = true
+			}
+			for _, it := range msg.items {
+				if !seen[it.label] {
+					m.completeItems = append(m.completeItems, it)
+					seen[it.label] = true
+				}
+			}
+			// Clamp selection.
+			if m.completeSel >= len(m.completeItems) {
+				m.completeSel = max(0, len(m.completeItems)-1)
+			}
+		}
+		return m, nil
+
 	case defMsg:
 		if len(msg.locs) == 0 {
 			return m, nil
@@ -404,9 +445,92 @@ func expandSnippet(body string) string {
 	return body
 }
 
+// currentWord returns the identifier prefix before the cursor and its start rune column.
+func (m *ideModel) currentWord() (string, int) {
+	col := m.editor.Column()
+	line := lsp.LineAt(m.editor.Value(), m.editor.Line())
+	runes := []rune(line)
+	if col > len(runes) {
+		col = len(runes)
+	}
+	start := col
+	for start > 0 {
+		r := runes[start-1]
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			start--
+		} else {
+			break
+		}
+	}
+	return string(runes[start:col]), start
+}
+
+// acceptCompletion applies the selected completion item to the editor buffer.
+func (m *ideModel) acceptCompletion() {
+	if len(m.completeItems) == 0 || m.completeSel < 0 || m.completeSel >= len(m.completeItems) {
+		return
+	}
+	it := m.completeItems[m.completeSel]
+	doc := m.editor.Value()
+
+	var edits []lsp.TextEdit
+	if it.edit != nil {
+		edits = append([]lsp.TextEdit{*it.edit}, it.addl...)
+	} else {
+		// Synthesize a TextEdit replacing [wordStart, cursor) with the insert text.
+		row := m.editor.Line()
+		line := lsp.LineAt(doc, row)
+		startChar := lsp.EncodedColumn(line, m.completeWordStart, m.enc)
+		endChar := lsp.EncodedColumn(line, m.editor.Column(), m.enc)
+		synth := lsp.TextEdit{
+			Range: lsp.Range{
+				Start: lsp.Position{Line: row, Character: startChar},
+				End:   lsp.Position{Line: row, Character: endChar},
+			},
+			NewText: it.insert,
+		}
+		edits = append([]lsp.TextEdit{synth}, it.addl...)
+	}
+	doc = applyEdits(doc, edits, m.enc)
+	m.editor.SetValue(doc)
+	m.dirty = true
+	m.showComplete = false
+
+	if m.client != nil {
+		m.docVersion++
+		uri := lsp.URI(filepath.Join(m.ws.Dir, m.openPath))
+		_ = m.client.DidChange(uri, doc, m.docVersion)
+	}
+}
+
 // handleKey dispatches key presses.
 func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	keyStr := msg.String()
+
+	// --- Completion popup overlay ---
+	if m.showComplete {
+		switch keyStr {
+		case "esc":
+			m.showComplete = false
+			return m, nil
+		case "up":
+			if m.completeSel > 0 {
+				m.completeSel--
+			}
+			return m, nil
+		case "down":
+			if m.completeSel < len(m.completeItems)-1 {
+				m.completeSel++
+			}
+			return m, nil
+		case "tab", "enter":
+			m.acceptCompletion()
+			return m, nil
+		default:
+			// Any other key dismisses the popup and falls through to the editor.
+			m.showComplete = false
+		}
+	}
 
 	// --- Snippet palette overlay ---
 	if m.showPalette {
@@ -469,6 +593,64 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.paletteQuery = ""
 		m.refreshPalette()
 		m.paletteSel = 0
+		return m, nil
+
+	case "ctrl+space":
+		word, start := m.currentWord()
+		m.completeWordStart = start
+
+		// Build Ouvrier snippet items.
+		var snipItems []completeItem
+		var snips []snippets.Snippet
+		if word == "" {
+			snips = snippets.All()
+		} else {
+			snips = snippets.Search(word)
+		}
+		for _, s := range snips {
+			snipItems = append(snipItems, completeItem{
+				label:   "◇ " + s.Prefix + "  " + s.Title,
+				insert:  expandSnippet(s.Body),
+				snippet: true,
+			})
+		}
+		m.completeItems = snipItems
+		m.completeSel = 0
+		m.showComplete = true
+
+		// Also fire gopls completion if LSP is available.
+		if m.client != nil {
+			uri := lsp.URI(filepath.Join(m.ws.Dir, m.openPath))
+			pos := m.cursorPos()
+			cl := m.client
+			ctx := m.ctx
+			return m, func() tea.Msg {
+				list, err := cl.Complete(ctx, uri, pos)
+				if err != nil || list == nil {
+					return completeMsg{}
+				}
+				items := make([]completeItem, 0, len(list.Items))
+				for _, gi := range list.Items {
+					insert := gi.InsertText
+					if insert == "" {
+						insert = gi.Label
+					}
+					var edit *lsp.TextEdit
+					if gi.TextEdit != nil {
+						e := *gi.TextEdit
+						edit = &e
+					}
+					items = append(items, completeItem{
+						label:  gi.Label,
+						detail: gi.Detail,
+						insert: insert,
+						edit:   edit,
+						addl:   gi.AdditionalTextEdits,
+					})
+				}
+				return completeMsg{items: items}
+			}
+		}
 		return m, nil
 
 	case "ctrl+\\":
