@@ -892,6 +892,9 @@ func (m *operateModel) View() tea.View {
 
 func (m *operateModel) handleReviewKey(keyStr string) (tea.Model, tea.Cmd) {
 	switch keyStr {
+	case "ctrl+r":
+		m.showReview = false
+		return m, nil
 	case "esc", "q":
 		m.showReview = false
 		return m, nil

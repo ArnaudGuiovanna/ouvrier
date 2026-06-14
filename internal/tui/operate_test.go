@@ -194,7 +194,9 @@ func TestOperateReviewOverlay(t *testing.T) {
 	if len(m.findings) != 1 {
 		t.Fatalf("findings not stored: %d", len(m.findings))
 	}
-	m.showReview = true
+	if !m.showReview {
+		t.Fatal("applyStream with findings did not auto-open the review overlay")
+	}
 	out := m.render()
 	if !strings.Contains(out, "feeds.go") || !strings.Contains(out, "no timeout") {
 		t.Fatalf("review overlay did not render the finding:\n%s", out)

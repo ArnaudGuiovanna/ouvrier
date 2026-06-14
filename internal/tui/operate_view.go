@@ -624,7 +624,7 @@ func (m *operateModel) renderReview() string {
 		lines = append(lines, "", title.Render("Diff"))
 		lines = append(lines, renderDiffLines(m.diff.Patch)...)
 	}
-	lines = append(lines, "", muted.Render("↑↓ select  f fix(agent)  a accept  x dismiss  esc/q close"))
+	lines = append(lines, "", muted.Render("↑↓ select  f fix(agent)  a accept  x dismiss  ctrl+r/esc/q close"))
 	box := lipgloss.NewStyle().Padding(0, 1).Width(max(m.width-2, 20))
 	return box.Render(strings.Join(lines, "\n"))
 }
