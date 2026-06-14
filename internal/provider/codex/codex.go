@@ -123,6 +123,11 @@ func renderPrompt(req provider.Request) string {
 	return b.String()
 }
 
+// modelName resolves the model to pass to `codex exec -m`. An empty result means
+// "omit -m" so Codex uses the user's ~/.codex/config.toml default — required
+// because account-specific models (e.g. a forced "gpt-5-codex") are rejected for
+// ChatGPT-account subscriptions ("model is not supported when using Codex with a
+// ChatGPT account"). Only an explicit override (e.g. codex/o3) passes -m.
 func modelName(reqModel, fallback string) string {
 	m := strings.TrimSpace(reqModel)
 	if i := strings.IndexByte(m, '/'); i >= 0 {
@@ -130,6 +135,10 @@ func modelName(reqModel, fallback string) string {
 	}
 	if m == "" {
 		m = strings.TrimSpace(fallback)
+	}
+	switch m {
+	case "", "codex", "default":
+		return "" // use the account's configured default model
 	}
 	return m
 }

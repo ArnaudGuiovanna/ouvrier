@@ -20,8 +20,8 @@ func TestResolveAgentModelPrefersCodexWhenSignedIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if m == nil || id != "codex/gpt-5-codex" {
-		t.Fatalf("expected codex/gpt-5-codex when signed in, got id=%q model=%v", id, m)
+	if m == nil || id != "codex" {
+		t.Fatalf("expected codex (account default model) when signed in, got id=%q model=%v", id, m)
 	}
 }
 
