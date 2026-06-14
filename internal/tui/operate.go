@@ -69,6 +69,7 @@ type opBlock struct {
 	toolErr    bool
 	running    bool
 	streaming  bool
+	collapsed  bool
 }
 
 type operateModel struct {
@@ -104,8 +105,9 @@ type operateModel struct {
 	models     []string
 	modelIndex int
 
-	showHelp bool
-	status   string
+	showHelp      bool
+	status        string
+	toolsExpanded bool
 
 	authState   string
 	authAccount string
@@ -369,6 +371,7 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 		if m.runningToolIdx >= 0 && m.runningToolIdx < len(m.blocks) {
 			b := &m.blocks[m.runningToolIdx]
 			b.running = false
+			b.collapsed = true
 			b.toolErr = ev.Err != nil
 			if ev.Entry != nil {
 				b.toolOutput = ev.Entry.Output
@@ -516,6 +519,15 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+d":
 		m.vp.ScrollDown(m.vp.Height() / 2)
+		return m, nil
+	case "ctrl+o":
+		m.toolsExpanded = !m.toolsExpanded
+		for i := range m.blocks {
+			if m.blocks[i].kind == blockTool {
+				m.blocks[i].collapsed = !m.toolsExpanded
+			}
+		}
+		m.refreshViewport()
 		return m, nil
 	case "up":
 		if m.slashActive {

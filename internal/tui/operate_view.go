@@ -153,7 +153,6 @@ func (m *operateModel) renderBlockAssistant(width int, b opBlock) string {
 }
 
 func (m *operateModel) renderBlockTool(width int, b opBlock) string {
-	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(dimGreenHex))
 	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
@@ -168,7 +167,35 @@ func (m *operateModel) renderBlockTool(width int, b opBlock) string {
 		badge = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("✓")
 	}
 
-	header := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName) + "  " + badge
+	// Collapsed (and not currently running): render a single compact line.
+	if b.collapsed && !b.running {
+		summary := toolSummary(b.toolOutput)
+		if b.toolErr {
+			if e := stringFromMap(b.toolOutput, "error"); e != "" {
+				summary = e
+			}
+		}
+		triangle := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▸")
+		gearName := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName)
+		var arrow string
+		if b.toolErr {
+			arrow = lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render("→ " + summary)
+		} else {
+			arrow = lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex)).Render("→ ") + valStyle.Render(summary)
+		}
+		line := triangle + " " + gearName + "  " + badge + "  " + arrow
+		return truncateANSI(line, width)
+	}
+
+	// Expanded (or currently running): render the full multi-line card.
+	bar := lipgloss.NewStyle().Foreground(lipgloss.Color(dimGreenHex))
+	var triangle string
+	if b.running {
+		triangle = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▸")
+	} else {
+		triangle = lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("▾")
+	}
+	header := triangle + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("⚙ ") + nameStyle.Render(b.toolName) + "  " + badge
 
 	var lines []string
 	lines = append(lines, header)
