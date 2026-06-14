@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	authpkg "github.com/ArnaudGuiovanna/ouvrier/internal/auth"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
@@ -75,20 +76,23 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if cfg.Mode != "tui" || cfg.Print || strings.TrimSpace(cfg.Prompt) != "" {
 		return app.runOperatePromptMode(ctx, cfg, driver, model, modelID)
 	}
+	authState, authAccount := (&authpkg.Codex{}).Probe(ctx)
 	return app.runOperate(ctx, app.in, app.out, tui.OperateOptions{
-		Dir:       cfg.Dir,
-		Agent:     cfg.Agent,
-		CodexMode: cfg.CodexMode,
-		Session:   cfg.Session,
-		Goal:      cfg.Goal,
-		Driver:    driver,
-		Env:       cfg.Env,
-		EnvFile:   cfg.EnvFile,
-		Target:    cfg.Target,
-		Keep:      cfg.Keep,
-		AllowFail: cfg.AllowFail,
-		Model:     model,
-		ModelID:   modelID,
+		Dir:         cfg.Dir,
+		Agent:       cfg.Agent,
+		CodexMode:   cfg.CodexMode,
+		Session:     cfg.Session,
+		Goal:        cfg.Goal,
+		Driver:      driver,
+		Env:         cfg.Env,
+		EnvFile:     cfg.EnvFile,
+		Target:      cfg.Target,
+		Keep:        cfg.Keep,
+		AllowFail:   cfg.AllowFail,
+		Model:       model,
+		ModelID:     modelID,
+		AuthState:   string(authState),
+		AuthAccount: authAccount,
 	})
 }
 

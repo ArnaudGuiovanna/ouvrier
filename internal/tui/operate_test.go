@@ -157,6 +157,28 @@ func TestApprovalKeyProdTypedConfirm(t *testing.T) {
 	}
 }
 
+func TestOperateAuthNoticeWhenSignedOut(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}, AuthState: "unauthed"}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	out := m.render()
+	if !strings.Contains(out, "sign in") && !strings.Contains(out, "/login") {
+		t.Fatalf("expected sign-in hint in status/footer:\n%s", out)
+	}
+}
+
+func TestOperateAuthShowsAccountWhenSignedIn(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}, AuthState: "authed", AuthAccount: "Logged in using ChatGPT"}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	out := m.render()
+	if !strings.Contains(out, "ChatGPT") && !strings.Contains(out, "auth") {
+		t.Fatalf("expected signed-in account/auth in status bar:\n%s", out)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -249,8 +249,21 @@ func (m *operateModel) renderStatusBar(width int) string {
 	if worker == "" {
 		worker = shortPath(m.opts.Dir)
 	}
+	var authSeg string
+	switch m.authState {
+	case "authed":
+		acct := m.authAccount
+		if acct == "" {
+			acct = "codex"
+		}
+		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("auth " + acct)
+	default:
+		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("sign in: /login codex")
+	}
+
 	segs := []string{
 		state,
+		authSeg,
 		seg("model", m.currentModel()),
 		seg("worker", worker),
 		seg("posture", string(m.posture)),
