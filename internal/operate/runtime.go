@@ -355,9 +355,12 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	}
 	emit(StreamEvent{Kind: StreamUser, Entry: &userEntry})
 
-	// Real model tool-calling loop when a model transport is configured;
-	// otherwise fall back to the deterministic keyword planner.
-	if r.Options.Model != nil {
+	// Slash commands are deterministic accelerators that map to native Ouvrier
+	// tools (or canned help) — they must NEVER be sent to the model, even when a
+	// model transport is configured. Only free-form natural language enters the
+	// model tool-calling loop.
+	isSlash := strings.HasPrefix(strings.TrimSpace(text), "/")
+	if r.Options.Model != nil && !isSlash {
 		return r.runAgentLoop(ctx, session, &turn, emit, ctrl)
 	}
 
