@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Client is a hand-rolled LSP JSON-RPC client for gopls.
@@ -58,7 +59,12 @@ func New(ctx context.Context, goplsPath, rootDir string) (*Client, error) {
 	}
 	c := newClient(stdinPipe, stdoutPipe)
 	c.cmd = cmd
-	if err := c.handshake(ctx, rootDir); err != nil {
+	// The gopls PROCESS lifetime is tied to the caller's ctx (long-lived).
+	// Only the initialize round-trip is bounded, so a slow handshake fails fast
+	// without killing a healthy server mid-session.
+	initCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := c.handshake(initCtx, rootDir); err != nil {
 		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("lsp: handshake: %w", err)
 	}

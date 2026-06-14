@@ -170,10 +170,11 @@ func (m *ideModel) Init() tea.Cmd {
 		openPath := m.openPath
 		editorContent := m.editor.Value()
 		cmds = append(cmds, func() tea.Msg {
-			ctx, cancel := context.WithTimeout(m.ctx, 12*1e9) // 12s
-			defer cancel()
+			// The gopls process must outlive this cmd; lsp.New bounds only the
+			// initialize round-trip internally. Passing a defer-cancelled ctx
+			// here would kill gopls before it publishes diagnostics.
 			root := moduleRoot(wsDir)
-			client, err := lsp.New(ctx, goplsPath, root)
+			client, err := lsp.New(m.ctx, goplsPath, root)
 			if err != nil {
 				return lspReadyMsg{err: err}
 			}
@@ -347,10 +348,8 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			editorContent := m.editor.Value()
 			m.lspStatus = "lsp: connecting..."
 			return m, func() tea.Msg {
-				ctx, cancel := context.WithTimeout(m.ctx, 12*1e9)
-				defer cancel()
 				root := moduleRoot(wsDir)
-				client, err := lsp.New(ctx, goplsPath, root)
+				client, err := lsp.New(m.ctx, goplsPath, root)
 				if err != nil {
 					return lspReadyMsg{err: err}
 				}
