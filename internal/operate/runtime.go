@@ -424,9 +424,11 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		emit = func(StreamEvent) {}
 	}
 	if call.ID == "" {
-		if id, err := randomID(); err == nil {
-			call.ID = id
+		id, err := randomID()
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("operate: generate tool_call_id: %w", err)
 		}
+		call.ID = id
 	}
 	callEntry, err := r.transcript(session).Append(TranscriptEntry{
 		SessionID: session.ID,
