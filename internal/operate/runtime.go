@@ -206,17 +206,17 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 
 // Prompt executes one free-form operator prompt.
 func (r *AgentRuntime) Prompt(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "prompt")
+	return r.runPrompt(ctx, sessionID, text, "prompt", nil)
 }
 
 // Steer records an operator steering instruction and executes it as a turn.
 func (r *AgentRuntime) Steer(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "steer")
+	return r.runPrompt(ctx, sessionID, text, "steer", nil)
 }
 
 // FollowUp executes a follow-up prompt inside the same session.
 func (r *AgentRuntime) FollowUp(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "follow_up")
+	return r.runPrompt(ctx, sessionID, text, "follow_up", nil)
 }
 
 // Interrupt records an interrupt request. Long-lived transports can later map
@@ -305,9 +305,12 @@ func (r *AgentRuntime) Subscribe(ctx context.Context, sessionID string) (<-chan 
 	return ch, nil
 }
 
-func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind string) (RuntimeTurn, error) {
+func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind string, emit func(StreamEvent)) (RuntimeTurn, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if emit == nil {
+		emit = func(StreamEvent) {}
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -323,37 +326,56 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 
 	var turn RuntimeTurn
 	turn.SessionID = session.ID
-	appendEntry := func(entry TranscriptEntry) error {
+	appendEntry := func(entry TranscriptEntry) (TranscriptEntry, error) {
 		entry.SessionID = session.ID
 		saved, err := r.transcript(session).Append(entry)
 		if err != nil {
-			return err
+			return TranscriptEntry{}, err
 		}
 		turn.Entries = append(turn.Entries, saved)
-		return nil
+		return saved, nil
 	}
-	if err := appendEntry(TranscriptEntry{Kind: TranscriptUser, Role: "user", Text: text, Metadata: map[string]any{"turn": kind}}); err != nil {
+	userEntry, err := appendEntry(TranscriptEntry{Kind: TranscriptUser, Role: "user", Text: text, Metadata: map[string]any{"turn": kind}})
+	if err != nil {
 		return RuntimeTurn{}, err
 	}
+	emit(StreamEvent{Kind: StreamUser, Entry: &userEntry})
 
 	plan := r.planPrompt(text)
 	if plan.Assistant != "" && len(plan.Tools) == 0 {
-		if err := appendEntry(TranscriptEntry{Kind: TranscriptAssistant, Role: "assistant", Text: plan.Assistant}); err != nil {
+		emitAssistantDeltas(emit, plan.Assistant)
+		saved, err := appendEntry(TranscriptEntry{Kind: TranscriptAssistant, Role: "assistant", Text: plan.Assistant})
+		if err != nil {
 			return RuntimeTurn{}, err
 		}
+		emit(StreamEvent{Kind: StreamAssistant, Entry: &saved})
 		turn.Final = plan.Assistant
 		turn.Workspace = r.workspace
+		emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
 		return turn, nil
+	}
+
+	if plan.Assistant != "" {
+		emit(StreamEvent{Kind: StreamStatus, Final: plan.Assistant})
 	}
 
 	var summaries []string
 	for _, call := range plan.Tools {
-		result, err := r.callTool(ctx, session, call, &turn)
+		if err := ctx.Err(); err != nil {
+			emit(StreamEvent{Kind: StreamStatus, Final: "interrupted"})
+			turn.Final = "interrupted"
+			turn.Workspace = r.workspace
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
+			return turn, err
+		}
+		result, err := r.callTool(ctx, session, call, &turn, emit)
 		if err != nil {
 			msg := call.Name + ": " + err.Error()
-			_ = appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
+			errEntry, _ := appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
+			emit(StreamEvent{Kind: StreamError, Entry: &errEntry, Err: err})
 			turn.Final = msg
 			turn.Workspace = r.workspace
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace, Err: err})
 			return turn, err
 		}
 		if strings.TrimSpace(result.Summary) != "" {
@@ -367,15 +389,21 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	if plan.Assistant != "" {
 		final = strings.TrimSpace(plan.Assistant + "\n" + final)
 	}
-	if err := appendEntry(TranscriptEntry{Kind: TranscriptAssistant, Role: "assistant", Text: final}); err != nil {
+	saved, err := appendEntry(TranscriptEntry{Kind: TranscriptAssistant, Role: "assistant", Text: final})
+	if err != nil {
 		return RuntimeTurn{}, err
 	}
+	emit(StreamEvent{Kind: StreamAssistant, Entry: &saved})
 	turn.Final = final
 	turn.Workspace = r.workspace
+	emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
 	return turn, ctx.Err()
 }
 
-func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plannedTool, turn *RuntimeTurn) (ToolResult, error) {
+func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plannedTool, turn *RuntimeTurn, emit func(StreamEvent)) (ToolResult, error) {
+	if emit == nil {
+		emit = func(StreamEvent) {}
+	}
 	callEntry, err := r.transcript(session).Append(TranscriptEntry{
 		SessionID: session.ID,
 		Kind:      TranscriptToolCall,
@@ -386,6 +414,7 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		return ToolResult{}, err
 	}
 	turn.Entries = append(turn.Entries, callEntry)
+	emit(StreamEvent{Kind: StreamToolStart, Entry: &callEntry})
 
 	result, runErr := r.Tools.Execute(ctx, ToolEnv{
 		Harness:   r.Harness,
@@ -412,6 +441,7 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		return ToolResult{}, err
 	}
 	turn.Entries = append(turn.Entries, resultEntry)
+	emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: runErr})
 	_ = appendToolCall(session.ToolCallsPath, call, result, runErr)
 	if runErr != nil {
 		return result, runErr

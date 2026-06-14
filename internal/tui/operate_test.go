@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -31,6 +32,57 @@ func TestOperateModelSelectsWorkerCandidate(t *testing.T) {
 	}
 	if selected.mode != "operate" {
 		t.Fatalf("mode = %q, want operate", selected.mode)
+	}
+}
+
+func TestOperateModelStreamsTurnIntoBlocks(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, dir, "ticket-triage")
+
+	model := newOperateModel(context.Background(), OperateOptions{Dir: dir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	model.submit("/workers")
+	if !model.running {
+		t.Fatal("model should be running after submit")
+	}
+
+	// Drain the live stream the way the Bubble Tea loop would.
+	for ev := range model.events {
+		model.handleStream(opStreamMsg{ev: ev, ok: true})
+	}
+	model.handleStream(opStreamMsg{ok: false})
+
+	if model.running {
+		t.Fatal("model still running after stream closed")
+	}
+
+	var sawUser, sawTool bool
+	for _, b := range model.blocks {
+		switch b.kind {
+		case blockUser:
+			if strings.Contains(b.text, "/workers") {
+				sawUser = true
+			}
+		case blockTool:
+			if b.toolName == "list_workers" && !b.running {
+				sawTool = true
+			}
+		}
+	}
+	if !sawUser {
+		t.Fatalf("transcript missing user block; blocks=%+v", model.blocks)
+	}
+	if !sawTool {
+		t.Fatalf("transcript missing completed list_workers tool card; blocks=%+v", model.blocks)
+	}
+
+	out := model.render()
+	if !strings.Contains(out, "list_workers") {
+		t.Fatalf("rendered cockpit missing tool card name:\n%s", out)
+	}
+	if !strings.Contains(out, "ready") && !strings.Contains(out, "working") {
+		t.Fatalf("rendered cockpit missing status bar:\n%s", out)
 	}
 }
 
