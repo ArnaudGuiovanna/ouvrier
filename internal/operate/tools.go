@@ -18,7 +18,7 @@ type ToolRegistry struct {
 type Tool struct {
 	Name        string
 	Description string
-	ReadOnly    bool
+	Governance  Governance
 	Run         ToolFunc
 }
 
@@ -43,21 +43,21 @@ type ToolResult struct {
 // NewToolRegistry returns the default Ouvrier worker-factory tool set.
 func NewToolRegistry() *ToolRegistry {
 	registry := &ToolRegistry{tools: map[string]Tool{}}
-	registry.Register(Tool{Name: "list_workers", Description: "List Ouvrier workers under the current directory.", ReadOnly: true, Run: toolListWorkers})
-	registry.Register(Tool{Name: "search_ouvrier_docs", Description: "Search the shipped Ouvrier docs and API reference.", ReadOnly: true, Run: toolSearchDocs})
-	registry.Register(Tool{Name: "read_ouvrier_api", Description: "Read a compact Ouvrier API primitive reference.", ReadOnly: true, Run: toolReadAPI})
-	registry.Register(Tool{Name: "read_worker_file", Description: "Read a project file from the selected worker.", ReadOnly: true, Run: toolReadWorkerFile})
-	registry.Register(Tool{Name: "scaffold_worker", Description: "Create a new readable Go worker using Ouvrier's scaffold engine.", Run: toolScaffoldWorker})
-	registry.Register(Tool{Name: "patch_worker", Description: "Ask the configured coding agent to edit the selected worker.", Run: toolPatchWorker})
-	registry.Register(Tool{Name: "review_worker", Description: "Review worker code in read-only mode and persist review.json.", ReadOnly: true, Run: toolReviewWorker})
-	registry.Register(Tool{Name: "fix_worker", Description: "Ask the configured coding agent to repair review/audit findings.", Run: toolFixWorker})
-	registry.Register(Tool{Name: "audit_worker", Description: "Run deterministic audit gates and persist audit.json.", ReadOnly: true, Run: toolAuditWorker})
-	registry.Register(Tool{Name: "diff_worker", Description: "Show the current candidate diff.", ReadOnly: true, Run: toolDiffWorker})
-	registry.Register(Tool{Name: "build_worker", Description: "Compile the worker binary through Ouvrier's build engine.", Run: toolBuildWorker})
-	registry.Register(Tool{Name: "transfer_worker", Description: "Transfer/deploy the worker through Ouvrier's deploy engine.", Run: toolTransferWorker})
-	registry.Register(Tool{Name: "accept_risk", Description: "Record an explicit accepted-risk rationale for gated transfer.", Run: toolAcceptRisk})
-	registry.Register(Tool{Name: "export_session", Description: "Export the transcript to Markdown.", ReadOnly: true, Run: toolExportSession})
-	registry.Register(Tool{Name: "login_codex", Description: "Probe/delegate Codex authentication without storing Codex tokens.", Run: toolLoginCodex})
+	registry.Register(Tool{Name: "list_workers", Description: "List Ouvrier workers under the current directory.", Governance: GovReadOnly, Run: toolListWorkers})
+	registry.Register(Tool{Name: "search_ouvrier_docs", Description: "Search the shipped Ouvrier docs and API reference.", Governance: GovReadOnly, Run: toolSearchDocs})
+	registry.Register(Tool{Name: "read_ouvrier_api", Description: "Read a compact Ouvrier API primitive reference.", Governance: GovReadOnly, Run: toolReadAPI})
+	registry.Register(Tool{Name: "read_worker_file", Description: "Read a project file from the selected worker.", Governance: GovReadOnly, Run: toolReadWorkerFile})
+	registry.Register(Tool{Name: "scaffold_worker", Description: "Create a new readable Go worker using Ouvrier's scaffold engine.", Governance: GovSideEffecting, Run: toolScaffoldWorker})
+	registry.Register(Tool{Name: "patch_worker", Description: "Ask the configured coding agent to edit the selected worker.", Governance: GovSideEffecting, Run: toolPatchWorker})
+	registry.Register(Tool{Name: "review_worker", Description: "Review worker code in read-only mode and persist review.json.", Governance: GovReadOnly, Run: toolReviewWorker})
+	registry.Register(Tool{Name: "fix_worker", Description: "Ask the configured coding agent to repair review/audit findings.", Governance: GovSideEffecting, Run: toolFixWorker})
+	registry.Register(Tool{Name: "audit_worker", Description: "Run deterministic audit gates and persist audit.json.", Governance: GovReadOnly, Run: toolAuditWorker})
+	registry.Register(Tool{Name: "diff_worker", Description: "Show the current candidate diff.", Governance: GovReadOnly, Run: toolDiffWorker})
+	registry.Register(Tool{Name: "build_worker", Description: "Compile the worker binary through Ouvrier's build engine.", Governance: GovSideEffecting, Run: toolBuildWorker})
+	registry.Register(Tool{Name: "transfer_worker", Description: "Transfer/deploy the worker through Ouvrier's deploy engine.", Governance: GovRequiresApproval, Run: toolTransferWorker})
+	registry.Register(Tool{Name: "accept_risk", Description: "Record an explicit accepted-risk rationale for gated transfer.", Governance: GovSideEffecting, Run: toolAcceptRisk})
+	registry.Register(Tool{Name: "export_session", Description: "Export the transcript to Markdown.", Governance: GovReadOnly, Run: toolExportSession})
+	registry.Register(Tool{Name: "login_codex", Description: "Probe/delegate Codex authentication without storing Codex tokens.", Governance: GovSideEffecting, Run: toolLoginCodex})
 	return registry
 }
 

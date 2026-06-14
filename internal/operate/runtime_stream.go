@@ -29,6 +29,8 @@ const (
 	StreamError StreamEventKind = "error"
 	// StreamDone is the terminal event for one turn.
 	StreamDone StreamEventKind = "done"
+	// StreamApproval is emitted when a governed tool requires operator approval.
+	StreamApproval StreamEventKind = "approval"
 )
 
 // StreamEvent is one incremental cockpit event delivered over RunTurn's channel.
@@ -38,6 +40,7 @@ type StreamEvent struct {
 	Delta     string           `json:"delta,omitempty"`
 	Final     string           `json:"final,omitempty"`
 	Workspace *Workspace       `json:"workspace,omitempty"`
+	Approval  *ApprovalRequest `json:"approval,omitempty"`
 	Err       error            `json:"-"`
 }
 
@@ -62,9 +65,38 @@ func (r *AgentRuntime) RunTurn(ctx context.Context, sessionID, text, kind string
 			case ch <- ev:
 			}
 		}
-		_, _ = r.runPrompt(ctx, sessionID, text, kind, emit)
+		_, _ = r.runPrompt(ctx, sessionID, text, kind, emit, headlessControl())
 	}()
 	return ch, nil
+}
+
+// RunTurnInteractive runs a turn with an operator approval channel. Send an
+// ApprovalDecision (matching each emitted StreamApproval.ID) on the returned
+// channel to unblock a governed tool.
+func (r *AgentRuntime) RunTurnInteractive(ctx context.Context, sessionID, text, kind string, posture Posture) (<-chan StreamEvent, chan<- ApprovalDecision, error) {
+	if r == nil || r.Store == nil {
+		return nil, nil, errors.New("operate: nil runtime")
+	}
+	if strings.TrimSpace(kind) == "" {
+		kind = "prompt"
+	}
+	if posture == "" {
+		posture = PostureManual
+	}
+	ch := make(chan StreamEvent, 32)
+	decisions := make(chan ApprovalDecision, 1)
+	ctrl := &turnControl{posture: posture, decisions: decisions, interactive: true}
+	go func() {
+		defer close(ch)
+		emit := func(ev StreamEvent) {
+			select {
+			case <-ctx.Done():
+			case ch <- ev:
+			}
+		}
+		_, _ = r.runPrompt(ctx, sessionID, text, kind, emit, ctrl)
+	}()
+	return ch, decisions, nil
 }
 
 // emitAssistantDeltas chunks a finished assistant message into word-sized deltas
