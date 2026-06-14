@@ -34,6 +34,9 @@ type App struct {
 	// runOperate launches the interactive v0.4 worker-builder cockpit. Tests
 	// substitute a fake implementation so they do not drive Bubble Tea.
 	runOperate RunOperateFunc
+	// runIDE launches the Ouvrier IDE TUI. Tests substitute a fake implementation
+	// so they do not drive Bubble Tea.
+	runIDE RunIDEFunc
 	// keyscan is the ssh-keyscan seam used by `ouvrier server trust`; tests
 	// substitute canned scan output. Nil means deploy.DefaultKeyscan.
 	keyscan deploy.KeyscanRunner
@@ -56,6 +59,7 @@ func New(version string, opts ...Option) *App {
 		errOut:     os.Stderr,
 		runNew:     defaultRunNew,
 		runOperate: defaultRunOperate,
+		runIDE:     defaultRunIDE,
 		signedIn:   codexSignedIn,
 	}
 	for _, opt := range opts {
@@ -151,6 +155,8 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runConsoleCommand(ctx, args[1:])
 	case "operate":
 		return app.runOperateCommand(ctx, args[1:])
+	case "ide":
+		return app.runIDECommand(ctx, args[1:])
 	case "state":
 		return app.runStateCommand(ctx, args[1:])
 	default:

@@ -11,6 +11,7 @@ Usage:
   ouvrier              Open the agent cockpit (build/review/deploy by prompt)
   ouvrier -p "<goal>"  Run one agent prompt non-interactively
   ouvrier -c           Resume the latest session
+  ouvrier ide          Review/edit/rebuild a worker in the IDE (gopls + Ouvrier snippets)
   ouvrier version      Print the ouvrier CLI version
 
 Inside the cockpit, describe the worker you want; the agent scaffolds it,
