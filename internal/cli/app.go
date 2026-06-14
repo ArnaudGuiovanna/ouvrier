@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
@@ -98,6 +100,16 @@ func (app *App) run(ctx context.Context, args []string) error {
 	}
 	if args[0] == "-p" {
 		return app.runOperateCommand(ctx, append([]string{"--prompt"}, args[1:]...))
+	}
+	if args[0] == "-c" || args[0] == "--continue" {
+		rest := args[1:]
+		dir := operateDirFromArgs(rest)
+		if store, err := operate.NewStore(dir); err == nil {
+			if id, err := store.LatestSessionID(); err == nil {
+				return app.runOperateCommand(ctx, append([]string{"--session", id}, rest...))
+			}
+		}
+		return app.runOperateCommand(ctx, rest)
 	}
 
 	switch args[0] {
@@ -226,4 +238,22 @@ func hasHelpFlag(args []string) bool {
 
 func isHelpFlag(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "help"
+}
+
+// operateDirFromArgs extracts a --dir value (either "--dir=x" or "--dir x") from
+// raw operate args, defaulting to "." so `-c` can locate the session store.
+func operateDirFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		name, inline, hasInline := strings.Cut(args[i], "=")
+		if name != "--dir" {
+			continue
+		}
+		if hasInline {
+			return inline
+		}
+		if i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return "."
 }
