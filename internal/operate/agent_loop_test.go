@@ -187,3 +187,45 @@ func TestAgentLoopPersistsToolCallID(t *testing.T) {
 		t.Fatalf("expected model-supplied id call_abc, got %q", callID)
 	}
 }
+
+func TestHistoryMessagesReplaysToolTurns(t *testing.T) {
+	entries := []TranscriptEntry{
+		{Kind: TranscriptUser, Text: "list the workers"},
+		{Kind: TranscriptAssistant, Text: "I'll list them."},
+		{Kind: TranscriptToolCall, ToolName: "list_workers", Input: map[string]any{}, Metadata: map[string]any{"tool_call_id": "c1"}},
+		{Kind: TranscriptToolResult, ToolName: "list_workers", Output: map[string]any{"summary": "1 worker"}, Metadata: map[string]any{"tool_call_id": "c1"}},
+		{Kind: TranscriptAssistant, Text: "Found 1 worker."},
+		{Kind: TranscriptUser, Text: "now audit it"},
+	}
+
+	msgs := historyMessages(entries)
+
+	if len(msgs) != 5 {
+		t.Fatalf("want 5 messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Role != provider.RoleUser {
+		t.Fatalf("msg0 role = %q", msgs[0].Role)
+	}
+	var sawToolCall, sawToolResult bool
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == provider.BlockToolCall && b.ToolCall != nil && b.ToolCall.ID == "c1" {
+				sawToolCall = true
+			}
+			if b.Type == provider.BlockToolResult && b.ToolResult != nil && b.ToolResult.ToolCallID == "c1" {
+				sawToolResult = true
+			}
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Fatalf("missing tool call/result in history: call=%v result=%v", sawToolCall, sawToolResult)
+	}
+	if msgs[len(msgs)-1].Role != provider.RoleUser || msgs[len(msgs)-1].Text() != "now audit it" {
+		t.Fatalf("last message should be the new user prompt, got %+v", msgs[len(msgs)-1])
+	}
+	for i, m := range msgs {
+		if err := m.Validate(); err != nil {
+			t.Fatalf("msg %d invalid: %v", i, err)
+		}
+	}
+}
