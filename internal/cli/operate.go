@@ -76,7 +76,14 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if cfg.Mode != "tui" || cfg.Print || strings.TrimSpace(cfg.Prompt) != "" {
 		return app.runOperatePromptMode(ctx, cfg, driver, model, modelID)
 	}
-	authState, authAccount := (&authpkg.Codex{}).Probe(ctx)
+	authState := "unauthed"
+	authAccount := ""
+	if app.signedIn != nil && app.signedIn() {
+		authState = "authed"
+		if _, acct := (&authpkg.Codex{}).Probe(ctx); acct != "" {
+			authAccount = acct
+		}
+	}
 	return app.runOperate(ctx, app.in, app.out, tui.OperateOptions{
 		Dir:         cfg.Dir,
 		Agent:       cfg.Agent,
@@ -91,7 +98,7 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 		AllowFail:   cfg.AllowFail,
 		Model:       model,
 		ModelID:     modelID,
-		AuthState:   string(authState),
+		AuthState:   authState,
 		AuthAccount: authAccount,
 	})
 }
