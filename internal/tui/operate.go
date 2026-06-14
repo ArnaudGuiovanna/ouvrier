@@ -142,10 +142,12 @@ var operateSlashCommands = []slashCmd{
 	{"/build", "/build --target linux/amd64", "Compile the worker binary"},
 	{"/deploy", "/deploy staging", "Build then transfer through the deploy engine"},
 	{"/read", "/read main.go", "Read a worker file"},
+	{"/edit", "/edit main.go", "Open a worker file in the manual editor"},
 	{"/docs", "/docs <query>", "Search the Ouvrier docs & API"},
 	{"/workers", "/workers", "List detected workers"},
 	{"/login", "/login codex", "Probe/delegate Codex authentication"},
 	{"/accept-risk", "/accept-risk <rationale>", "Record an accepted risk"},
+	{"/clear", "/clear", "Clear the transcript view"},
 	{"/export", "/export", "Export the transcript to Markdown"},
 	{"/tools", "/tools", "List the native Ouvrier tools"},
 	{"/policy", "/policy", "Show the tool/safety policy"},
@@ -581,6 +583,14 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 	}
 	if strings.HasPrefix(text, "!") {
 		return m.runShell(text)
+	}
+	if strings.TrimSpace(text) == "/clear" {
+		m.blocks = nil
+		m.findings = nil
+		m.diff = nil
+		m.showReview = false
+		m.refreshViewport()
+		return m, nil
 	}
 	if m.err != nil {
 		m.blocks = append(m.blocks, opBlock{kind: blockError, text: m.err.Error()})

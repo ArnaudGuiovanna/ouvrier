@@ -261,6 +261,21 @@ func TestBangBangCommandIsSilent(t *testing.T) {
 	}
 }
 
+func TestSlashClearStartsFreshTranscript(t *testing.T) {
+	dir := t.TempDir()
+	wdir := filepath.Join(dir, "demo")
+	writeOperateWorker(t, wdir, "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: wdir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.blocks = append(m.blocks, opBlock{kind: blockUser, text: "old turn marker"})
+	m.submit("/clear")
+	for _, b := range m.blocks {
+		if strings.Contains(b.text, "old turn marker") {
+			t.Fatal("/clear should drop the previous transcript blocks")
+		}
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
