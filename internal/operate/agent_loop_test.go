@@ -188,6 +188,75 @@ func TestAgentLoopPersistsToolCallID(t *testing.T) {
 	}
 }
 
+func TestHistoryMessagesMultipleToolCallsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+
+	model := &scriptedModel{steps: []provider.Response{
+		{
+			Text:       "I'll call two tools.",
+			StopReason: provider.StopToolUse,
+			ToolCalls: []provider.ToolCall{
+				{ID: "c1", Name: "list_workers", Arguments: json.RawMessage(`{}`)},
+				{ID: "c2", Name: "read_ouvrier_api", Arguments: json.RawMessage(`{}`)},
+			},
+		},
+		{Text: "done", StopReason: provider.StopEndTurn},
+	}}
+
+	rt, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}, Model: model, ModelID: "test/model"})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	started, err := rt.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ch, err := rt.RunTurn(context.Background(), started.Session.ID, "do two things", "prompt")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range ch {
+	}
+
+	entries, err := ReadTranscript(started.Session.TranscriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	msgs := historyMessages(entries)
+
+	// Every reconstructed message must be provider-valid.
+	for i, m := range msgs {
+		if err := m.Validate(); err != nil {
+			t.Fatalf("message %d invalid: %v\nfull history: %+v", i, err, msgs)
+		}
+	}
+	// Both tool calls and both results must be present and correctly paired.
+	calls := map[string]bool{}
+	results := map[string]bool{}
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if b.Type == provider.BlockToolCall && b.ToolCall != nil {
+				calls[b.ToolCall.ID] = true
+			}
+			if b.Type == provider.BlockToolResult && b.ToolResult != nil {
+				results[b.ToolResult.ToolCallID] = true
+			}
+		}
+	}
+	for _, id := range []string{"c1", "c2"} {
+		if !calls[id] || !results[id] {
+			t.Fatalf("missing call/result for %s: call=%v result=%v\nhistory=%+v", id, calls[id], results[id], msgs)
+		}
+	}
+	// No two adjacent assistant messages (would be invalid alternation).
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i-1].Role == provider.RoleAssistant && msgs[i].Role == provider.RoleAssistant {
+			t.Fatalf("two adjacent assistant messages at %d-%d: %+v", i-1, i, msgs)
+		}
+	}
+}
+
 func TestHistoryMessagesReplaysToolTurns(t *testing.T) {
 	entries := []TranscriptEntry{
 		{Kind: TranscriptUser, Text: "list the workers"},
