@@ -96,6 +96,14 @@ func (m *ideModel) render() string {
 	// Overlay the snippet palette if open.
 	if m.showPalette {
 		frame = m.overlayPalette(frame)
+	} else if m.showComplete {
+		// Palette takes precedence; completion only when palette is closed.
+		frame = m.overlayComplete(frame)
+	}
+
+	// Overlay the hover popover if open.
+	if m.showHover {
+		frame = m.overlayHover(frame)
 	}
 
 	return frame
@@ -244,7 +252,10 @@ func (m *ideModel) renderStatusLine(width int) string {
 
 // renderHints renders the footer keybinding hints line.
 func (m *ideModel) renderHints(width int) string {
-	hints := "ctrl+s save&audit · ctrl+b build · tab focus · ]d/[d problem · ctrl+p snippets · ctrl+\\ API · ctrl+q quit"
+	hints := "ctrl+s save&audit · ctrl+b build · tab focus · ]d/[d problem · ctrl+p snippets · ctrl+space complete · ctrl+\\ API · ctrl+q quit"
+	if m.client != nil {
+		hints += " · ctrl+k hover · ctrl+] def · ctrl+t back"
+	}
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color(overlay1Hex)).
 		Width(width).
@@ -350,6 +361,171 @@ func (m *ideModel) overlayPalette(frame string) string {
 	}
 
 	startCol := (m.width - paletteW) / 2
+	if startCol < 0 {
+		startCol = 0
+	}
+	prefix := strings.Repeat(" ", startCol)
+
+	for i, bl := range boxLines {
+		row := startRow + i
+		if row >= len(frameLines) {
+			break
+		}
+		frameLines[row] = prefix + bl
+	}
+	return strings.Join(frameLines, "\n")
+}
+
+// overlayHover renders the hover popover as a centered bordered box overlaid on
+// the frame string, reusing the same overlay technique as overlayPalette.
+func (m *ideModel) overlayHover(frame string) string {
+	const hoverW = 62
+	const maxLines = 10
+
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(overlay2Hex))
+	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(textHex))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(overlay2Hex))
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(surface2Hex))
+
+	// Word-wrap hoverText to hoverW-4 cols.
+	innerW := hoverW - 4
+	rawLines := strings.Split(m.hoverText, "\n")
+	var wrappedLines []string
+	for _, rl := range rawLines {
+		if len(rl) == 0 {
+			wrappedLines = append(wrappedLines, "")
+			continue
+		}
+		for len(rl) > innerW {
+			wrappedLines = append(wrappedLines, rl[:innerW])
+			rl = rl[innerW:]
+		}
+		wrappedLines = append(wrappedLines, rl)
+	}
+	if len(wrappedLines) > maxLines {
+		wrappedLines = wrappedLines[:maxLines]
+	}
+
+	var contentLines []string
+	contentLines = append(contentLines, titleStyle.Render("  hover"))
+	for _, l := range wrappedLines {
+		contentLines = append(contentLines, textStyle.Render("  "+l))
+	}
+	contentLines = append(contentLines, hintStyle.Render("  esc close"))
+
+	boxTop := borderStyle.Render("┌" + strings.Repeat("─", hoverW-2) + "┐")
+	boxBot := borderStyle.Render("└" + strings.Repeat("─", hoverW-2) + "┘")
+
+	boxLines := []string{boxTop}
+	for _, l := range contentLines {
+		padded := padRight(l, hoverW-2)
+		boxLines = append(boxLines, "│"+padded+"│")
+	}
+	boxLines = append(boxLines, boxBot)
+
+	frameLines := strings.Split(frame, "\n")
+	startRow := 2
+	if m.height > len(boxLines)+4 {
+		startRow = (m.height - len(boxLines)) / 4
+		if startRow < 1 {
+			startRow = 1
+		}
+	}
+	startCol := (m.width - hoverW) / 2
+	if startCol < 0 {
+		startCol = 0
+	}
+	prefix := strings.Repeat(" ", startCol)
+
+	for i, bl := range boxLines {
+		row := startRow + i
+		if row >= len(frameLines) {
+			break
+		}
+		frameLines[row] = prefix + bl
+	}
+	return strings.Join(frameLines, "\n")
+}
+
+// overlayComplete renders the completion popup as a bordered box overlaid on
+// the frame string, using the same overlay technique as overlayPalette/overlayHover.
+func (m *ideModel) overlayComplete(frame string) string {
+	const completeW = 58
+	const maxItems = 8
+
+	snippetStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
+	itemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(textHex))
+	detailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(overlay2Hex))
+	selStyle := lipgloss.NewStyle().Background(lipgloss.Color(surface2Hex)).Foreground(lipgloss.Color(textHex))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(overlay2Hex))
+	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(surface2Hex))
+
+	visible := m.completeItems
+	if len(visible) > maxItems {
+		visible = visible[:maxItems]
+	}
+
+	innerW := completeW - 4
+	var contentLines []string
+	if len(visible) == 0 {
+		contentLines = append(contentLines, itemStyle.Render("  (no completions)"))
+	}
+	for i, it := range visible {
+		label := it.label
+		detail := it.detail
+		if len(detail) > 20 {
+			detail = detail[:20]
+		}
+		var line string
+		if detail != "" {
+			labelW := innerW - len(detail) - 2
+			if labelW < 0 {
+				labelW = 0
+			}
+			if len(label) > labelW {
+				label = label[:labelW]
+			}
+			padding := strings.Repeat(" ", max(innerW-len(label)-len(detail), 1))
+			combined := "  " + label + padding + detailStyle.Render(detail)
+			if i == m.completeSel {
+				line = selStyle.Width(completeW - 2).Render("  " + label + padding + detail)
+			} else if it.snippet {
+				line = snippetStyle.Render("  " + label + padding + detail)
+			} else {
+				line = combined
+			}
+		} else {
+			if i == m.completeSel {
+				line = selStyle.Width(completeW - 2).Render("  " + label)
+			} else if it.snippet {
+				line = snippetStyle.Render("  " + label)
+			} else {
+				line = itemStyle.Render("  " + label)
+			}
+		}
+		contentLines = append(contentLines, line)
+	}
+	contentLines = append(contentLines, hintStyle.Render("  tab insert · esc close"))
+
+	boxTop := borderStyle.Render("┌" + strings.Repeat("─", completeW-2) + "┐")
+	boxBot := borderStyle.Render("└" + strings.Repeat("─", completeW-2) + "┘")
+
+	boxLines := []string{boxTop}
+	for _, l := range contentLines {
+		padded := padRight(l, completeW-2)
+		boxLines = append(boxLines, "│"+padded+"│")
+	}
+	boxLines = append(boxLines, boxBot)
+
+	frameLines := strings.Split(frame, "\n")
+	startRow := 3
+	if m.height > len(boxLines)+4 {
+		startRow = (m.height - len(boxLines)) / 3
+		if startRow < 1 {
+			startRow = 1
+		}
+	}
+	startCol := (m.width - completeW) / 2
 	if startCol < 0 {
 		startCol = 0
 	}

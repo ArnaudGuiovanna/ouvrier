@@ -40,6 +40,27 @@ func RuneColumn(line string, character int, enc PositionEncoding) int {
 	return len(runes)
 }
 
+// EncodedColumn converts a 0-based rune column on a line into an LSP character
+// offset under the negotiated encoding (inverse of RuneColumn).
+func EncodedColumn(line string, runeCol int, enc PositionEncoding) int {
+	runes := []rune(line)
+	if runeCol > len(runes) {
+		runeCol = len(runes)
+	}
+	if runeCol < 0 {
+		runeCol = 0
+	}
+	n := 0
+	for i := 0; i < runeCol; i++ {
+		if enc == EncodingUTF8 {
+			n += len(string(runes[i]))
+		} else {
+			n += len(utf16.Encode([]rune{runes[i]}))
+		}
+	}
+	return n
+}
+
 // LineAt returns the row-th line of doc (split on \n), clamped to "".
 func LineAt(doc string, row int) string {
 	if row < 0 {

@@ -43,6 +43,49 @@ func TestRuneColumnSupplementary(t *testing.T) {
 	}
 }
 
+func TestEncodedColumnUTF8(t *testing.T) {
+	// "é= x": é=2 bytes, '='=1, ' '=1, 'x'=1 → rune 3 is 'x' at byte offset 4
+	got := EncodedColumn("é= x", 3, EncodingUTF8)
+	if got != 4 {
+		t.Errorf("UTF-8 rune 3 → want byte 4, got %d", got)
+	}
+}
+
+func TestEncodedColumnUTF16(t *testing.T) {
+	// "é= x": é=1 UTF-16 unit, '='=1, ' '=1 → rune 3 is 'x' at unit offset 3
+	got := EncodedColumn("é= x", 3, EncodingUTF16)
+	if got != 3 {
+		t.Errorf("UTF-16 rune 3 → want unit 3, got %d", got)
+	}
+}
+
+func TestEncodedColumnRoundTrip(t *testing.T) {
+	cases := []struct {
+		line    string
+		runeCol int
+		enc     PositionEncoding
+	}{
+		{"é= x", 0, EncodingUTF8},
+		{"é= x", 1, EncodingUTF8},
+		{"é= x", 3, EncodingUTF8},
+		{"é= x", 0, EncodingUTF16},
+		{"é= x", 2, EncodingUTF16},
+		{"é= x", 3, EncodingUTF16},
+		{"😀x", 0, EncodingUTF8},
+		{"😀x", 1, EncodingUTF8},
+		{"😀x", 0, EncodingUTF16},
+		{"😀x", 1, EncodingUTF16},
+	}
+	for _, c := range cases {
+		enc := EncodedColumn(c.line, c.runeCol, c.enc)
+		got := RuneColumn(c.line, enc, c.enc)
+		if got != c.runeCol {
+			t.Errorf("round-trip %q runeCol=%d enc=%s: EncodedColumn→%d, RuneColumn→%d",
+				c.line, c.runeCol, c.enc, enc, got)
+		}
+	}
+}
+
 func TestLineAt(t *testing.T) {
 	doc := "line0\nline1\nline2"
 	cases := []struct {
