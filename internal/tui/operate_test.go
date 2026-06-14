@@ -86,6 +86,23 @@ func TestOperateModelStreamsTurnIntoBlocks(t *testing.T) {
 	}
 }
 
+func TestOperateApprovalCardFlow(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	req := &operate.ApprovalRequest{ID: "a1", Tool: "transfer_worker", Governance: operate.GovRequiresApproval, Summary: "deploy worker to staging"}
+	m.applyStream(operate.StreamEvent{Kind: operate.StreamApproval, Approval: req})
+	if m.pendingApproval == nil || m.pendingApproval.ID != "a1" {
+		t.Fatalf("approval not recorded as pending: %+v", m.pendingApproval)
+	}
+	out := m.render()
+	if !strings.Contains(out, "Approval") || !strings.Contains(out, "deploy") {
+		t.Fatalf("approval card not rendered:\n%s", out)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

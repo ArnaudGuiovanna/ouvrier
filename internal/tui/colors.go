@@ -11,6 +11,7 @@ const (
 	yellowHex   = "#e5c07b"
 	redHex      = "#ff5f5f"
 	dimGreenHex = "#1f3d31"
+	magentaHex  = "#c678dd"
 )
 
 var (

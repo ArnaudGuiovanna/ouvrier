@@ -29,6 +29,9 @@ func (m *operateModel) render() string {
 	if m.slashActive && len(m.slashMatches) > 0 {
 		sections = append(sections, m.renderSlashMenu(cw))
 	}
+	if m.pendingApproval != nil {
+		sections = append(sections, m.renderApprovalCard(cw))
+	}
 	sections = append(sections,
 		m.renderRule(cw),
 		m.composer.View(),
@@ -250,6 +253,7 @@ func (m *operateModel) renderStatusBar(width int) string {
 		state,
 		seg("model", m.currentModel()),
 		seg("worker", worker),
+		seg("posture", string(m.posture)),
 	}
 	if m.workspace.Git.Present {
 		segs = append(segs, seg("git", gitLine(m.workspace.Git)))
@@ -504,4 +508,58 @@ func truncateANSI(s string, width int) string {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes)
+}
+
+func (m *operateModel) renderApprovalCard(width int) string {
+	ap := m.pendingApproval
+	if ap == nil {
+		return ""
+	}
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(magentaHex)).Bold(true)
+	key := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
+	val := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
+	var lines []string
+	lines = append(lines, title.Render("◆ Approval required"))
+	lines = append(lines, val.Render(ap.Summary))
+	for _, kv := range approvalDetailLines(ap) {
+		lines = append(lines, muted.Render(kv.k+": ")+val.Render(kv.v))
+	}
+	if ap.Prod {
+		want := workerNameForApproval(ap)
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render(
+			"PROD — type \""+want+"\" then enter: "+m.prodConfirm))
+		lines = append(lines, key.Render("type name + enter")+muted.Render(" approve   ")+key.Render("esc")+muted.Render(" deny"))
+	} else {
+		lines = append(lines, key.Render("enter/y")+muted.Render(" approve   ")+key.Render("esc/n")+muted.Render(" deny"))
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(magentaHex)).
+		Padding(0, 2).
+		Width(max(width-2, 20))
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+func approvalDetailLines(ap *operate.ApprovalRequest) []kv {
+	if ap == nil || ap.Details == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(ap.Details))
+	for k := range ap.Details {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []kv
+	for _, k := range keys {
+		v := compactValue(ap.Details[k])
+		if v == "" {
+			continue
+		}
+		out = append(out, kv{k: k, v: v})
+		if len(out) == 6 {
+			break
+		}
+	}
+	return out
 }

@@ -100,6 +100,11 @@ type operateModel struct {
 
 	showHelp bool
 	status   string
+
+	pendingApproval *operate.ApprovalRequest
+	decisions       chan<- operate.ApprovalDecision
+	posture         operate.Posture
+	prodConfirm     string
 }
 
 // slashCmd is one accelerator surfaced in the composer's command menu.
@@ -172,6 +177,7 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 		vp:             viewport.New(),
 		runningToolIdx: -1,
 		models:         defaultModelChoices(opts),
+		posture:        operate.PostureManual,
 	}
 
 	runtime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
@@ -356,6 +362,9 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 			}
 		}
 		m.runningToolIdx = -1
+	case operate.StreamApproval:
+		m.pendingApproval = ev.Approval
+		m.prodConfirm = ""
 	case operate.StreamError:
 		if ev.Entry == nil {
 			return
@@ -367,6 +376,8 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 		}
 		m.blocks = append(m.blocks, opBlock{kind: blockError, text: ev.Entry.Text})
 	case operate.StreamDone:
+		m.pendingApproval = nil
+		m.prodConfirm = ""
 		if ev.Workspace != nil {
 			m.workspace = *ev.Workspace
 			if m.mode != "operate" {
@@ -418,6 +429,10 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = false
 		m.resize()
 		return m, nil
+	}
+
+	if m.pendingApproval != nil {
+		return m.handleApprovalKey(keyStr)
 	}
 
 	// Preserve the worker selection shortcut from the parent-directory factory.
@@ -479,6 +494,9 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.completeSlash()
 			return m, nil
 		}
+	case "shift+tab":
+		m.posture = nextPosture(m.posture)
+		return m, nil
 	case "enter":
 		if m.slashActive && len(m.slashMatches) > 0 {
 			name := m.slashMatches[m.slashIndex].name
@@ -529,7 +547,7 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.blocks = append(m.blocks, opBlock{kind: blockUser, text: text})
 	ctx, cancel := context.WithCancel(m.ctx)
-	ch, err := m.runtime.RunTurn(ctx, m.session.ID, text, "prompt")
+	ch, dec, err := m.runtime.RunTurnInteractive(ctx, m.session.ID, text, "prompt", m.posture)
 	if err != nil {
 		cancel()
 		m.blocks = append(m.blocks, opBlock{kind: blockError, text: err.Error()})
@@ -540,6 +558,7 @@ func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.runningToolIdx = -1
 	m.cancel = cancel
 	m.events = ch
+	m.decisions = dec
 	m.startedAt = time.Now()
 	m.status = ""
 	m.refreshViewport()
@@ -746,6 +765,78 @@ func blocksFromTranscript(entries []operate.TranscriptEntry) []opBlock {
 		}
 	}
 	return blocks
+}
+
+func (m *operateModel) handleApprovalKey(keyStr string) (tea.Model, tea.Cmd) {
+	ap := m.pendingApproval
+	deny := func() (tea.Model, tea.Cmd) {
+		if m.decisions != nil {
+			m.decisions <- operate.ApprovalDecision{ID: ap.ID, Approved: false, Reason: "denied by operator"}
+		}
+		m.pendingApproval = nil
+		m.prodConfirm = ""
+		return m, nil
+	}
+	approve := func() (tea.Model, tea.Cmd) {
+		if m.decisions != nil {
+			m.decisions <- operate.ApprovalDecision{ID: ap.ID, Approved: true}
+		}
+		m.pendingApproval = nil
+		m.prodConfirm = ""
+		return m, nil
+	}
+	switch keyStr {
+	case "esc":
+		return deny()
+	}
+	if ap.Prod {
+		want := workerNameForApproval(ap)
+		switch keyStr {
+		case "enter":
+			if want != "" && m.prodConfirm == want {
+				return approve()
+			}
+			return m, nil
+		case "backspace":
+			if n := len(m.prodConfirm); n > 0 {
+				m.prodConfirm = m.prodConfirm[:n-1]
+			}
+			return m, nil
+		default:
+			if len(keyStr) == 1 {
+				m.prodConfirm += keyStr
+			}
+			return m, nil
+		}
+	}
+	switch keyStr {
+	case "enter", "y":
+		return approve()
+	case "n":
+		return deny()
+	}
+	return m, nil
+}
+
+func workerNameForApproval(ap *operate.ApprovalRequest) string {
+	if ap == nil || ap.Details == nil {
+		return ""
+	}
+	if s, ok := ap.Details["worker"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+func nextPosture(p operate.Posture) operate.Posture {
+	switch p {
+	case operate.PostureManual:
+		return operate.PostureAutoSafe
+	case operate.PostureAutoSafe:
+		return operate.PosturePlan
+	default:
+		return operate.PostureManual
+	}
 }
 
 func (m *operateModel) View() tea.View {
