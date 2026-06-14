@@ -11,7 +11,7 @@ import (
 )
 
 func TestRunEmptyArgsOpensCockpit(t *testing.T) {
-	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}))
+	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
 	called := false
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, _ tui.OperateOptions) error {
 		called = true
@@ -43,7 +43,7 @@ func TestRunHelpFlagStillPrintsHelp(t *testing.T) {
 func TestRunDashPRunsPromptMode(t *testing.T) {
 	tmp := t.TempDir()
 	out := &bytes.Buffer{}
-	app := New("test", WithStreams(bytes.NewReader(nil), out, &bytes.Buffer{}))
+	app := New("test", WithStreams(bytes.NewReader(nil), out, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
 	// -p maps to operate prompt mode (planner, no model). /help is deterministic.
 	err := app.run(context.Background(), []string{"-p", "/help", "--agent", "manual", "--dir", tmp})
 	if err != nil {
@@ -65,7 +65,7 @@ func TestRunDashCResumesLatest(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}))
+	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
 	var gotSession string
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, opts tui.OperateOptions) error {
 		gotSession = opts.Session

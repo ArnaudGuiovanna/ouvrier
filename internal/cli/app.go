@@ -37,6 +37,9 @@ type App struct {
 	// keyscan is the ssh-keyscan seam used by `ouvrier server trust`; tests
 	// substitute canned scan output. Nil means deploy.DefaultKeyscan.
 	keyscan deploy.KeyscanRunner
+	// signedIn probes whether a Codex subscription is active. Tests substitute
+	// a stub so they don't shell out to codex.
+	signedIn func() bool
 }
 
 type Option func(*App)
@@ -53,6 +56,7 @@ func New(version string, opts ...Option) *App {
 		errOut:     os.Stderr,
 		runNew:     defaultRunNew,
 		runOperate: defaultRunOperate,
+		signedIn:   codexSignedIn,
 	}
 	for _, opt := range opts {
 		opt(app)
@@ -70,6 +74,12 @@ func WithStreams(in io.Reader, out io.Writer, errOut io.Writer) Option {
 			app.errOut = errOut
 		}
 	}
+}
+
+// WithSignedIn overrides the Codex subscription probe. Tests pass
+// func() bool { return false } so they don't shell out to codex.
+func WithSignedIn(fn func() bool) Option {
+	return func(app *App) { app.signedIn = fn }
 }
 
 func (app *App) Run(ctx context.Context, args []string) error {

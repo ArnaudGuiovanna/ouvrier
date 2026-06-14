@@ -38,6 +38,12 @@ type OperateOptions struct {
 	// the cockpit falls back to the deterministic keyword planner.
 	Model   operate.AgentModel
 	ModelID string
+
+	// AuthState is the Codex authentication state ("authed", "unauthed",
+	// "no_codex"). AuthAccount is the human-readable account label returned by
+	// Probe when signed in.
+	AuthState   string
+	AuthAccount string
 }
 
 // blockKind classifies one rendered transcript block in the cockpit.
@@ -100,6 +106,9 @@ type operateModel struct {
 
 	showHelp bool
 	status   string
+
+	authState   string
+	authAccount string
 
 	pendingApproval *operate.ApprovalRequest
 	decisions       chan<- operate.ApprovalDecision
@@ -178,6 +187,8 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 		runningToolIdx: -1,
 		models:         defaultModelChoices(opts),
 		posture:        operate.PostureManual,
+		authState:      opts.AuthState,
+		authAccount:    opts.AuthAccount,
 	}
 
 	runtime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
