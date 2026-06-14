@@ -798,8 +798,8 @@ func (m *operateModel) handleApprovalKey(keyStr string) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "backspace":
-			if n := len(m.prodConfirm); n > 0 {
-				m.prodConfirm = m.prodConfirm[:n-1]
+			if r := []rune(m.prodConfirm); len(r) > 0 {
+				m.prodConfirm = string(r[:len(r)-1])
 			}
 			return m, nil
 		default:

@@ -103,6 +103,60 @@ func TestOperateApprovalCardFlow(t *testing.T) {
 	}
 }
 
+func TestApprovalKeyApproveAndDeny(t *testing.T) {
+	// non-prod approve via enter
+	dec := make(chan operate.ApprovalDecision, 1)
+	m := &operateModel{decisions: dec}
+	m.pendingApproval = &operate.ApprovalRequest{ID: "a1", Tool: "build_worker"}
+	m.handleApprovalKey("enter")
+	d := <-dec
+	if !d.Approved || d.ID != "a1" {
+		t.Fatalf("enter should approve a1: %+v", d)
+	}
+	if m.pendingApproval != nil {
+		t.Fatal("pendingApproval not cleared after approve")
+	}
+
+	// non-prod deny via esc
+	m.decisions = dec
+	m.pendingApproval = &operate.ApprovalRequest{ID: "a2", Tool: "build_worker"}
+	m.handleApprovalKey("esc")
+	d = <-dec
+	if d.Approved || d.ID != "a2" {
+		t.Fatalf("esc should deny a2: %+v", d)
+	}
+	if m.pendingApproval != nil {
+		t.Fatal("pendingApproval not cleared after deny")
+	}
+}
+
+func TestApprovalKeyProdTypedConfirm(t *testing.T) {
+	dec := make(chan operate.ApprovalDecision, 1)
+	m := &operateModel{decisions: dec}
+	m.pendingApproval = &operate.ApprovalRequest{ID: "p1", Tool: "transfer_worker", Prod: true, Details: map[string]any{"worker": "demo"}}
+
+	// enter before typing the name must NOT approve and must NOT clear the card
+	m.handleApprovalKey("enter")
+	select {
+	case d := <-dec:
+		t.Fatalf("prod approved without typing the name: %+v", d)
+	default:
+	}
+	if m.pendingApproval == nil {
+		t.Fatal("prod card cleared prematurely")
+	}
+
+	// type the worker name, then enter approves
+	for _, c := range "demo" {
+		m.handleApprovalKey(string(c))
+	}
+	m.handleApprovalKey("enter")
+	d := <-dec
+	if !d.Approved || d.ID != "p1" {
+		t.Fatalf("prod should approve after typing name: %+v", d)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

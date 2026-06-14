@@ -527,9 +527,15 @@ func (m *operateModel) renderApprovalCard(width int) string {
 	}
 	if ap.Prod {
 		want := workerNameForApproval(ap)
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render(
-			"PROD — type \""+want+"\" then enter: "+m.prodConfirm))
-		lines = append(lines, key.Render("type name + enter")+muted.Render(" approve   ")+key.Render("esc")+muted.Render(" deny"))
+		if want == "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render(
+				"PROD — worker name unavailable; approval locked"))
+			lines = append(lines, key.Render("esc")+muted.Render(" deny"))
+		} else {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render(
+				"PROD — type \""+want+"\" then enter: "+m.prodConfirm))
+			lines = append(lines, key.Render("type name + enter")+muted.Render(" approve   ")+key.Render("esc")+muted.Render(" deny"))
+		}
 	} else {
 		lines = append(lines, key.Render("enter/y")+muted.Render(" approve   ")+key.Render("esc/n")+muted.Render(" deny"))
 	}
