@@ -2,10 +2,12 @@ package ide
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -81,6 +83,20 @@ type ideModel struct {
 	// API reference panel
 	showAPI bool
 	apiSel  int
+
+	// hover overlay
+	showHover bool
+	hoverText string
+
+	// definition jump stack
+	jumpStack []jumpLoc
+}
+
+// jumpLoc records a cursor position for jump-back (ctrl+t).
+type jumpLoc struct {
+	path string
+	row  int
+	col  int
 }
 
 // --- message types ---
@@ -102,6 +118,14 @@ type auditMsg struct {
 type buildMsg struct {
 	artifact operate.BuildArtifact
 	err      error
+}
+
+type hoverMsg struct {
+	text string
+}
+
+type defMsg struct {
+	locs []lsp.Location
 }
 
 // --- constructors ---
@@ -156,6 +180,15 @@ func newIDEModel(ctx context.Context, opts IDEOptions) *ideModel {
 // NewIDEModel is the exported constructor for testing from outside the package.
 func NewIDEModel(ctx context.Context, opts IDEOptions) *ideModel {
 	return newIDEModel(ctx, opts)
+}
+
+// cursorPos returns the current editor cursor as an LSP Position using the
+// negotiated encoding.
+func (m *ideModel) cursorPos() lsp.Position {
+	row := m.editor.Line()
+	col := m.editor.Column()
+	lineText := lsp.LineAt(m.editor.Value(), row)
+	return lsp.Position{Line: row, Character: lsp.EncodedColumn(lineText, col, m.enc)}
 }
 
 // --- tea.Model interface ---
@@ -274,6 +307,58 @@ func (m *ideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case hoverMsg:
+		if msg.text != "" {
+			m.showHover = true
+			m.hoverText = msg.text
+		} else {
+			m.showHover = false
+		}
+		return m, nil
+
+	case defMsg:
+		if len(msg.locs) == 0 {
+			return m, nil
+		}
+		loc := msg.locs[0]
+		absPath := uriToPath(loc.URI)
+		var rel string
+		if m.ws.Dir != "" {
+			if r, err := filepath.Rel(m.ws.Dir, absPath); err == nil && !filepath.IsAbs(r) {
+				rel = r
+			}
+		}
+		if rel == "" {
+			m.status = "definition is outside the worker (" + absPath + ")"
+			m.statusKind = "info"
+			return m, nil
+		}
+		// Push current position onto jump stack.
+		m.jumpStack = append(m.jumpStack, jumpLoc{
+			path: m.openPath,
+			row:  m.editor.Line(),
+			col:  m.editor.Column(),
+		})
+		// Open the target file.
+		content, err := operate.ReadWorkerFile(m.ws, rel)
+		if err != nil {
+			m.status = "definition: open " + rel + ": " + err.Error()
+			m.statusKind = "fail"
+			return m, nil
+		}
+		m.openPath = rel
+		m.editor.SetValue(content)
+		m.dirty = false
+		if m.client != nil {
+			uri := lsp.URI(filepath.Join(m.ws.Dir, rel))
+			_ = m.client.DidOpen(uri, "go", content, 1)
+		}
+		targetLine := loc.Range.Start.Line
+		m.status = fmt.Sprintf("→ %s:%d", rel, targetLine+1)
+		m.statusKind = "info"
+		m.focus = regionEditor
+		return m, m.editor.Focus()
+
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
@@ -366,6 +451,12 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Esc closes hover overlay (before API / other esc uses).
+	if m.showHover && keyStr == "esc" {
+		m.showHover = false
+		return m, nil
+	}
+
 	// Esc closes the API reference panel (palette intercept already handled above).
 	if m.showAPI && keyStr == "esc" {
 		m.showAPI = false
@@ -383,6 +474,63 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+\\":
 		m.showAPI = !m.showAPI
 		return m, nil
+
+	case "ctrl+k":
+		if m.client == nil {
+			return m, nil
+		}
+		uri := lsp.URI(filepath.Join(m.ws.Dir, m.openPath))
+		pos := m.cursorPos()
+		cl := m.client
+		ctx := m.ctx
+		return m, func() tea.Msg {
+			h, err := cl.Hover(ctx, uri, pos)
+			if err != nil || h == nil {
+				return hoverMsg{text: ""}
+			}
+			text := renderHoverMarkdown(h.Contents.Value)
+			return hoverMsg{text: text}
+		}
+
+	case "ctrl+]":
+		if m.client == nil {
+			return m, nil
+		}
+		uri := lsp.URI(filepath.Join(m.ws.Dir, m.openPath))
+		pos := m.cursorPos()
+		cl := m.client
+		ctx := m.ctx
+		return m, func() tea.Msg {
+			locs, err := cl.Definition(ctx, uri, pos)
+			if err != nil {
+				return defMsg{}
+			}
+			return defMsg{locs: locs}
+		}
+
+	case "ctrl+t":
+		if len(m.jumpStack) == 0 {
+			return m, nil
+		}
+		jmp := m.jumpStack[len(m.jumpStack)-1]
+		m.jumpStack = m.jumpStack[:len(m.jumpStack)-1]
+		content, err := operate.ReadWorkerFile(m.ws, jmp.path)
+		if err != nil {
+			m.status = "jump-back: open " + jmp.path + ": " + err.Error()
+			m.statusKind = "fail"
+			return m, nil
+		}
+		m.openPath = jmp.path
+		m.editor.SetValue(content)
+		m.dirty = false
+		if m.client != nil {
+			uri := lsp.URI(filepath.Join(m.ws.Dir, jmp.path))
+			_ = m.client.DidOpen(uri, "go", content, 1)
+		}
+		m.status = fmt.Sprintf("← %s:%d", jmp.path, jmp.row+1)
+		m.statusKind = "info"
+		m.focus = regionEditor
+		return m, m.editor.Focus()
 
 	case "ctrl+q":
 		cl := m.client
@@ -639,6 +787,26 @@ func moduleRoot(dir string) string {
 		cur = parent
 	}
 	return dir
+}
+
+// renderHoverMarkdown lightly strips markdown fences and leading headings from
+// hover content so it renders legibly in a plain-text overlay.
+func renderHoverMarkdown(s string) string {
+	var out []string
+	inFence := false
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			continue
+		}
+		// Strip leading markdown headings.
+		trimmed := strings.TrimLeft(line, "#")
+		if len(trimmed) < len(line) {
+			line = strings.TrimSpace(trimmed)
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 // uriToPath converts a file:// URI to an absolute filesystem path.
