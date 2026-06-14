@@ -21,6 +21,9 @@ func (m *operateModel) render() string {
 	if m.showHelp {
 		return m.renderHelp()
 	}
+	if m.showEditor {
+		return m.renderEditor()
+	}
 	if m.showReview {
 		return m.renderReview()
 	}
@@ -376,6 +379,17 @@ func (m *operateModel) renderHelp() string {
 		Padding(1, 3).
 		Width(max(m.width-4, 40))
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+func (m *operateModel) renderEditor() string {
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
+	header := title.Render("✎ "+m.editorPath) + muted.Render("   ctrl+s save & re-audit · esc cancel")
+	parts := []string{header, m.editor.View()}
+	if m.editorErr != "" {
+		parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render(m.editorErr))
+	}
+	return strings.Join(parts, "\n")
 }
 
 // --- tool card formatting helpers ---

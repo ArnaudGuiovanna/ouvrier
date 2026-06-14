@@ -276,6 +276,31 @@ func TestSlashClearStartsFreshTranscript(t *testing.T) {
 	}
 }
 
+func TestManualEditorOpenSaveReaudit(t *testing.T) {
+	dir := t.TempDir()
+	wdir := filepath.Join(dir, "demo")
+	writeOperateWorker(t, wdir, "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: wdir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	m.openEditor("main.go")
+	if !m.showEditor || m.editorPath != "main.go" {
+		t.Fatalf("editor not open: show=%v path=%q", m.showEditor, m.editorPath)
+	}
+	out := m.render()
+	if !strings.Contains(out, "main.go") {
+		t.Fatalf("editor overlay should show the path:\n%s", out)
+	}
+	m.editor.SetValue("package main\n\nfunc main() { /* edited */ }\n")
+	if err := m.saveEditor(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(wdir, "main.go"))
+	if !strings.Contains(string(data), "edited") {
+		t.Fatalf("file not saved with new content: %s", data)
+	}
+}
+
 func writeOperateWorker(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
