@@ -4,6 +4,17 @@
 
 > Produced by a multi-agent design panel (PM, product designer, UX, dev-experience, staff engineer) grounded in Pi (earendil-works/pi) + Claude Code and the existing Ouvrier codebase. Supersedes the UX/engine intent of the v0.5 and v0.5.1 specs.
 
+## Implementation status (2026-06-14)
+
+**MVP (Slices 0–4) implemented, reviewed, and merged to `main`.** Each slice was built subagent-driven (TDD, per-task spec + code-quality review) under its own plan in `docs/superpowers/plans/`:
+- **Slice 0** — multi-turn history correctness (`tool_call_id` persistence + tool-turn replay). [part 1 plan]
+- **Slice 1** — single entry point: bare `ouvrier` opens the cockpit; `-p` one-shot; `-c` resume-latest; agent-centric root help. [part 1 plan]
+- **Slice 2** — approval/policy gate: `Governance` levels, synchronous `gate` with headless fail-closed, prod typed double-confirm, Shift+Tab posture, TUI approval card. [part 2 plan]
+- **Slice 3** — Codex subscription auth (`internal/auth` probe + tolerant device-auth bridge), `internal/provider/codex` text transport over `codex exec`, auth-first `resolveAgentModel`, cockpit auth surface. Codex transport is text-only (documented §5 limitation); structured tool-calls use API-key providers. [part 3 plan]
+- **Slice 4** — review IDE: `StreamReview`/`StreamDiff` events, findings inbox + read-only diff overlay (Ctrl+R), `f`→agent fix→re-audit. [part 4 plan]
+
+**Deferred (post-MVP, not yet planned):** Slice 4.5 (full-screen human editor + gated `write/edit_worker_file`), parts of Slice 5 (`/tree /fork /clone`, deeper skill-pack), Slice 6 (inline non-alt-screen differential rendering), and the deploy-engine host-key-honesty/post-transfer-integrity *surfacing* in the approval card (the engine already pins hosts via `internal/deploy/knownhosts.go`).
+
 ---
 
 ## 1. Product definition & hero journeys
