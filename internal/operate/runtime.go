@@ -213,17 +213,17 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 
 // Prompt executes one free-form operator prompt.
 func (r *AgentRuntime) Prompt(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "prompt", nil)
+	return r.runPrompt(ctx, sessionID, text, "prompt", nil, &turnControl{posture: PostureAutoSafe})
 }
 
 // Steer records an operator steering instruction and executes it as a turn.
 func (r *AgentRuntime) Steer(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "steer", nil)
+	return r.runPrompt(ctx, sessionID, text, "steer", nil, &turnControl{posture: PostureAutoSafe})
 }
 
 // FollowUp executes a follow-up prompt inside the same session.
 func (r *AgentRuntime) FollowUp(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "follow_up", nil)
+	return r.runPrompt(ctx, sessionID, text, "follow_up", nil, &turnControl{posture: PostureAutoSafe})
 }
 
 // Interrupt records an interrupt request. Long-lived transports can later map
@@ -312,9 +312,12 @@ func (r *AgentRuntime) Subscribe(ctx context.Context, sessionID string) (<-chan 
 	return ch, nil
 }
 
-func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind string, emit func(StreamEvent)) (RuntimeTurn, error) {
+func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind string, emit func(StreamEvent), ctrl *turnControl) (RuntimeTurn, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if ctrl == nil {
+		ctrl = headlessControl()
 	}
 	if emit == nil {
 		emit = func(StreamEvent) {}
@@ -351,7 +354,7 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	// Real model tool-calling loop when a model transport is configured;
 	// otherwise fall back to the deterministic keyword planner.
 	if r.Options.Model != nil {
-		return r.runAgentLoop(ctx, session, &turn, emit)
+		return r.runAgentLoop(ctx, session, &turn, emit, ctrl)
 	}
 
 	plan := r.planPrompt(text)
@@ -381,7 +384,7 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
 			return turn, err
 		}
-		result, err := r.callTool(ctx, session, call, &turn, emit)
+		result, err := r.callTool(ctx, session, call, &turn, emit, ctrl)
 		if err != nil {
 			msg := call.Name + ": " + err.Error()
 			errEntry, _ := appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
@@ -419,7 +422,10 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	return turn, ctx.Err()
 }
 
-func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plannedTool, turn *RuntimeTurn, emit func(StreamEvent)) (ToolResult, error) {
+func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plannedTool, turn *RuntimeTurn, emit func(StreamEvent), ctrl *turnControl) (ToolResult, error) {
+	if ctrl == nil {
+		ctrl = headlessControl()
+	}
 	if emit == nil {
 		emit = func(StreamEvent) {}
 	}
@@ -442,6 +448,23 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 	}
 	turn.Entries = append(turn.Entries, callEntry)
 	emit(StreamEvent{Kind: StreamToolStart, Entry: &callEntry})
+
+	if approved, gerr := r.gate(ctx, call, emit, ctrl); gerr != nil || !approved {
+		reason := "denied by operator"
+		if gerr != nil {
+			reason = gerr.Error()
+		}
+		result := ToolResult{Summary: "skipped " + call.Name + ": " + reason}
+		output := map[string]any{"summary": result.Summary, "error": reason}
+		resultEntry, aerr := r.transcript(session).Append(TranscriptEntry{SessionID: session.ID, Kind: TranscriptToolResult, ToolName: call.Name, Output: output, Metadata: map[string]any{"tool_call_id": call.ID}})
+		if aerr != nil {
+			return ToolResult{}, aerr
+		}
+		turn.Entries = append(turn.Entries, resultEntry)
+		emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: fmt.Errorf("%s", reason)})
+		_ = appendToolCall(session.ToolCallsPath, call, result, fmt.Errorf("%s", reason))
+		return result, nil
+	}
 
 	result, runErr := r.Tools.Execute(ctx, ToolEnv{
 		Harness:   r.Harness,
@@ -475,6 +498,49 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		return result, runErr
 	}
 	return result, nil
+}
+
+func (r *AgentRuntime) gate(ctx context.Context, call plannedTool, emit func(StreamEvent), ctrl *turnControl) (bool, error) {
+	tool, ok := r.Tools.Tool(call.Name)
+	if !ok {
+		return true, nil
+	}
+	if !tool.Governance.NeedsApproval(ctrl.posture) {
+		return true, nil
+	}
+	if !ctrl.interactive || ctrl.decisions == nil {
+		return false, fmt.Errorf("approval required for %s but no operator is attached (headless)", call.Name)
+	}
+	req := approvalRequestFor(call, tool.Governance, r.workspace)
+	emit(StreamEvent{Kind: StreamApproval, Approval: req})
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case d := <-ctrl.decisions:
+		return d.Approved, nil
+	}
+}
+
+func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *ApprovalRequest {
+	id, _ := randomID()
+	req := &ApprovalRequest{ID: id, Tool: call.Name, Governance: gov, Details: map[string]any{}}
+	for k, v := range call.Input {
+		req.Details[k] = v
+	}
+	switch call.Name {
+	case "transfer_worker":
+		env := strings.ToLower(stringValue(call.Input, "env"))
+		req.Prod = env == "prod" || env == "production"
+		req.Summary = "deploy worker to " + stringValue(call.Input, "env")
+	case "build_worker":
+		req.Summary = "build worker binary"
+	default:
+		req.Summary = call.Name
+	}
+	if ws != nil {
+		req.Details["worker"] = ws.Name
+	}
+	return req
 }
 
 func (r *AgentRuntime) transcript(session *Session) *TranscriptStore {

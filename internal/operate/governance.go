@@ -40,3 +40,30 @@ func (g Governance) NeedsApproval(p Posture) bool {
 func (g Governance) SideEffecting() bool {
 	return g == GovSideEffecting || g == GovRequiresApproval
 }
+
+// ApprovalRequest is emitted before a governed tool runs; the operator answers
+// with an ApprovalDecision carrying the same ID.
+type ApprovalRequest struct {
+	ID         string         `json:"id"`
+	Tool       string         `json:"tool"`
+	Governance Governance     `json:"governance"`
+	Summary    string         `json:"summary"`
+	Prod       bool           `json:"prod,omitempty"`
+	Details    map[string]any `json:"details,omitempty"`
+}
+
+// ApprovalDecision is the operator's answer to an ApprovalRequest.
+type ApprovalDecision struct {
+	ID       string `json:"id"`
+	Approved bool   `json:"approved"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// turnControl carries per-turn operator context into the tool loop.
+type turnControl struct {
+	posture     Posture
+	decisions   <-chan ApprovalDecision
+	interactive bool
+}
+
+func headlessControl() *turnControl { return &turnControl{posture: PostureManual, interactive: false} }

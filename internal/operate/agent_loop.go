@@ -49,7 +49,7 @@ func (m providerModel) Complete(ctx context.Context, req provider.Request, onDel
 // user prompt has already been appended to the transcript and emitted by the
 // caller. It runs until the model stops requesting tools, the step budget is
 // exhausted, or the context is cancelled (Esc).
-func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn *RuntimeTurn, emit func(StreamEvent)) (RuntimeTurn, error) {
+func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn *RuntimeTurn, emit func(StreamEvent), ctrl *turnControl) (RuntimeTurn, error) {
 	transcript, err := ReadTranscript(session.TranscriptPath)
 	if err != nil {
 		return *turn, err
@@ -135,7 +135,7 @@ func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn 
 			if len(call.Arguments) > 0 {
 				_ = json.Unmarshal(call.Arguments, &input)
 			}
-			result, runErr := r.callTool(ctx, session, plannedTool{ID: call.ID, Name: call.Name, Input: input}, turn, emit)
+			result, runErr := r.callTool(ctx, session, plannedTool{ID: call.ID, Name: call.Name, Input: input}, turn, emit, ctrl)
 			msgs = append(msgs, provider.ToolResultText(
 				provider.ToolCall{ID: call.ID, Name: call.Name},
 				toolResultContent(result, runErr),
