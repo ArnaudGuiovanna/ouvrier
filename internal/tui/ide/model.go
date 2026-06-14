@@ -32,15 +32,21 @@ const (
 type IDEOptions struct {
 	Workspace operate.Workspace
 	GoplsPath string // "" -> no LSP
+	Embedded  bool   // true -> ctrl+q returns ExitMsg instead of tea.Quit
 }
+
+// ExitMsg is sent by the embedded IDE when the user presses ctrl+q,
+// signalling the host model to close the IDE and return to the cockpit.
+type ExitMsg struct{}
 
 // ideModel is the Bubble Tea model for the IDE.
 type ideModel struct {
-	ctx    context.Context
-	ws     operate.Workspace
-	width  int
-	height int
-	ready  bool
+	ctx      context.Context
+	ws       operate.Workspace
+	width    int
+	height   int
+	ready    bool
+	embedded bool // true when hosted inside the cockpit
 
 	// file tree
 	tree    []treeItem
@@ -182,6 +188,7 @@ func newIDEModel(ctx context.Context, opts IDEOptions) *ideModel {
 		focus:     regionEditor,
 		goplsPath: opts.GoplsPath,
 		lspStatus: "",
+		embedded:  opts.Embedded,
 	}
 
 	// Determine the initial open path from the workspace manifest.
@@ -716,17 +723,22 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "ctrl+q":
 		cl := m.client
-		return m, tea.Sequence(
-			func() tea.Msg {
-				if cl != nil {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					defer cancel()
-					_ = cl.Shutdown(ctx)
-				}
-				return nil
-			},
-			tea.Quit,
-		)
+		embedded := m.embedded
+		shutdown := func() tea.Msg {
+			if cl != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_ = cl.Shutdown(ctx)
+			}
+			if embedded {
+				return ExitMsg{}
+			}
+			return nil
+		}
+		if m.embedded {
+			return m, shutdown
+		}
+		return m, tea.Sequence(shutdown, tea.Quit)
 
 	case "ctrl+c":
 		return m, tea.Quit
@@ -998,6 +1010,14 @@ func uriToPath(uri string) string {
 		return uri[len(prefix):]
 	}
 	return uri
+}
+
+// DiscoverGopls returns the path to the gopls binary, or "" if not found.
+// It wraps lsp.Discover so callers (e.g. the cockpit) do not need to import
+// internal/lsp directly.
+func DiscoverGopls() string {
+	p, _ := lsp.Discover()
+	return p
 }
 
 func max(a, b int) int {

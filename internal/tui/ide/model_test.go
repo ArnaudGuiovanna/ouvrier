@@ -168,6 +168,36 @@ func TestIDELspStatusNoGopls(t *testing.T) {
 	}
 }
 
+func TestEmbeddedQuitReturnsExitMsg(t *testing.T) {
+	dir := writeIDEWorker(t)
+	ws := makeIDEWorkspace(t, dir)
+
+	// --- embedded: ctrl+q must yield ExitMsg, not tea.Quit ---
+	me := newIDEModel(context.Background(), IDEOptions{Workspace: ws, GoplsPath: "", Embedded: true})
+	me.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	_, cmd := me.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("embedded ctrl+q: expected a cmd, got nil")
+	}
+	msg := cmd()
+	if _, ok := msg.(ExitMsg); !ok {
+		t.Fatalf("embedded ctrl+q: expected ExitMsg, got %T (%v)", msg, msg)
+	}
+
+	// --- non-embedded: ctrl+q must NOT yield ExitMsg ---
+	mn := newIDEModel(context.Background(), IDEOptions{Workspace: ws, GoplsPath: "", Embedded: false})
+	mn.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	_, cmd2 := mn.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+	// The non-embedded path uses tea.Sequence which returns a batchMsg
+	// containing the shutdown + tea.Quit funcs. Run the batch cmd.
+	if cmd2 != nil {
+		msg2 := cmd2()
+		if _, ok := msg2.(ExitMsg); ok {
+			t.Fatal("non-embedded ctrl+q: must NOT return ExitMsg")
+		}
+	}
+}
+
 func TestIDEAuditMsgUpdatesStatus(t *testing.T) {
 	dir := writeIDEWorker(t)
 	ws := makeIDEWorkspace(t, dir)
