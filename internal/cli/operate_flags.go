@@ -11,12 +11,28 @@ import (
 )
 
 func parseOperateFlags(args []string) (operateConfig, error) {
-	cfg := operateConfig{Dir: ".", Agent: "codex", CodexMode: "auto", Scope: string(operate.ReviewWholeWorker)}
+	cfg := operateConfig{Dir: ".", Agent: "codex", CodexMode: "auto", Scope: string(operate.ReviewWholeWorker), Mode: "tui"}
 	i := 0
 	for i < len(args) {
 		arg := args[i]
 		name, inline, hasInline := strings.Cut(arg, "=")
 		switch name {
+		case "--json":
+			cfg.Mode = "json"
+			cfg.Print = true
+			i++
+		case "--print":
+			if hasInline {
+				value, err := strconv.ParseBool(strings.TrimSpace(inline))
+				if err != nil {
+					return operateConfig{}, fmt.Errorf("%w: --print must be true or false", ErrUsage)
+				}
+				cfg.Print = value
+			} else {
+				cfg.Print = true
+				cfg.Mode = "print"
+			}
+			i++
 		case "--allow-failed":
 			if hasInline {
 				value, err := strconv.ParseBool(strings.TrimSpace(inline))
@@ -28,7 +44,7 @@ func parseOperateFlags(args []string) (operateConfig, error) {
 				cfg.AllowFail = true
 			}
 			i++
-		case "--dir", "--agent", "--codex-mode", "--session", "--goal", "--scope", "--subject", "--env", "--env-file", "--target", "--keep":
+		case "--dir", "--agent", "--codex-mode", "--session", "--goal", "--scope", "--subject", "--env", "--env-file", "--target", "--mode", "--prompt", "--keep":
 			value := inline
 			if !hasInline {
 				v, advance, err := flagValue(args, i, name)
@@ -44,7 +60,11 @@ func parseOperateFlags(args []string) (operateConfig, error) {
 				return operateConfig{}, err
 			}
 		default:
-			return operateConfig{}, fmt.Errorf("%w: operate does not accept argument %q", ErrUsage, arg)
+			if strings.HasPrefix(arg, "-") {
+				return operateConfig{}, fmt.Errorf("%w: operate does not accept argument %q", ErrUsage, arg)
+			}
+			cfg.Prompt = strings.TrimSpace(strings.Join(args[i:], " "))
+			i = len(args)
 		}
 	}
 	if cfg.Dir == "" {
@@ -58,11 +78,22 @@ func parseOperateFlags(args []string) (operateConfig, error) {
 		cfg.CodexMode = "auto"
 	}
 	cfg.CodexMode = strings.ToLower(strings.TrimSpace(cfg.CodexMode))
+	if cfg.Mode == "" {
+		cfg.Mode = "tui"
+	}
+	cfg.Mode = strings.ToLower(strings.TrimSpace(cfg.Mode))
 	if err := validateOperateAgent(cfg.Agent); err != nil {
 		return operateConfig{}, err
 	}
 	if err := validateCodexMode(cfg.CodexMode); err != nil {
 		return operateConfig{}, err
+	}
+	if err := validateOperateMode(cfg.Mode); err != nil {
+		return operateConfig{}, err
+	}
+	if strings.TrimSpace(cfg.Prompt) != "" && cfg.Mode == "tui" {
+		cfg.Mode = "print"
+		cfg.Print = true
 	}
 	if strings.TrimSpace(cfg.Target) != "" {
 		if _, _, err := deploy.SplitTarget(cfg.Target); err != nil {
@@ -94,6 +125,10 @@ func assignOperateFlag(cfg *operateConfig, name, value string) error {
 		cfg.EnvFile = value
 	case "--target":
 		cfg.Target = value
+	case "--mode":
+		cfg.Mode = value
+	case "--prompt":
+		cfg.Prompt = value
 	case "--keep":
 		keep, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || keep < 0 {
@@ -102,6 +137,15 @@ func assignOperateFlag(cfg *operateConfig, name, value string) error {
 		cfg.Keep = keep
 	}
 	return nil
+}
+
+func validateOperateMode(mode string) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "tui", "print", "json", "rpc":
+		return nil
+	default:
+		return fmt.Errorf("%w: --mode must be tui, print, json, or rpc", ErrUsage)
+	}
 }
 
 func validateOperateAgent(agent string) error {

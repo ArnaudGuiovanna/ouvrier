@@ -59,6 +59,78 @@ func TestRunOperateWithoutSubcommandUsesBubbleTeaRunner(t *testing.T) {
 	}
 }
 
+func TestRunOperatePrintPromptCreatesWorker(t *testing.T) {
+	parent := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	app := New("dev", WithStreams(nil, &out, &errOut))
+
+	err := app.run(context.Background(), []string{
+		"operate",
+		"--agent", "manual",
+		"--dir", parent,
+		"--print",
+		"Create a worker that receives POST /tickets",
+	})
+	if err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "ticket-worker", "pip.yaml")); err != nil {
+		t.Fatalf("generated worker missing pip.yaml: %v", err)
+	}
+	for _, want := range []string{"tool scaffold_worker", "created worker ticket-worker", "tool patch_worker"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("stdout missing %q in:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestRunOperateJSONPrompt(t *testing.T) {
+	parent := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	app := New("dev", WithStreams(nil, &out, &errOut))
+
+	err := app.run(context.Background(), []string{
+		"operate",
+		"--agent", "manual",
+		"--dir", parent,
+		"--mode", "json",
+		"--prompt", "/tools",
+	})
+	if err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !strings.Contains(out.String(), `"session_id"`) || !strings.Contains(out.String(), "Available Ouvrier tools") {
+		t.Fatalf("stdout = %q, want JSON turn", out.String())
+	}
+}
+
+func TestRunOperateRPCPrompt(t *testing.T) {
+	parent := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	input := strings.NewReader(
+		`{"type":"prompt","text":"/tools"}` + "\n" +
+			`{"type":"follow_up","text":"/policy"}` + "\n" +
+			`{"type":"compact"}` + "\n",
+	)
+	app := New("dev", WithStreams(input, &out, &errOut))
+
+	err := app.run(context.Background(), []string{
+		"operate",
+		"--agent", "manual",
+		"--dir", parent,
+		"--mode", "rpc",
+	})
+	if err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !strings.Contains(out.String(), `"type":"turn"`) || !strings.Contains(out.String(), "Available Ouvrier tools") || !strings.Contains(out.String(), "session compaction") {
+		t.Fatalf("stdout = %q, want rpc turn", out.String())
+	}
+}
+
 func TestRunOperateReviewWorkerManualCreatesReviewSession(t *testing.T) {
 	dir := writeOperateWorkerFixture(t)
 	var out bytes.Buffer

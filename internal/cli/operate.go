@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -24,8 +26,11 @@ type operateConfig struct {
 	Env       string
 	EnvFile   string
 	Target    string
+	Mode      string
+	Prompt    string
 	Keep      int
 	AllowFail bool
+	Print     bool
 }
 
 func (app *App) runOperateCommand(ctx context.Context, args []string) error {
@@ -62,6 +67,9 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Mode != "tui" || cfg.Print || strings.TrimSpace(cfg.Prompt) != "" {
+		return app.runOperatePromptMode(ctx, cfg, driver)
+	}
 	return app.runOperate(ctx, app.in, app.out, tui.OperateOptions{
 		Dir:       cfg.Dir,
 		Agent:     cfg.Agent,
@@ -75,6 +83,174 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 		Keep:      cfg.Keep,
 		AllowFail: cfg.AllowFail,
 	})
+}
+
+func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, driver operate.Driver) error {
+	if driver != nil {
+		defer driver.Close()
+	}
+	runtime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
+		Dir:       cfg.Dir,
+		Driver:    driver,
+		DriverID:  cfg.Agent,
+		CodexMode: cfg.CodexMode,
+		Env:       cfg.Env,
+		EnvFile:   cfg.EnvFile,
+		Target:    cfg.Target,
+		Keep:      cfg.Keep,
+		AllowFail: cfg.AllowFail,
+	})
+	if err != nil {
+		return err
+	}
+	if cfg.Mode == "rpc" {
+		return app.runOperateRPC(ctx, runtime, cfg)
+	}
+	started, err := runtime.Start(ctx, operate.RuntimeStartRequest{
+		Dir:       cfg.Dir,
+		SessionID: cfg.Session,
+		DriverID:  cfg.Agent,
+		CodexMode: cfg.CodexMode,
+	})
+	if err != nil {
+		return err
+	}
+	prompt := strings.TrimSpace(cfg.Prompt)
+	if prompt == "" {
+		prompt = strings.TrimSpace(cfg.Goal)
+	}
+	if prompt == "" {
+		return fmt.Errorf("%w: operate prompt mode requires a prompt, --prompt, or --goal", ErrUsage)
+	}
+	turn, err := runtime.Prompt(ctx, started.Session.ID, prompt)
+	if cfg.Mode == "json" {
+		enc := json.NewEncoder(app.out)
+		enc.SetIndent("", "  ")
+		if encodeErr := enc.Encode(turn); encodeErr != nil {
+			return encodeErr
+		}
+		return err
+	}
+	printOperateTurn(app.out, turn)
+	return err
+}
+
+func (app *App) runOperateRPC(ctx context.Context, runtime *operate.AgentRuntime, cfg operateConfig) error {
+	current, err := runtime.Start(ctx, operate.RuntimeStartRequest{
+		Dir:       cfg.Dir,
+		SessionID: cfg.Session,
+		DriverID:  cfg.Agent,
+		CodexMode: cfg.CodexMode,
+	})
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(app.out)
+	scanner := bufio.NewScanner(app.in)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var req struct {
+			Type      string `json:"type"`
+			Text      string `json:"text"`
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+			_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(req.Type)) {
+		case "", "prompt":
+			turn, err := runtime.Prompt(ctx, rpcSessionID(current, req.SessionID), req.Text)
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "turn": turn})
+				continue
+			}
+			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
+		case "steer":
+			turn, err := runtime.Steer(ctx, rpcSessionID(current, req.SessionID), req.Text)
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "turn": turn})
+				continue
+			}
+			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
+		case "follow_up", "follow-up", "followup":
+			turn, err := runtime.FollowUp(ctx, rpcSessionID(current, req.SessionID), req.Text)
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "turn": turn})
+				continue
+			}
+			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
+		case "interrupt":
+			turn, err := runtime.Interrupt(ctx, rpcSessionID(current, req.SessionID), req.Text)
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
+				continue
+			}
+			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
+		case "compact":
+			turn, err := runtime.Compact(ctx, rpcSessionID(current, req.SessionID))
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
+				continue
+			}
+			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
+		case "resume":
+			sessionID := strings.TrimSpace(req.SessionID)
+			if sessionID == "" {
+				sessionID = strings.TrimSpace(req.Text)
+			}
+			resumed, err := runtime.Resume(ctx, sessionID)
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
+				continue
+			}
+			current = resumed
+			_ = encoder.Encode(map[string]any{"type": "session", "session": resumed})
+		case "fork":
+			forked, err := runtime.Fork(ctx, rpcSessionID(current, req.SessionID))
+			if err != nil {
+				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
+				continue
+			}
+			current = forked
+			_ = encoder.Encode(map[string]any{"type": "session", "session": forked})
+		default:
+			_ = encoder.Encode(map[string]any{"type": "error", "error": "unsupported rpc type " + req.Type})
+		}
+	}
+	return scanner.Err()
+}
+
+func rpcSessionID(current operate.RuntimeSession, requested string) string {
+	if strings.TrimSpace(requested) != "" {
+		return strings.TrimSpace(requested)
+	}
+	if current.Session == nil {
+		return ""
+	}
+	return current.Session.ID
+}
+
+func printOperateTurn(w io.Writer, turn operate.RuntimeTurn) {
+	fmt.Fprintf(w, "session %s\n", turn.SessionID)
+	for _, entry := range turn.Entries {
+		switch entry.Kind {
+		case operate.TranscriptUser:
+			fmt.Fprintf(w, "> %s\n", strings.TrimSpace(entry.Text))
+		case operate.TranscriptToolCall:
+			fmt.Fprintf(w, "tool %s\n", entry.ToolName)
+		case operate.TranscriptToolResult:
+			summary, _ := entry.Output["summary"].(string)
+			if summary == "" {
+				summary = "done"
+			}
+			fmt.Fprintf(w, "  %s\n", strings.TrimSpace(summary))
+		case operate.TranscriptAssistant, operate.TranscriptError:
+			if strings.TrimSpace(entry.Text) != "" {
+				fmt.Fprintln(w, strings.TrimSpace(entry.Text))
+			}
+		}
+	}
 }
 
 func (app *App) runOperateReviewWorker(ctx context.Context, args []string) error {

@@ -14,7 +14,8 @@ commands.
 ## Version And Requirements
 
 - Ouvrier version: current `main` includes v0.1, v0.2, v0.3, and v0.4
-  milestone work; the latest tagged release is `v0.4.0`.
+  milestone work plus the v0.5 Ouvrier Agent Cockpit foundation; the latest
+  tagged release is `v0.5.0`.
 - Go version: Go 1.25 or newer.
 - Public module path: `github.com/ArnaudGuiovanna/ouvrier`.
 - Runtime package name: `ovr`.
@@ -781,7 +782,10 @@ ouvrier add skill --name ticket-triage [--description TEXT]
 ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
-ouvrier operate [--dir .] [--agent codex|manual] [--goal TEXT]
+ouvrier operate [--dir .] [--agent codex|manual]
+ouvrier operate --print "create a worker that receives POST /tickets"
+ouvrier operate --mode json --prompt "review this worker"
+ouvrier operate --mode rpc
 ouvrier operate create-worker --yes --name NAME --trigger "POST /path" --model provider/model [--dir .]
 ouvrier operate patch --goal TEXT [--dir .] [--agent codex|manual]
 ouvrier operate review-worker [--scope whole_worker] [--dir .] [--agent codex|manual]
@@ -808,11 +812,28 @@ files.
 
 ### Operate Harness
 
-`ouvrier operate` is the v0.4 local construction cockpit for workers. It is a
-Bubble Tea interface, visually aligned with the terminal-first Pi workflow,
-but the workflow owner is Ouvrier: select or create a worker, choose or resume
-a session, prompt Codex, capture the patch, review code, run audit gates,
-build, and transfer.
+`ouvrier operate` is the prompt-first local construction cockpit for workers.
+It is a Bubble Tea interface, visually aligned with the terminal-first Pi
+workflow, but the workflow owner is Ouvrier: type a goal, let the cockpit
+scaffold or select a worker, load Ouvrier API context, prompt Codex/manual
+driver turns, review code, repair findings, run audit gates, build, and
+transfer.
+
+The main path is conversational:
+
+```sh
+ouvrier operate
+# then type:
+# create a worker that receives POST /tickets, triages tickets, review it, and build it
+```
+
+The same runtime also supports one-shot and machine-readable modes:
+
+```sh
+ouvrier operate --print "create a worker that receives POST /tickets"
+ouvrier operate --mode json --prompt "review this worker"
+ouvrier operate --mode rpc
+```
 
 The non-interactive subcommands expose the same steps:
 
@@ -827,19 +848,21 @@ ouvrier operate transfer --session <id> --env staging
 ```
 
 Codex is accessed through the local Codex CLI driver (`--agent codex`), so
-authentication stays owned by Codex (`codex login`). `--agent manual` keeps the
-same sessions and gates without asking an agent to edit files. Build refuses to
-run without a passing audit, and transfer refuses without both passing audit
-and review unless `--allow-failed` is supplied intentionally.
+authentication stays owned by Codex (`/login codex` in the cockpit, or
+`codex login` directly). Ouvrier stores only auth profile metadata, never Codex
+subscription tokens. `--agent manual` keeps the same sessions and gates without
+asking an agent to edit files. Build refuses to run without a passing audit,
+and transfer refuses without both passing audit and review unless
+`--allow-failed` is supplied intentionally.
 
 Every operate session persists human-auditable artifacts under
-`.ouvrier/operate/sessions/<id>/`: `goal.md`, `patch.json`, `diff.patch`,
-`review.json`, `audit.json`, `build.json`, `transfer.json`, and
-`events.jsonl`. This keeps the worker runtime unchanged while giving the
-developer-operator one local interface for operate, build, and transfer. The
-web console remains the remote surface for observing workers and fleets,
-approving suspended runtime actions, triggering workers, and streaming deploy
-progress.
+`.ouvrier/operate/sessions/<id>/`: `transcript.jsonl`, `events.jsonl`,
+`tool-calls.jsonl`, `auth_profile.json`, `goal.md`, `patch.json`,
+`diff.patch`, `review.json`, `audit.json`, `build.json`, and `transfer.json`.
+This keeps the worker runtime unchanged while giving the developer-operator
+one local interface for operate, build, and transfer. The web console remains
+the remote surface for observing workers and fleets, approving suspended
+runtime actions, triggering workers, and streaming deploy progress.
 
 ## Build And Deploy
 

@@ -17,7 +17,7 @@ func TestOperateModelSelectsWorkerCandidate(t *testing.T) {
 	writeOperateWorker(t, filepath.Join(parent, "beta"), "beta")
 
 	model := newOperateModel(context.Background(), OperateOptions{Dir: parent, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
-	if model.mode != "select" || len(model.candidates) != 2 || model.session != nil {
+	if model.mode != "select" || len(model.candidates) != 2 || model.session == nil {
 		t.Fatalf("initial model mode=%q candidates=%d session=%v", model.mode, len(model.candidates), model.session)
 	}
 
@@ -29,8 +29,8 @@ func TestOperateModelSelectsWorkerCandidate(t *testing.T) {
 	if selected.workspace.Name != "alpha" {
 		t.Fatalf("workspace name = %q, want alpha", selected.workspace.Name)
 	}
-	if selected.mode != "review" {
-		t.Fatalf("mode = %q, want review", selected.mode)
+	if selected.mode != "operate" {
+		t.Fatalf("mode = %q, want operate", selected.mode)
 	}
 }
 

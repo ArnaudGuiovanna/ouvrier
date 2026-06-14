@@ -32,6 +32,9 @@ Run "ouvrier <command> --help" for command details.
 const operateHelp = `Open the local agentic worker-builder cockpit.
 
 Usage: ouvrier operate [flags]
+       ouvrier operate --print "create a worker that receives POST /tickets"
+       ouvrier operate --mode json --prompt "review this worker"
+       ouvrier operate --mode rpc
        ouvrier operate create-worker --yes --name <name> --trigger <trigger> --model <model> [flags]
        ouvrier operate patch --goal "<change>" [flags]
        ouvrier operate fix-worker [flags]
@@ -40,9 +43,11 @@ Usage: ouvrier operate [flags]
        ouvrier operate build [flags]
        ouvrier operate transfer --env <name> [flags]
 
-The interactive cockpit orchestrates worker selection, review, agent patching,
-audit gates, build, and transfer while keeping workers as normal Go projects.
-Codex is used only as a local driver; Ouvrier never stores Codex credentials.
+The interactive cockpit is a prompt-first agent harness specialized for
+manufacturing Ouvrier workers. Type a goal, review the visible tool transcript,
+let the harness scaffold/patch/audit/build/transfer, and keep workers as normal
+Go projects. Codex is used only as a local driver; Ouvrier never stores Codex
+credentials.
 
 Options:
       --dir string          Worker/project directory (default ".")
@@ -50,6 +55,10 @@ Options:
       --codex-mode string   Codex transport: auto, exec, or app-server (default "auto")
       --session string      Resume a local operate session
       --goal string         Pre-fill the first builder prompt
+      --prompt string       Run one prompt without opening the TUI
+      --print               Run prompt mode and print the transcript
+      --mode string         tui, print, json, or rpc (default "tui")
+      --json                Shortcut for --mode json
       --target string       Build/deploy target, e.g. linux/amd64
       --allow-failed        Override audit/review gates for build or transfer
   -h, --help                Show this help message

@@ -56,7 +56,8 @@ func main() {
 ## Status
 
 Ouvrier `main` includes the completed v0.1, v0.2, v0.3, and v0.4 milestone
-backlog. The latest tagged release is `v0.4.0` (Agentic Worker Builder).
+backlog plus the v0.5 Ouvrier Agent Cockpit foundation. The latest tagged
+release is `v0.5.0` (Ouvrier Agent Cockpit).
 The public Go module path is:
 
 ```txt
@@ -150,7 +151,7 @@ it fetches the latest release, verifies the checksum, and installs `ouvrier`:
 curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/ouvrier/main/install.sh | sh
 ```
 
-Pin a version with `OUVRIER_VERSION=v0.4.0` and the target directory with
+Pin a version with `OUVRIER_VERSION=v0.5.0` and the target directory with
 `OUVRIER_BIN_DIR=~/.local/bin`. Re-running the script updates an existing
 install in place.
 
@@ -162,7 +163,7 @@ go install github.com/ArnaudGuiovanna/ouvrier/cmd/ouvrier@latest
 ouvrier version
 ```
 
-Use `@v0.4.0` instead of `@latest` to pin a specific release.
+Use `@v0.5.0` instead of `@latest` to pin a specific release.
 
 To build from a checkout instead (for contributing or running the tests):
 
@@ -534,7 +535,10 @@ ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]
 ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
-ouvrier operate [--dir .] [--agent codex|manual] [--goal TEXT]
+ouvrier operate [--dir .] [--agent codex|manual]
+ouvrier operate --print "create a worker that receives POST /tickets"
+ouvrier operate --mode json --prompt "review this worker"
+ouvrier operate --mode rpc
 ouvrier operate create-worker --yes --name NAME --trigger "POST /path" --model provider/model [--dir .]
 ouvrier operate patch --goal TEXT [--agent codex|manual] [--dir .]
 ouvrier operate review-worker [--scope whole_worker] [--agent codex|manual] [--dir .]
@@ -553,16 +557,23 @@ ouvrier console [--addr 127.0.0.1:7333] [--fleet PATH] [--token TOKEN] [--no-ope
 `ouvrier new` opens the Bubble Tea v2 project wizard. The wizard and
 `ouvrier new --yes` support HTTP trigger strings such as `"POST /tickets"`.
 
-`ouvrier operate` is the v0.4 local builder cockpit. It can select an existing
-worker from a parent directory or create one with `operate create-worker`, then
-uses a SOTA agentic harness around Codex or manual mode to patch a worker,
-review the worker code, convert findings into AI fixes, run deterministic
-audit gates, build the binary, and hand transfer to the existing deploy
-engine. Sessions and artifacts live under `.ouvrier/operate/sessions/<id>/`
-(`goal.md`, `patch.json`, `diff.patch`, `review.json`, `audit.json`,
-`build.json`, `transfer.json`, and `events.jsonl`) so a developer-operator can
-audit every step. The web console remains the remote observation and approval
-surface for workers and fleets; `operate` is the local construction harness.
+`ouvrier operate` is the prompt-first local agent cockpit for manufacturing
+workers. Run it from a worker or from a parent factory directory, then type the
+worker you want: the cockpit can infer a plan, scaffold a normal Go worker,
+load Ouvrier API context, ask the configured Codex/manual driver to patch code,
+review findings, run audit gates, build the binary, and transfer through the
+existing deploy engine. The same runtime powers the Bubble Tea UI, one-shot
+`--print` and `--mode json`, and JSONL `--mode rpc`.
+
+Codex auth follows the Pi-style ownership boundary: `/login codex` probes or
+delegates to the local Codex CLI flow, while Ouvrier stores only profile
+metadata, never Codex subscription tokens. Sessions and artifacts live under
+`.ouvrier/operate/sessions/<id>/` (`transcript.jsonl`, `events.jsonl`,
+`tool-calls.jsonl`, `auth_profile.json`, `goal.md`, `patch.json`,
+`diff.patch`, `review.json`, `audit.json`, `build.json`, and
+`transfer.json`) so a developer-operator can audit every step. The web console
+remains the remote observation and approval surface for workers and fleets;
+`operate` is the local construction harness.
 
 The introspection commands (`show`, `status`, `logs`, `trace`) read from the
 project filesystem (`pip.yaml`) or talk to a running worker through

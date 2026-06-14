@@ -34,8 +34,8 @@ func renderOperate(m *operateModel) string {
 		Padding(1, 2)
 
 	lines := []string{
-		title.Render("Ouvrier operate"),
-		muted.Render("SOTA local agentic harness for worker operate -> review -> audit -> build -> transfer"),
+		title.Render("Ouvrier Agent Cockpit"),
+		muted.Render("Prompt-first worker factory: operate -> review -> audit -> build -> transfer"),
 		"",
 		label.Render("mode") + "  " + value.Render(m.mode),
 		label.Render("agent") + " " + value.Render(agentLine(m.opts)),
@@ -56,10 +56,10 @@ func renderOperate(m *operateModel) string {
 	}
 	lines = append(lines, "")
 
-	if len(m.candidates) > 0 && m.session == nil {
+	if len(m.candidates) > 0 && m.mode == "select" {
 		lines = append(lines,
 			label.Render("workers"),
-			muted.Render("Select an existing worker with 1-9, or create one with `ouvrier operate create-worker --yes ...`."),
+			muted.Render("Select an existing worker with 1-9, or type a prompt to create a new one."),
 		)
 		for i, candidate := range m.candidates {
 			lines = append(lines, value.Render(fmt.Sprintf("%d  %s  %s", i+1, candidate.Name, candidate.Dir)))
@@ -69,24 +69,33 @@ func renderOperate(m *operateModel) string {
 			errStyle.Render("workspace error: "+m.err.Error()),
 			muted.Render("Run from an Ouvrier worker, select one from a parent directory, or create one with `ouvrier operate create-worker`."),
 		)
+	} else if m.workspace.Dir == "" {
+		lines = append(lines,
+			label.Render("factory")+" "+value.Render(m.opts.Dir),
+			muted.Render("No worker selected yet. Type a prompt such as: create a worker that receives POST /tickets."),
+		)
 	} else {
 		lines = append(lines, workspaceLines(m.workspace, label, value, muted)...)
 	}
 
 	lines = append(lines,
 		"",
-		label.Render("cockpit"),
-		value.Render("review worker code, convert findings to AI fixes, audit gates, build artifact, transfer via deploy"),
+		label.Render("transcript"),
+	)
+	if len(m.transcript) == 0 {
+		lines = append(lines, muted.Render("No turns yet. Type a worker goal or /help."))
+	} else {
+		lines = append(lines, transcriptLines(m.transcript, label, value, muted)...)
+	}
+	lines = append(lines,
 		"",
-		label.Render("available now"),
-		value.Render("`ouvrier operate patch|fix-worker|review-worker|audit|build|transfer`"),
-		"",
-		label.Render("keys"),
-		muted.Render("p patch | r review | f fix | a audit | b build | t transfer | q/esc/ctrl+c quit"),
+		label.Render("prompt"),
+		value.Render(m.input.View()),
+		muted.Render("/login codex | /new worker | /read | /review | /fix | /audit | /build | /deploy | /accept-risk | /export | /help"),
 	)
 	if len(m.log) > 0 {
 		lines = append(lines, "", label.Render("event stream"))
-		for _, entry := range tail(m.log, 8) {
+		for _, entry := range tail(m.log, 5) {
 			lines = append(lines, muted.Render(entry))
 		}
 	}
@@ -110,6 +119,31 @@ func workspaceLines(ws operate.Workspace, label, value, muted lipgloss.Style) []
 	}
 	if len(ws.Outcomes) > 0 {
 		lines = append(lines, label.Render("outcomes")+" "+value.Render(strings.Join(ws.Outcomes, ", ")))
+	}
+	return lines
+}
+
+func transcriptLines(entries []operate.TranscriptEntry, label, value, muted lipgloss.Style) []string {
+	var lines []string
+	for _, entry := range tailTranscript(entries, 12) {
+		switch entry.Kind {
+		case operate.TranscriptUser:
+			lines = append(lines, label.Render("you")+" "+value.Render(entry.Text))
+		case operate.TranscriptAssistant:
+			lines = append(lines, label.Render("agent")+" "+value.Render(compactTranscriptText(entry.Text)))
+		case operate.TranscriptToolCall:
+			lines = append(lines, muted.Render("tool "+entry.ToolName+" started"))
+		case operate.TranscriptToolResult:
+			summary, _ := entry.Output["summary"].(string)
+			if summary == "" {
+				summary = "done"
+			}
+			lines = append(lines, muted.Render("tool "+entry.ToolName+" -> "+compactTranscriptText(summary)))
+		case operate.TranscriptError:
+			lines = append(lines, muted.Render("error "+compactTranscriptText(entry.Text)))
+		case operate.TranscriptStatus:
+			lines = append(lines, muted.Render(compactTranscriptText(entry.Text)))
+		}
 	}
 	return lines
 }
@@ -163,15 +197,17 @@ func tail(lines []string, n int) []string {
 	return lines[len(lines)-n:]
 }
 
-func compactLines(entries ...string) []string {
-	var lines []string
-	for _, entry := range entries {
-		for _, line := range strings.Split(entry, "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				lines = append(lines, line)
-			}
-		}
+func tailTranscript(entries []operate.TranscriptEntry, n int) []operate.TranscriptEntry {
+	if len(entries) <= n {
+		return entries
 	}
-	return lines
+	return entries[len(entries)-n:]
+}
+
+func compactTranscriptText(text string) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if len(text) > 180 {
+		return text[:177] + "..."
+	}
+	return text
 }
