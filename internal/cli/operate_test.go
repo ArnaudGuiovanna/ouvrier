@@ -37,7 +37,7 @@ func TestRunOperateHelpListsWorkflowCommands(t *testing.T) {
 func TestRunOperateWithoutSubcommandUsesBubbleTeaRunner(t *testing.T) {
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	app := New("dev", WithStreams(strings.NewReader(""), &out, &errOut))
+	app := New("dev", WithStreams(strings.NewReader(""), &out, &errOut), WithSignedIn(func() bool { return false }))
 	called := false
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, opts tui.OperateOptions) error {
 		called = true

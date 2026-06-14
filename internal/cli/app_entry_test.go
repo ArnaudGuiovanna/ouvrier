@@ -11,7 +11,7 @@ import (
 )
 
 func TestRunEmptyArgsOpensCockpit(t *testing.T) {
-	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}))
+	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
 	called := false
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, _ tui.OperateOptions) error {
 		called = true
@@ -65,7 +65,7 @@ func TestRunDashCResumesLatest(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}))
+	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
 	var gotSession string
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, opts tui.OperateOptions) error {
 		gotSession = opts.Session

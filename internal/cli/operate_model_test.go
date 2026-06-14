@@ -14,12 +14,14 @@ func TestResolveAgentModelPrefersExplicitProvider(t *testing.T) {
 }
 
 func TestResolveAgentModelPrefersCodexWhenSignedIn(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	m, id, err := resolveAgentModel("", func() bool { return true })
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if m == nil || id == "" {
-		t.Fatalf("expected codex model when signed in, got id=%q model=%v", id, m)
+	if m == nil || id != "codex/gpt-5-codex" {
+		t.Fatalf("expected codex/gpt-5-codex when signed in, got id=%q model=%v", id, m)
 	}
 }
 
