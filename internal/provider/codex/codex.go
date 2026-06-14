@@ -70,7 +70,10 @@ func (p *Provider) run(ctx context.Context, req provider.Request, onDelta func(p
 		return provider.Response{}, fmt.Errorf("codex provider: %s not found on PATH", bin)
 	}
 	model := modelName(req.Model, p.Model)
-	args := []string{"exec", "--json", "--color", "never", "--sandbox", "read-only"}
+	// --skip-git-repo-check lets the worker factory run codex outside a trusted
+	// git repo (the cockpit may run from any directory); read-only sandbox keeps
+	// the transport side-effect free (Ouvrier governs its own tools).
+	args := []string{"exec", "--json", "--color", "never", "--sandbox", "read-only", "--skip-git-repo-check"}
 	if model != "" {
 		args = append(args, "-m", model)
 	}
