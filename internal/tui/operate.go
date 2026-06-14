@@ -32,6 +32,12 @@ type OperateOptions struct {
 	Target    string
 	Keep      int
 	AllowFail bool
+
+	// Model enables the Ouvrier-owned model tool-calling loop; ModelID is the
+	// provider/model id shown in the status bar and used for requests. When nil
+	// the cockpit falls back to the deterministic keyword planner.
+	Model   operate.AgentModel
+	ModelID string
 }
 
 // blockKind classifies one rendered transcript block in the cockpit.
@@ -83,7 +89,6 @@ type operateModel struct {
 	events         <-chan operate.StreamEvent
 	queue          []string
 	runningToolIdx int
-	turnHadTools   bool
 	startedAt      time.Time
 
 	slashActive  bool
@@ -179,6 +184,8 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 		Target:    opts.Target,
 		Keep:      opts.Keep,
 		AllowFail: opts.AllowFail,
+		Model:     opts.Model,
+		ModelID:   opts.ModelID,
 	})
 	if err != nil {
 		model.err = err
@@ -244,6 +251,9 @@ func newSpinner() spinner.Model {
 }
 
 func defaultModelChoices(opts OperateOptions) []string {
+	if strings.TrimSpace(opts.ModelID) != "" {
+		return []string{opts.ModelID}
+	}
 	if strings.EqualFold(opts.Agent, "manual") {
 		return []string{"manual"}
 	}
@@ -323,7 +333,6 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 	case operate.StreamAssistant:
 		m.finalizeAssistant(ev)
 	case operate.StreamToolStart:
-		m.turnHadTools = true
 		b := opBlock{kind: blockTool, running: true}
 		if ev.Entry != nil {
 			b.toolName = ev.Entry.ToolName
@@ -383,15 +392,6 @@ func (m *operateModel) finalizeAssistant(ev operate.StreamEvent) {
 	text := ""
 	if ev.Entry != nil {
 		text = ev.Entry.Text
-	}
-	// When the turn used tools, the persisted final message simply concatenates
-	// the plan (already shown as an assistant block) and each tool summary
-	// (already shown as cards). Suppress it to keep the transcript clean.
-	if m.turnHadTools {
-		if n := len(m.blocks); n > 0 && m.blocks[n-1].streaming {
-			m.blocks = m.blocks[:n-1]
-		}
-		return
 	}
 	if n := len(m.blocks); n > 0 && m.blocks[n-1].kind == blockAssistant && m.blocks[n-1].streaming {
 		m.blocks[n-1].streaming = false
@@ -537,7 +537,6 @@ func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.running = true
-	m.turnHadTools = false
 	m.runningToolIdx = -1
 	m.cancel = cancel
 	m.events = ch
@@ -562,6 +561,8 @@ func (m *operateModel) selectCandidate(index int) (*operateModel, tea.Cmd) {
 		Target:    m.opts.Target,
 		Keep:      m.opts.Keep,
 		AllowFail: m.opts.AllowFail,
+		Model:     m.opts.Model,
+		ModelID:   m.opts.ModelID,
 	})
 	if err != nil {
 		m.err = err

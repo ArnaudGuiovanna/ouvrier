@@ -28,6 +28,12 @@ type RuntimeOptions struct {
 	Redactor  Redactor
 	RepoRoot  string
 	Now       func() time.Time
+
+	// Model, when set, enables the Ouvrier-owned model tool-calling loop instead
+	// of the deterministic keyword planner. ModelID is the provider/model id
+	// (e.g. "anthropic/claude-sonnet-4-6") used for requests.
+	Model   AgentModel
+	ModelID string
 }
 
 // AgentRuntime is the Pi/Codex-style kernel behind `ouvrier operate`. It is
@@ -341,6 +347,12 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	}
 	emit(StreamEvent{Kind: StreamUser, Entry: &userEntry})
 
+	// Real model tool-calling loop when a model transport is configured;
+	// otherwise fall back to the deterministic keyword planner.
+	if r.Options.Model != nil {
+		return r.runAgentLoop(ctx, session, &turn, emit)
+	}
+
 	plan := r.planPrompt(text)
 	if plan.Assistant != "" && len(plan.Tools) == 0 {
 		emitAssistantDeltas(emit, plan.Assistant)
@@ -393,7 +405,13 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
-	emit(StreamEvent{Kind: StreamAssistant, Entry: &saved})
+	// When tools ran, the plan (StreamStatus) and per-tool cards already convey
+	// the work; the persisted combined final stays in the transcript for
+	// print/json modes but is not re-emitted to the live stream to avoid a
+	// duplicated block. With no tools, this is the only assistant message.
+	if len(plan.Tools) == 0 {
+		emit(StreamEvent{Kind: StreamAssistant, Entry: &saved})
+	}
 	turn.Final = final
 	turn.Workspace = r.workspace
 	emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})

@@ -69,6 +69,15 @@ func (r *ToolRegistry) Register(tool Tool) {
 	r.tools[tool.Name] = tool
 }
 
+// Tool returns one registered tool by name.
+func (r *ToolRegistry) Tool(name string) (Tool, bool) {
+	if r == nil {
+		return Tool{}, false
+	}
+	tool, ok := r.tools[name]
+	return tool, ok
+}
+
 // Names returns sorted tool names.
 func (r *ToolRegistry) Names() []string {
 	if r == nil {

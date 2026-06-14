@@ -51,8 +51,11 @@ credentials.
 
 Options:
       --dir string          Worker/project directory (default ".")
-      --agent string        Agent driver: codex or manual (default "codex")
+      --agent string        Agent driver for edits: codex or manual (default "codex")
       --codex-mode string   Codex transport: auto, exec, or app-server (default "auto")
+      --model string        provider/model for the tool-calling loop, e.g.
+                            anthropic/claude-sonnet-4-6 (needs the matching API
+                            key; falls back to the keyword planner if unset)
       --session string      Resume a local operate session
       --goal string         Pre-fill the first builder prompt
       --prompt string       Run one prompt without opening the TUI
