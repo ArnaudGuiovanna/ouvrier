@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
@@ -365,6 +366,12 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Esc closes the API reference panel (palette intercept already handled above).
+	if m.showAPI && keyStr == "esc" {
+		m.showAPI = false
+		return m, nil
+	}
+
 	switch keyStr {
 	case "ctrl+p":
 		m.showPalette = true
@@ -378,10 +385,18 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "ctrl+q":
-		if m.client != nil {
-			_ = m.client.Shutdown(m.ctx)
-		}
-		return m, tea.Quit
+		cl := m.client
+		return m, tea.Sequence(
+			func() tea.Msg {
+				if cl != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					_ = cl.Shutdown(ctx)
+				}
+				return nil
+			},
+			tea.Quit,
+		)
 
 	case "ctrl+c":
 		return m, tea.Quit
@@ -389,7 +404,11 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+s":
 		// Save the current file.
 		if m.ws.Dir != "" {
-			_ = operate.WriteWorkerFile(m.ws, m.openPath, m.editor.Value())
+			if err := operate.WriteWorkerFile(m.ws, m.openPath, m.editor.Value()); err != nil {
+				m.status = "save failed: " + err.Error()
+				m.statusKind = "fail"
+				return m, nil // keep dirty; do NOT audit a write that didn't happen
+			}
 			m.dirty = false
 			if m.client != nil {
 				uri := lsp.URI(filepath.Join(m.ws.Dir, m.openPath))
@@ -438,6 +457,15 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		// Retry LSP init when focus is not on the editor.
 		if m.focus != regionEditor && m.goplsPath != "" {
+			if m.client != nil {
+				old := m.client
+				m.client = nil
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					_ = old.Shutdown(ctx)
+				}()
+			}
 			goplsPath := m.goplsPath
 			wsDir := m.ws.Dir
 			openPath := m.openPath
