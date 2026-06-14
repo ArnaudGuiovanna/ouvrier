@@ -5,12 +5,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/lsp"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/operate/snippets"
 )
 
 // region is the keyboard-focus region of the IDE layout.
@@ -67,6 +70,16 @@ type ideModel struct {
 
 	// GoplsPath stored for retry
 	goplsPath string
+
+	// snippet palette overlay
+	showPalette  bool
+	paletteQuery string
+	paletteSel   int
+	paletteItems []snippets.Snippet
+
+	// API reference panel
+	showAPI bool
+	apiSel  int
 }
 
 // --- message types ---
@@ -276,11 +289,94 @@ func (m *ideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// refreshPalette refilters paletteItems based on paletteQuery.
+func (m *ideModel) refreshPalette() {
+	m.paletteItems = snippets.Search(m.paletteQuery)
+}
+
+// insertSelectedSnippet inserts the currently selected snippet body into the editor.
+func (m *ideModel) insertSelectedSnippet() {
+	if len(m.paletteItems) == 0 {
+		return
+	}
+	if m.paletteSel < 0 || m.paletteSel >= len(m.paletteItems) {
+		return
+	}
+	s := m.paletteItems[m.paletteSel]
+	m.editor.InsertString(expandSnippet(s.Body))
+	m.dirty = true
+}
+
+// expandSnippet strips tab-stop syntax from a snippet body, keeping defaults.
+// ${1:default} → default, ${1:} → "", ${1} → "".
+var reTabStopDefault = regexp.MustCompile(`\$\{(\d+):([^}]*)\}`)
+var reTabStopBare = regexp.MustCompile(`\$\{\d+\}`)
+
+func expandSnippet(body string) string {
+	body = reTabStopDefault.ReplaceAllString(body, "$2")
+	body = reTabStopBare.ReplaceAllString(body, "")
+	return body
+}
+
 // handleKey dispatches key presses.
 func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	keyStr := msg.String()
 
+	// --- Snippet palette overlay ---
+	if m.showPalette {
+		switch keyStr {
+		case "esc":
+			m.showPalette = false
+			return m, nil
+		case "up":
+			if m.paletteSel > 0 {
+				m.paletteSel--
+			}
+			return m, nil
+		case "down":
+			if m.paletteSel < len(m.paletteItems)-1 {
+				m.paletteSel++
+			}
+			return m, nil
+		case "enter":
+			m.insertSelectedSnippet()
+			m.showPalette = false
+			return m, nil
+		case "backspace":
+			if len(m.paletteQuery) > 0 {
+				// Trim last UTF-8 rune.
+				_, size := utf8.DecodeLastRuneInString(m.paletteQuery)
+				m.paletteQuery = m.paletteQuery[:len(m.paletteQuery)-size]
+				m.refreshPalette()
+				m.paletteSel = 0
+			}
+			return m, nil
+		default:
+			// Printable single rune → append to query.
+			if utf8.RuneCountInString(keyStr) == 1 {
+				r, _ := utf8.DecodeRuneInString(keyStr)
+				if r >= 32 && r != 127 {
+					m.paletteQuery += keyStr
+					m.refreshPalette()
+					m.paletteSel = 0
+				}
+			}
+			return m, nil
+		}
+	}
+
 	switch keyStr {
+	case "ctrl+p":
+		m.showPalette = true
+		m.paletteQuery = ""
+		m.refreshPalette()
+		m.paletteSel = 0
+		return m, nil
+
+	case "ctrl+\\":
+		m.showAPI = !m.showAPI
+		return m, nil
+
 	case "ctrl+q":
 		if m.client != nil {
 			_ = m.client.Shutdown(m.ctx)
