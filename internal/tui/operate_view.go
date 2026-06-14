@@ -285,10 +285,7 @@ func (m *operateModel) renderStatusBar(width int) string {
 	var authSeg string
 	switch m.authState {
 	case "authed":
-		acct := m.authAccount
-		if acct == "" {
-			acct = "codex"
-		}
+		acct := shortAuthLabel(m.authAccount)
 		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Render("auth " + acct)
 	default:
 		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("sign in: /login codex")
@@ -675,6 +672,22 @@ func (m *operateModel) renderReview() string {
 	lines = append(lines, "", muted.Render("↑↓ select  f fix(agent)  a accept  x dismiss  ctrl+r/esc/q close"))
 	box := lipgloss.NewStyle().Padding(0, 1).Width(max(m.width-2, 20))
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+// shortAuthLabel condenses a `codex login status` line into a concise badge for
+// the status bar, e.g. "Logged in using ChatGPT" -> "ChatGPT".
+func shortAuthLabel(account string) string {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return "codex"
+	}
+	if i := strings.LastIndex(strings.ToLower(account), "using "); i >= 0 {
+		return strings.TrimSpace(account[i+len("using "):])
+	}
+	if len(account) > 24 {
+		return account[:24] + "…"
+	}
+	return account
 }
 
 func severityGlyph(sev string) string {

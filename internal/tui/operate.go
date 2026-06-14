@@ -292,8 +292,7 @@ func defaultModelChoices(opts OperateOptions) []string {
 		return []string{"manual"}
 	}
 	return []string{
-		"codex/gpt-5.5 high",
-		"codex/gpt-5.5 medium",
+		"codex/gpt-5-codex",
 		"anthropic/claude-sonnet-4-6",
 		"openai/gpt-5.5",
 	}
