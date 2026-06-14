@@ -31,7 +31,24 @@ const (
 	StreamDone StreamEventKind = "done"
 	// StreamApproval is emitted when a governed tool requires operator approval.
 	StreamApproval StreamEventKind = "approval"
+	// StreamReview is emitted after a successful review_worker tool call.
+	StreamReview StreamEventKind = "review"
+	// StreamDiff is emitted after a successful diff_worker tool call.
+	StreamDiff StreamEventKind = "diff"
 )
+
+// ReviewData is the structured payload of a StreamReview event.
+type ReviewData struct {
+	Summary  string    `json:"summary"`
+	Findings []Finding `json:"findings"`
+}
+
+// DiffData is the structured payload of a StreamDiff event.
+type DiffData struct {
+	Status       string   `json:"status"`
+	ChangedFiles []string `json:"changed_files"`
+	Patch        string   `json:"patch"`
+}
 
 // StreamEvent is one incremental cockpit event delivered over RunTurn's channel.
 type StreamEvent struct {
@@ -41,6 +58,8 @@ type StreamEvent struct {
 	Final     string           `json:"final,omitempty"`
 	Workspace *Workspace       `json:"workspace,omitempty"`
 	Approval  *ApprovalRequest `json:"approval,omitempty"`
+	Review    *ReviewData      `json:"review,omitempty"`
+	Diff      *DiffData        `json:"diff,omitempty"`
 	Err       error            `json:"-"`
 }
 

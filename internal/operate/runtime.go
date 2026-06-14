@@ -501,6 +501,12 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 	if runErr != nil {
 		return result, runErr
 	}
+	switch call.Name {
+	case "review_worker":
+		emit(StreamEvent{Kind: StreamReview, Review: reviewDataFromResult(result.Data)})
+	case "diff_worker":
+		emit(StreamEvent{Kind: StreamDiff, Diff: diffDataFromResult(result.Data)})
+	}
 	return result, nil
 }
 
@@ -568,4 +574,70 @@ func (r *AgentRuntime) startMessage(session *Session) string {
 		return fmt.Sprintf("Ouvrier Agent Cockpit ready. %d worker(s) detected; select one or create a new worker from a prompt.", len(candidates))
 	}
 	return "Ouvrier Agent Cockpit ready. Describe the worker you want to build, or use /new worker."
+}
+
+func reviewDataFromResult(data map[string]any) *ReviewData {
+	rd := &ReviewData{}
+	if s, ok := data["summary"].(string); ok {
+		rd.Summary = s
+	}
+	if raw, ok := data["findings"].([]map[string]any); ok {
+		for _, f := range raw {
+			rd.Findings = append(rd.Findings, findingFromMap(f))
+		}
+	} else if rawAny, ok := data["findings"].([]any); ok {
+		for _, item := range rawAny {
+			if f, ok := item.(map[string]any); ok {
+				rd.Findings = append(rd.Findings, findingFromMap(f))
+			}
+		}
+	}
+	return rd
+}
+
+func findingFromMap(f map[string]any) Finding {
+	out := Finding{}
+	if v, ok := f["severity"].(string); ok {
+		out.Severity = v
+	}
+	if v, ok := f["file"].(string); ok {
+		out.File = v
+	}
+	switch n := f["line"].(type) {
+	case int:
+		out.Line = n
+	case float64:
+		out.Line = int(n)
+	}
+	if v, ok := f["title"].(string); ok {
+		out.Title = v
+	}
+	if v, ok := f["body"].(string); ok {
+		out.Body = v
+	}
+	if v, ok := f["action"].(string); ok {
+		out.Action = v
+	}
+	return out
+}
+
+func diffDataFromResult(data map[string]any) *DiffData {
+	dd := &DiffData{}
+	if s, ok := data["status"].(string); ok {
+		dd.Status = s
+	}
+	if s, ok := data["diff"].(string); ok {
+		dd.Patch = s
+	}
+	switch cf := data["changed_files"].(type) {
+	case []string:
+		dd.ChangedFiles = cf
+	case []any:
+		for _, item := range cf {
+			if s, ok := item.(string); ok {
+				dd.ChangedFiles = append(dd.ChangedFiles, s)
+			}
+		}
+	}
+	return dd
 }

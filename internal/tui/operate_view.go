@@ -21,6 +21,9 @@ func (m *operateModel) render() string {
 	if m.showHelp {
 		return m.renderHelp()
 	}
+	if m.showReview {
+		return m.renderReview()
+	}
 
 	cw := m.vp.Width()
 	sections := []string{
@@ -579,6 +582,89 @@ func approvalDetailLines(ap *operate.ApprovalRequest) []kv {
 		if len(out) == 6 {
 			break
 		}
+	}
+	return out
+}
+
+func (m *operateModel) renderReview() string {
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex)).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
+	sel := lipgloss.NewStyle().Foreground(lipgloss.Color(blackHex)).Background(lipgloss.Color(greenHex))
+	val := lipgloss.NewStyle().Foreground(lipgloss.Color(offWhiteHex))
+
+	var lines []string
+	lines = append(lines, title.Render("Review — "+m.reviewSummary))
+	lines = append(lines, "")
+	for i, f := range m.findings {
+		loc := f.File
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+		}
+		row := fmt.Sprintf("%s %-8s %s  %s", severityGlyph(f.Severity), f.Severity, loc, f.Title)
+		if st := m.findingState[i]; st != "" {
+			row += "  [" + st + "]"
+		}
+		if i == m.reviewIndex {
+			lines = append(lines, sel.Render(" "+row+" "))
+		} else {
+			lines = append(lines, val.Render("  "+row))
+		}
+	}
+	if len(m.findings) == 0 {
+		lines = append(lines, muted.Render("No findings."))
+	}
+	if m.reviewIndex < len(m.findings) {
+		f := m.findings[m.reviewIndex]
+		lines = append(lines, "", title.Render("Detail"), val.Render(wrapText(f.Body, max(m.width-4, 20))))
+		if f.Action != "" {
+			lines = append(lines, muted.Render("fix: ")+val.Render(wrapText(f.Action, max(m.width-8, 20))))
+		}
+	}
+	if m.diff != nil && strings.TrimSpace(m.diff.Patch) != "" {
+		lines = append(lines, "", title.Render("Diff"))
+		lines = append(lines, renderDiffLines(m.diff.Patch)...)
+	}
+	lines = append(lines, "", muted.Render("↑↓ select  f fix(agent)  a accept  x dismiss  ctrl+r/esc/q close"))
+	box := lipgloss.NewStyle().Padding(0, 1).Width(max(m.width-2, 20))
+	return box.Render(strings.Join(lines, "\n"))
+}
+
+func severityGlyph(sev string) string {
+	switch strings.ToLower(sev) {
+	case "critical":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Bold(true).Render("■")
+	case "high":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render("▲")
+	case "medium":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("●")
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex)).Render("○")
+	}
+}
+
+func renderDiffLines(patch string) []string {
+	add := lipgloss.NewStyle().Foreground(lipgloss.Color(greenHex))
+	del := lipgloss.NewStyle().Foreground(lipgloss.Color(redHex))
+	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
+	var out []string
+	n := 0
+	for _, ln := range strings.Split(patch, "\n") {
+		if n >= 200 {
+			out = append(out, muted.Render("… diff truncated"))
+			break
+		}
+		switch {
+		case strings.HasPrefix(ln, "+"):
+			out = append(out, add.Render(ln))
+		case strings.HasPrefix(ln, "-"):
+			out = append(out, del.Render(ln))
+		case strings.HasPrefix(ln, "@@"):
+			out = append(out, hdr.Render(ln))
+		default:
+			out = append(out, muted.Render(ln))
+		}
+		n++
 	}
 	return out
 }
