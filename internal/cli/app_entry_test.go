@@ -79,3 +79,20 @@ func TestRunDashCResumesLatest(t *testing.T) {
 		t.Fatalf("resume session = %q, want %q", gotSession, sess.ID)
 	}
 }
+
+func TestRootHelpIsAgentCentric(t *testing.T) {
+	out := &bytes.Buffer{}
+	app := New("test", WithStreams(bytes.NewReader(nil), out, &bytes.Buffer{}))
+	if err := app.run(context.Background(), []string{"--help"}); err != nil {
+		t.Fatalf("run --help: %v", err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("ouvrier")) {
+		t.Fatal("help missing product name")
+	}
+	// The subcommand catalogue must no longer be advertised as the product.
+	for _, banned := range []string{"console   Start", "deploy    Ship", "fleet     Inspect"} {
+		if bytes.Contains(out.Bytes(), []byte(banned)) {
+			t.Fatalf("root help still advertises subcommand line %q:\n%s", banned, out.String())
+		}
+	}
+}
