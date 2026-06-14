@@ -19,8 +19,6 @@ approval before anything irreversible.
 
 Advanced (CI/debug) subcommands remain available but are not the product
 surface; run "ouvrier <command> --help" for their details.
-(Available: new, add, dev, build, show, status, logs, trace, deploy, server,
-fleet, console, operate, state)
 `
 
 const operateHelp = `Open the local agentic worker-builder cockpit.
