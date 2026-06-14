@@ -135,7 +135,7 @@ func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn 
 			if len(call.Arguments) > 0 {
 				_ = json.Unmarshal(call.Arguments, &input)
 			}
-			result, runErr := r.callTool(ctx, session, plannedTool{Name: call.Name, Input: input}, turn, emit)
+			result, runErr := r.callTool(ctx, session, plannedTool{ID: call.ID, Name: call.Name, Input: input}, turn, emit)
 			msgs = append(msgs, provider.ToolResultText(
 				provider.ToolCall{ID: call.ID, Name: call.Name},
 				toolResultContent(result, runErr),

@@ -138,3 +138,52 @@ func TestAgentLoopExecutesToolsThenFinishes(t *testing.T) {
 		t.Fatalf("transcript missing user entry: %v", kinds)
 	}
 }
+
+func TestAgentLoopPersistsToolCallID(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+
+	model := &scriptedModel{steps: []provider.Response{
+		{
+			Text:       "listing",
+			StopReason: provider.StopToolUse,
+			ToolCalls:  []provider.ToolCall{{ID: "call_abc", Name: "list_workers", Arguments: json.RawMessage(`{}`)}},
+		},
+		{Text: "done", StopReason: provider.StopEndTurn},
+	}}
+
+	rt, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}, Model: model, ModelID: "test/model"})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	started, err := rt.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ch, err := rt.RunTurn(context.Background(), started.Session.ID, "list", "prompt")
+	if err != nil {
+		t.Fatalf("run turn: %v", err)
+	}
+	for range ch {
+	}
+
+	entries, err := ReadTranscript(started.Session.TranscriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	var callID, resultID string
+	for _, e := range entries {
+		switch e.Kind {
+		case TranscriptToolCall:
+			callID, _ = e.Metadata["tool_call_id"].(string)
+		case TranscriptToolResult:
+			resultID, _ = e.Metadata["tool_call_id"].(string)
+		}
+	}
+	if callID == "" || callID != resultID {
+		t.Fatalf("tool_call_id mismatch: call=%q result=%q", callID, resultID)
+	}
+	if callID != "call_abc" {
+		t.Fatalf("expected model-supplied id call_abc, got %q", callID)
+	}
+}
