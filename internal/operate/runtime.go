@@ -11,6 +11,10 @@ import (
 
 const defaultOperateModel = "anthropic/claude-sonnet-4-6"
 
+// errToolDenied marks a tool skipped by the approval gate. It is non-fatal: the
+// turn continues and the model is told the tool was denied.
+var errToolDenied = errors.New("operate: tool denied by approval gate")
+
 // RuntimeOptions configures the terminal-native operate agent runtime.
 type RuntimeOptions struct {
 	Dir       string
@@ -385,7 +389,7 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 			return turn, err
 		}
 		result, err := r.callTool(ctx, session, call, &turn, emit, ctrl)
-		if err != nil {
+		if err != nil && !errors.Is(err, errToolDenied) {
 			msg := call.Name + ": " + err.Error()
 			errEntry, _ := appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
 			emit(StreamEvent{Kind: StreamError, Entry: &errEntry, Err: err})
@@ -463,7 +467,7 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		turn.Entries = append(turn.Entries, resultEntry)
 		emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: fmt.Errorf("%s", reason)})
 		_ = appendToolCall(session.ToolCallsPath, call, result, fmt.Errorf("%s", reason))
-		return result, nil
+		return result, errToolDenied
 	}
 
 	result, runErr := r.Tools.Execute(ctx, ToolEnv{
@@ -513,16 +517,24 @@ func (r *AgentRuntime) gate(ctx context.Context, call plannedTool, emit func(Str
 	}
 	req := approvalRequestFor(call, tool.Governance, r.workspace)
 	emit(StreamEvent{Kind: StreamApproval, Approval: req})
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case d := <-ctrl.decisions:
-		return d.Approved, nil
+	for {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case d := <-ctrl.decisions:
+			if d.ID != "" && d.ID != req.ID {
+				continue // ignore a stale/mismatched decision
+			}
+			return d.Approved, nil
+		}
 	}
 }
 
 func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *ApprovalRequest {
 	id, _ := randomID()
+	if id == "" {
+		id = call.ID
+	}
 	req := &ApprovalRequest{ID: id, Tool: call.Name, Governance: gov, Details: map[string]any{}}
 	for k, v := range call.Input {
 		req.Details[k] = v
