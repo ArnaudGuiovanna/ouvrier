@@ -16,6 +16,30 @@ import (
 
 const defaultQueuePublishTimeout = 5 * time.Second
 
+// egressTimeout bounds a single outbound HTTP push (a Push webhook terminal, or
+// an HTTP/SQS queue terminal) end to end. The stream, cron and durable callers
+// may pass a context without a deadline, and http.DefaultClient has no timeout,
+// so a black-holed or slow endpoint would otherwise pin the worker goroutine —
+// and the consumer pool slot it holds — indefinitely (audit H5). It is a var so
+// tests can shorten it. The socket-level queue backends (NATS/Redis) already
+// bound themselves through queuePublishDeadline, so this covers only the HTTP
+// egress paths.
+var egressTimeout = 30 * time.Second
+
+// egressHTTPClient is the dedicated client for outbound HTTP pushes. Unlike
+// http.DefaultClient it carries a total-request Timeout as a hard backstop, in
+// addition to the per-push deadline applied via egressContext.
+var egressHTTPClient = &http.Client{Timeout: egressTimeout}
+
+// egressContext derives a context carrying the egress deadline. A caller's
+// earlier deadline is preserved; a caller with no deadline gets egressTimeout.
+func egressContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, egressTimeout)
+}
+
 func publishQueue(ctx context.Context, rawURI, output string) error {
 	parsed, err := url.Parse(rawURI)
 	if err != nil {
@@ -54,6 +78,8 @@ func queueIdempotencyKey(uri *url.URL) string {
 }
 
 func postHTTPQueue(ctx context.Context, rawURL, output string) error {
+	ctx, cancel := egressContext(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewBufferString(output))
 	if err != nil {
 		return err
@@ -63,7 +89,7 @@ func postHTTPQueue(ctx context.Context, rawURL, output string) error {
 	} else {
 		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := egressHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}

@@ -903,6 +903,8 @@ func (rt httpRuntime) applyPushTerminal(ctx context.Context, terminal runtimepla
 }
 
 func postWebhook(ctx context.Context, url, output string) error {
+	ctx, cancel := egressContext(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBufferString(output))
 	if err != nil {
 		return err
@@ -912,7 +914,7 @@ func postWebhook(ctx context.Context, url, output string) error {
 	} else {
 		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := egressHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
