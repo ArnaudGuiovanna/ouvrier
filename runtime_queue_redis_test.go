@@ -151,6 +151,22 @@ func TestPublishRedisQueueRequiresStream(t *testing.T) {
 	}
 }
 
+// TestPublishRedisQueueRejectsCleartextForRedissScheme proves the H6 fix: the
+// recorder speaks plaintext RESP, so a rediss:// push must attempt a TLS
+// handshake against it and fail rather than sending AUTH and the payload over
+// an unencrypted socket. The same endpoint over redis:// succeeds in the other
+// tests, so this pins the scheme-dependent behavior.
+func TestPublishRedisQueueRejectsCleartextForRedissScheme(t *testing.T) {
+	listener, _ := newRedisCommandRecorder(t, "$15\r\n1700000000000-0\r\n")
+	uri := fmt.Sprintf("rediss://user:secret@%s/results", listener.Addr().String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := publishQueue(ctx, uri, `{"status":"ok"}`); err == nil {
+		t.Fatal("publishQueue over rediss:// to a plaintext server returned nil; the TLS handshake was skipped (cleartext downgrade)")
+	}
+}
+
 func TestNewHTTPHandlerPushesPipelineOutputToRedisQueue(t *testing.T) {
 	listener, commands := newRedisCommandRecorder(t, "$15\r\n1700000000000-0\r\n")
 	uri := fmt.Sprintf("redis://%s/results", listener.Addr().String())
