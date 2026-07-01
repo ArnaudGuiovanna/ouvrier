@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 )
@@ -23,13 +22,8 @@ func publishRedisQueue(ctx context.Context, uri *url.URL, output string) error {
 	if err != nil {
 		return err
 	}
-	address, err := redisStreamAddress(uri)
-	if err != nil {
-		return err
-	}
 
-	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	conn, err := dialRedis(ctx, uri)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package ovr
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,12 +24,7 @@ func receiveRedisStream(ctx context.Context, uri *url.URL, lastID string) (strea
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	address, err := redisStreamAddress(uri)
-	if err != nil {
-		return streamMessage{}, err
-	}
-	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	conn, err := dialRedis(ctx, uri)
 	if err != nil {
 		return streamMessage{}, err
 	}
@@ -143,6 +139,31 @@ func redisStreamAddress(uri *url.URL) (string, error) {
 		port = "6379"
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// dialRedis opens a connection to the Redis endpoint named by uri. For the
+// rediss:// scheme the socket is wrapped in TLS (verifying the server
+// certificate against the URI host) so the subsequent AUTH command and payload
+// are encrypted; the plain redis:// scheme dials cleartext TCP as before. This
+// closes the H6 downgrade where rediss:// silently used an unencrypted socket,
+// leaking the AUTH password and message bodies. Both the stream consumer and
+// the queue push terminal dial through here so the two paths stay consistent.
+func dialRedis(ctx context.Context, uri *url.URL) (net.Conn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	address, err := redisStreamAddress(uri)
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(uri.Scheme, "rediss") {
+		dialer := &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: defaultQueuePublishTimeout},
+			Config:    &tls.Config{ServerName: uri.Hostname()},
+		}
+		return dialer.DialContext(ctx, "tcp", address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 }
 
 func writeRedisCommand(writer io.Writer, args ...string) error {
