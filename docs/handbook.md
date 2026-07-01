@@ -151,9 +151,7 @@ Use `.env.example` as the team-visible template. Keep `.env` local and out of
 Git. `pip.yaml` supplies project metadata used by `ouvrier show`, `ouvrier
 build`, and deployment commands. `ouvrier.worker.json` is a small
 machine-readable manifest (`name`, `description`, `events`, `outcomes`,
-`admin_url`) intended for editor and agent integrations. The Pi extension in
-`integrations/pi-ouvrier/` uses it to discover workers, stream admin events, and
-show asynchronous feedback in an Ouvrier Inbox.
+`admin_url`) intended for editor and agent integrations.
 
 ## Creating Projects
 
