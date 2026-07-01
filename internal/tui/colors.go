@@ -13,22 +13,6 @@ const (
 	redHex      = "#ed8796" // red (fail)
 	dimGreenHex = "#494d64" // surface1 (rules/borders)
 
-	// --- Catppuccin Macchiato surfaces ---
-	bgCrustHex  = "#181926"
-	bgMantleHex = "#1e2030"
-	bgBaseHex   = "#24273a"
-	surface0Hex = "#363a4f"
-	surface1Hex = "#494d64"
-	surface2Hex = "#5b6078"
-
-	// --- text tiers ---
-	textHex     = "#cad3f5"
-	subtext1Hex = "#b8c0e0"
-	subtext0Hex = "#a5adcb"
-	overlay2Hex = "#939ab7"
-	overlay1Hex = "#8087a2"
-	overlay0Hex = "#6e738d" // rules/separators ONLY (too low-contrast for text)
-
 	// --- semantic ---
 	accentHex    = "#c6a0f6" // mauve — focus / identity / Ouvrier-ness ONLY
 	accentDimHex = "#494d64"
@@ -38,12 +22,6 @@ const (
 	failHex      = "#ed8796" // red
 	gateHex      = "#eed49f" // yellow — approval gate / attention
 	magentaHex   = "#c6a0f6" // = accent (kept name for existing sites)
-
-	// --- LSP diagnostic severities ---
-	diagErrorHex = "#ed8796"
-	diagWarnHex  = "#eed49f"
-	diagInfoHex  = "#8aadf4"
-	diagHintHex  = "#8bd5ca"
 
 	// --- diff ---
 	diffAddHex = "#a6da95"
