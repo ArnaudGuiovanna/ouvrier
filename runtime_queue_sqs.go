@@ -43,7 +43,9 @@ func publishSQSQueue(ctx context.Context, uri *url.URL, output string) error {
 	if err != nil {
 		return err
 	}
-	return publishSQSQueueWith(ctx, uri, output, http.DefaultClient, creds)
+	ctx, cancel := egressContext(ctx)
+	defer cancel()
+	return publishSQSQueueWith(ctx, uri, output, egressHTTPClient, creds)
 }
 
 func publishSQSQueueWith(ctx context.Context, uri *url.URL, output string, doer queueHTTPDoer, creds sqsCredentials) error {
