@@ -181,9 +181,8 @@ ouvrier version
 
 During local development, generated projects use a `replace` directive pointing
 back to this checkout. They also include `ouvrier.worker.json`, a small
-machine-readable worker manifest for editor/agent integrations. A prototype Pi
-extension lives in `integrations/pi-ouvrier/`; it discovers these manifests,
-streams `/admin/events`, and exposes an Ouvrier Inbox inside Pi.
+machine-readable worker manifest (`name`, `description`, `events`, `outcomes`,
+`admin_url`) for editor/agent integrations.
 
 ## Create A Worker
 
