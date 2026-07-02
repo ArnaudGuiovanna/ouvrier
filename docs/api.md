@@ -4,8 +4,8 @@ This file is a single-source map of the public surface in package
 `ovr "github.com/ArnaudGuiovanna/ouvrier"`. It mirrors the shipped framework
 contract documented in the handbook and is exercised by the
 `TestPublicAPIParityCompiles` golden test so the doc cannot drift away from the
-code. As of June 2026, `main` contains the v0.2 milestone work; `v0.1.0`
-remains the latest tagged release until v0.2 is tagged.
+code. As of June 2026, `main` contains the v0.1-v0.5 shipped work, and
+`v0.5.0` is the latest tagged release.
 
 ## Triggers
 

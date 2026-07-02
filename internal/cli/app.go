@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
@@ -29,9 +31,18 @@ type App struct {
 	out     io.Writer
 	errOut  io.Writer
 	runNew  RunNewFunc
+	// runOperate launches the interactive v0.4 worker-builder cockpit. Tests
+	// substitute a fake implementation so they do not drive Bubble Tea.
+	runOperate RunOperateFunc
+	// runIDE launches the Ouvrier IDE TUI. Tests substitute a fake implementation
+	// so they do not drive Bubble Tea.
+	runIDE RunIDEFunc
 	// keyscan is the ssh-keyscan seam used by `ouvrier server trust`; tests
 	// substitute canned scan output. Nil means deploy.DefaultKeyscan.
 	keyscan deploy.KeyscanRunner
+	// signedIn probes whether a Codex subscription is active. Tests substitute
+	// a stub so they don't shell out to codex.
+	signedIn func() bool
 }
 
 type Option func(*App)
@@ -42,11 +53,14 @@ func New(version string, opts ...Option) *App {
 	}
 
 	app := &App{
-		version: version,
-		in:      os.Stdin,
-		out:     os.Stdout,
-		errOut:  os.Stderr,
-		runNew:  defaultRunNew,
+		version:    version,
+		in:         os.Stdin,
+		out:        os.Stdout,
+		errOut:     os.Stderr,
+		runNew:     defaultRunNew,
+		runOperate: defaultRunOperate,
+		runIDE:     defaultRunIDE,
+		signedIn:   codexSignedIn,
 	}
 	for _, opt := range opts {
 		opt(app)
@@ -64,6 +78,12 @@ func WithStreams(in io.Reader, out io.Writer, errOut io.Writer) Option {
 			app.errOut = errOut
 		}
 	}
+}
+
+// WithSignedIn overrides the Codex subscription probe. Tests pass
+// func() bool { return false } so they don't shell out to codex.
+func WithSignedIn(fn func() bool) Option {
+	return func(app *App) { app.signedIn = fn }
 }
 
 func (app *App) Run(ctx context.Context, args []string) error {
@@ -85,9 +105,25 @@ func (app *App) run(ctx context.Context, args []string) error {
 	default:
 	}
 
-	if len(args) == 0 || isHelpFlag(args[0]) {
+	if len(args) > 0 && isHelpFlag(args[0]) {
 		printRootHelp(app.out)
 		return nil
+	}
+	if len(args) == 0 {
+		return app.runOperateCommand(ctx, nil)
+	}
+	if args[0] == "-p" {
+		return app.runOperateCommand(ctx, append([]string{"--prompt"}, args[1:]...))
+	}
+	if args[0] == "-c" || args[0] == "--continue" {
+		rest := args[1:]
+		dir := operateDirFromArgs(rest)
+		if store, err := operate.NewStore(dir); err == nil {
+			if id, err := store.LatestSessionID(); err == nil {
+				return app.runOperateCommand(ctx, append([]string{"--session", id}, rest...))
+			}
+		}
+		return app.runOperateCommand(ctx, rest)
 	}
 
 	switch args[0] {
@@ -117,6 +153,10 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runFleetCommand(ctx, args[1:])
 	case "console":
 		return app.runConsoleCommand(ctx, args[1:])
+	case "operate":
+		return app.runOperateCommand(ctx, args[1:])
+	case "ide":
+		return app.runIDECommand(ctx, args[1:])
 	case "state":
 		return app.runStateCommand(ctx, args[1:])
 	default:
@@ -214,4 +254,22 @@ func hasHelpFlag(args []string) bool {
 
 func isHelpFlag(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "help"
+}
+
+// operateDirFromArgs extracts a --dir value (either "--dir=x" or "--dir x") from
+// raw operate args, defaulting to "." so `-c` can locate the session store.
+func operateDirFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		name, inline, hasInline := strings.Cut(args[i], "=")
+		if name != "--dir" {
+			continue
+		}
+		if hasInline {
+			return inline
+		}
+		if i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return "."
 }

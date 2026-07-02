@@ -5,27 +5,75 @@ import (
 	"io"
 )
 
-const rootHelp = `Ouvrier - Workers for your APIs.
+const rootHelp = `Ouvrier - the terminal agent that builds, reviews, and ships Go workers.
 
-Usage: ouvrier <command> [flags]
+Usage:
+  ouvrier              Open the agent cockpit (build/review/deploy by prompt)
+  ouvrier -p "<goal>"  Run one agent prompt non-interactively
+  ouvrier -c           Resume the latest session
+  ouvrier ide          Review/edit/rebuild a worker in the IDE (gopls + Ouvrier snippets)
+  ouvrier version      Print the ouvrier CLI version
 
-Commands:
-  new       Scaffold a new Ouvrier project
-  add       Add an agent, tool, or skill to an existing project
-  dev       Run the worker locally (go run .) until interrupted
-  build     Compile an Ouvrier project to a binary
-  show      Summarize the current project's pip.yaml
-  status    Show health and counters for a running worker
-  logs      List the last N traced executions of a running worker
-  trace     Print the full event timeline for one execution
-  deploy    Ship the project to a deploy environment or host over SSH, or build a container image
-  server    Manage trusted deploy hosts (trust pins SSH host keys)
-  fleet     Inspect or prune the recorded deployments inventory (ls|rm)
-  console   Start the loopback web console over the federated admin APIs
-  state     Manage the worker's durable state backend (migrate)
-  version   Print the ouvrier CLI version
+Inside the cockpit, describe the worker you want; the agent scaffolds it,
+audits, lets you review, builds, and deploys over SSH - pausing for your
+approval before anything irreversible.
 
-Run "ouvrier <command> --help" for command details.
+Advanced (CI/debug) subcommands remain available but are not the product
+surface; run "ouvrier <command> --help" for their details.
+`
+
+const operateHelp = `Open the local agentic worker-builder cockpit.
+
+Usage: ouvrier operate [flags]
+       ouvrier operate --print "create a worker that receives POST /tickets"
+       ouvrier operate --mode json --prompt "review this worker"
+       ouvrier operate --mode rpc
+       ouvrier operate create-worker --yes --name <name> --trigger <trigger> --model <model> [flags]
+       ouvrier operate patch --goal "<change>" [flags]
+       ouvrier operate fix-worker [flags]
+       ouvrier operate review-worker [flags]
+       ouvrier operate audit [flags]
+       ouvrier operate build [flags]
+       ouvrier operate transfer --env <name> [flags]
+
+The interactive cockpit is a prompt-first agent harness specialized for
+manufacturing Ouvrier workers. Type a goal, review the visible tool transcript,
+let the harness scaffold/patch/audit/build/transfer, and keep workers as normal
+Go projects. Codex is used only as a local driver; Ouvrier never stores Codex
+credentials.
+
+Options:
+      --dir string          Worker/project directory (default ".")
+      --agent string        Agent driver for edits: codex or manual (default "codex")
+      --codex-mode string   Codex transport: auto, exec, or app-server (default "auto")
+      --model string        provider/model for the tool-calling loop, e.g.
+                            anthropic/claude-sonnet-4-6 (needs the matching API
+                            key; falls back to the keyword planner if unset)
+      --session string      Resume a local operate session
+      --goal string         Pre-fill the first builder prompt
+      --prompt string       Run one prompt without opening the TUI
+      --print               Run prompt mode and print the transcript
+      --mode string         tui, print, json, or rpc (default "tui")
+      --json                Shortcut for --mode json
+      --target string       Build/deploy target, e.g. linux/amd64
+      --allow-failed        Override audit/review gates for build or transfer
+  -h, --help                Show this help message
+
+Review worker mode:
+      --scope string        whole_worker, changed_files, tool, pipeline,
+                            governance_security, deploy_readiness, failing_trace
+      --subject string      Optional review subject, e.g. tool name or pipeline
+
+Transfer mode:
+      --env string          deploy.<env> from pip.yaml
+      --env-file string     Env file passed to deploy
+      --keep int            Releases to keep on the host
+
+Create worker mode:
+      --name string         Project name
+      --trigger string      Initial worker trigger
+      --model string        Initial provider/model
+      --yes                 Confirm file creation
 `
 
 const newHelp = `Scaffold a new Ouvrier project.
