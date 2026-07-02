@@ -1,0 +1,1182 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ouvrier - Architecture et audit d'implementation</title>
+  <style>
+    :root {
+      --bg: #070807;
+      --panel: #111512;
+      --panel-2: #161b17;
+      --ink: #f5f1e8;
+      --muted: #aab4aa;
+      --line: #2d3a31;
+      --green: #00d27a;
+      --amber: #e4b04f;
+      --red: #ff6b6b;
+      --blue: #7dc4ff;
+      --gray: #68746c;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      letter-spacing: 0;
+    }
+
+    a { color: var(--green); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      background: #0b100c;
+      border: 1px solid #223027;
+      border-radius: 4px;
+      padding: 1px 4px;
+      color: #dff7ea;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      background: #090c0a;
+      padding: 34px clamp(18px, 5vw, 72px) 28px;
+    }
+
+    main {
+      width: min(1480px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 22px 0 64px;
+    }
+
+    h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: 0; }
+    h1 { font-size: clamp(28px, 4vw, 48px); max-width: 980px; }
+    h2 {
+      font-size: 22px;
+      margin-top: 38px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+    h3 { font-size: 16px; margin-top: 22px; color: #dce8df; }
+    p { margin: 10px 0; color: var(--muted); }
+    strong { color: var(--ink); }
+
+    .subtitle { max-width: 980px; margin-top: 12px; font-size: 15px; color: var(--muted); }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .pill, .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 26px;
+      border-radius: 4px;
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      background: #0d120f;
+      color: var(--ink);
+      white-space: nowrap;
+      font-size: 12px;
+    }
+
+    .ok { border-color: #0f7d4d; color: #b9ffd9; background: #06120c; }
+    .partial { border-color: #82601f; color: #ffe0a3; background: #171104; }
+    .gap { border-color: #7b252b; color: #ffc5c5; background: #170707; }
+    .risk { border-color: #2c628f; color: #c7e8ff; background: #07121a; }
+    .neutral { border-color: var(--line); color: var(--muted); background: #0d120f; }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: rgba(7, 8, 7, .96);
+      border-bottom: 1px solid var(--line);
+      padding: 8px clamp(16px, 5vw, 72px);
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+    }
+    nav a {
+      color: var(--muted);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 4px 8px;
+      white-space: nowrap;
+    }
+    nav a:hover { color: var(--green); text-decoration: none; border-color: var(--green); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .span-3 { grid-column: span 3; }
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+
+    .metric {
+      font-size: 26px;
+      color: var(--green);
+      line-height: 1.1;
+      margin-bottom: 6px;
+    }
+
+    .small { color: var(--muted); font-size: 12px; }
+    .note {
+      border-left: 3px solid var(--green);
+      padding: 10px 12px;
+      background: #09100b;
+      margin: 14px 0;
+      color: var(--muted);
+    }
+    .warning { border-left-color: var(--amber); background: #130f06; }
+    .danger { border-left-color: var(--red); background: #160808; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(128px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+      margin-top: 14px;
+    }
+
+    .node {
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel-2);
+      min-height: 112px;
+    }
+    .node:after {
+      content: ">";
+      position: absolute;
+      right: -10px;
+      top: 42px;
+      color: var(--green);
+      background: var(--bg);
+      padding: 0 3px;
+    }
+    .node:last-child:after { display: none; }
+    .node .title { color: var(--ink); font-weight: 700; margin-bottom: 6px; }
+    .node ul, .card ul { margin: 8px 0 0 18px; padding: 0; color: var(--muted); }
+    .node li, .card li { margin: 3px 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 10px 11px;
+      border-bottom: 1px solid var(--line);
+    }
+    th {
+      color: #eaf7ef;
+      background: #101711;
+      font-weight: 700;
+      position: sticky;
+      top: 42px;
+      z-index: 1;
+    }
+    tr:last-child td { border-bottom: 0; }
+    td { color: var(--muted); }
+
+    .map {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 12px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 8px;
+    }
+
+    .layer {
+      border: 1px solid var(--line);
+      background: #0d120f;
+      border-radius: 6px;
+      padding: 10px;
+    }
+    .layer b { color: var(--ink); }
+    .layer span { color: var(--muted); display: block; margin-top: 3px; }
+
+    .columns {
+      columns: 2 360px;
+      column-gap: 22px;
+    }
+    .columns li { break-inside: avoid; margin-bottom: 6px; }
+
+    .source-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .source-list a {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: #0d120f;
+    }
+
+    @media (max-width: 1050px) {
+      .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .node:after { display: none; }
+      .span-3, .span-4, .span-6, .span-8 { grid-column: span 12; }
+      .map { grid-template-columns: 1fr; }
+      th { position: static; }
+    }
+
+    @media (max-width: 640px) {
+      main { width: min(100% - 18px, 1480px); }
+      header { padding: 24px 12px; }
+      nav { padding: 8px 10px; }
+      .flow { grid-template-columns: 1fr; }
+      table { font-size: 12px; }
+      th, td { padding: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Architecture Ouvrier: representation lisible et audit d'implementation</h1>
+    <p class="subtitle">
+      Document local genere pour ouvrir la boite noire du projet. Il croise le code,
+      les tests et la documentation du depot a la date du 2 juillet 2026.
+    </p>
+    <div class="meta">
+      <span class="pill">branche: <strong>main</strong></span>
+      <span class="pill">commit: <strong>63d78725d97f</strong></span>
+      <span class="pill">Go: <strong>go1.25.6 linux/amd64</strong></span>
+      <span class="pill">tests: <strong>go test ./... OK</strong></span>
+      <span class="pill">tests files: <strong>194</strong></span>
+      <span class="pill">Go code: <strong>~99k lignes</strong></span>
+    </div>
+  </header>
+
+  <nav aria-label="Navigation du rapport">
+    <a href="#synthese">Synthese</a>
+    <a href="#carte">Carte</a>
+    <a href="#repertoires">Repertoires</a>
+    <a href="#execution">Execution</a>
+    <a href="#harness">Harness</a>
+    <a href="#triggers">Triggers</a>
+    <a href="#outputs">Outputs</a>
+    <a href="#providers">Providers</a>
+    <a href="#state">Etat</a>
+    <a href="#admin">Admin</a>
+    <a href="#cli">CLI</a>
+    <a href="#gaps">Non complet</a>
+    <a href="#preuves">Preuves</a>
+  </nav>
+
+  <main>
+    <section id="synthese">
+      <h2>Synthese</h2>
+      <div class="grid">
+        <div class="card span-3">
+          <div class="metric">OK</div>
+          <strong>Le noyau runtime est reel.</strong>
+          <p>Declaration publique, compilation en plans, dispatch HTTP/Cron/Stream/Mixed, harness agentique, tools gouvernes, schemas, et admin endpoints sont implementes et couverts.</p>
+        </div>
+        <div class="card span-3">
+          <div class="metric">OK</div>
+          <strong>Les tests passent localement.</strong>
+          <p>Commande lancee: <code>GOCACHE=/tmp/go-build-cache go test ./...</code>. Tous les packages listables sont passes.</p>
+        </div>
+        <div class="card span-3">
+          <div class="metric">Partiel</div>
+          <strong>Quelques preuves sont conditionnelles.</strong>
+          <p>Postgres, Bubblewrap, sshd et certains builds croises ont des tests qui se sautent sans environnement dedie.</p>
+        </div>
+        <div class="card span-3">
+          <div class="metric">Gaps</div>
+          <strong>Peu de non-implementation explicite.</strong>
+          <p>Le principal manque explicite est <code>operate --codex-mode=app-server</code>. Il y a aussi des incoherences DLQ/rediss detaillees plus bas.</p>
+        </div>
+      </div>
+
+      <div class="note">
+        <strong>Conclusion courte:</strong> Ouvrier n'est pas un simple squelette. La trajectoire critique
+        "trigger -> goal -> tools -> outcome" traverse du code concret, avec tests. Les zones a surveiller
+        sont surtout des limites d'integration, de validation et de maintenabilite, pas une absence generale
+        d'implementation.
+      </div>
+    </section>
+
+    <section id="carte">
+      <h2>Carte d'architecture</h2>
+      <div class="flow" aria-label="Flux principal Ouvrier">
+        <div class="node">
+          <div class="title">1. Surface publique</div>
+          <ul>
+            <li><code>ovr.From</code></li>
+            <li><code>ovr.Pipe</code></li>
+            <li><code>ovr.Tool</code></li>
+            <li><code>ovr.Reply/Push/Sink</code></li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">2. Compilation</div>
+          <ul>
+            <li><code>compilePlans</code></li>
+            <li><code>runtime.Plan</code></li>
+            <li>validation API</li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">3. Runner</div>
+          <ul>
+            <li>providers env</li>
+            <li>state store</li>
+            <li>admin guard</li>
+            <li>runtime dispatch</li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">4. Triggers</div>
+          <ul>
+            <li>HTTP/Webhook</li>
+            <li>Cron</li>
+            <li>Stream</li>
+            <li>Mixed</li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">5. Harness</div>
+          <ul>
+            <li>session</li>
+            <li>budget</li>
+            <li>LLM loop</li>
+            <li>schema repair</li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">6. Capabilities</div>
+          <ul>
+            <li>Go tools</li>
+            <li>Bash</li>
+            <li>MCP</li>
+            <li>SubAgent</li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">7. Gouvernance</div>
+          <ul>
+            <li>PermissionPolicy</li>
+            <li>Sandbox</li>
+            <li>idempotency</li>
+            <li>approvals</li>
+          </ul>
+        </div>
+        <div class="node">
+          <div class="title">8. Outcome</div>
+          <ul>
+            <li>JSON/SSE/202</li>
+            <li>queues/webhook</li>
+            <li>log/file</li>
+            <li>events/admin</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card span-6">
+          <h3>Architecture mentale</h3>
+          <p>Le modele utilisateur reste volontairement court: <strong>trigger, goal, tools, outcome</strong>. Le runtime concret est cache derriere cette syntaxe, mais pas absent: chaque <code>Pipe</code> passe par <code>internal/harness</code>, <code>internal/tools</code>, <code>internal/policy</code>, <code>internal/events</code> et <code>internal/state</code>.</p>
+        </div>
+        <div class="card span-6">
+          <h3>Frontieres de propriete</h3>
+          <p>Le package racine <code>ovr</code> expose le contrat public et garde les structures lourdes internes. Les packages <code>internal/*</code> portent les implementations substituables: providers, state stores, deploy, console, tunnel, operate cockpit, TUI et IDE.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="repertoires">
+      <h2>Repertoires et responsabilites</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Zone</th>
+            <th>Responsabilite</th>
+            <th>Etat</th>
+            <th>Preuves / remarques</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><a href="../README.md">README.md</a>, <a href="../docs/api.md">docs/api.md</a>, <a href="../docs/handbook.md">docs/handbook.md</a></td>
+            <td>Contrat public, guide utilisateur, et reference d'API.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td><code>api_parity_test.go</code> reference chaque symbole documente. Le header indique aucun gap public connu.</td>
+          </tr>
+          <tr>
+            <td><a href="../run.go">racine package ovr</a></td>
+            <td>DSL public: triggers, pipes, tools, outputs, runner, hooks, state abstrait.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Nombreux tests racine: validation, compile, HTTP runtime, streams, security, subagents, durable recovery.</td>
+          </tr>
+          <tr>
+            <td><a href="../cmd/ouvrier/main.go">cmd/ouvrier</a></td>
+            <td>Point d'entree CLI et resolution de version.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Delegue a <code>internal/cli</code>; build CLI couvert par CI.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/runtime/plan.go">internal/runtime</a></td>
+            <td>Structures de plan compile, triggers, steps, terminal, session.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Types simples et centraux; la logique reste dans le package racine et le harness.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/harness/harness.go">internal/harness</a></td>
+            <td>Loop agentique, sessions, budgets, fallback, schema repair, tool calls, streaming.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Tests denses: retries, budgets, schema, events, fallback, memory, provider gate.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/tools/executor.go">internal/tools</a></td>
+            <td>Execution unique des Go tools, handlers Bash/MCP/SubAgent/output, idempotency, approvals.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Les outputs eux-memes passent par un handler de tool pour appliquer la policy.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/policy/policy.go">internal/policy</a></td>
+            <td>Autorisation deterministe des actions privilegiees.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Default deny pour side effects non declares, targets exigees pour push/file/MCP/Bash.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/sandbox/sandbox.go">internal/sandbox</a></td>
+            <td>Resolution de chemins et allowlist d'environnement.</td>
+            <td><span class="status partial">Correct, dependant de l'hote</span></td>
+            <td>Le sandbox filesystem est implemente; l'isolation processus Bash depend de Linux + Bubblewrap.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/state/sqlite_store.go">internal/state</a></td>
+            <td>Store memoire, SQLite, Postgres, migrations, approvals, memory, leases, durable runs.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>SQLite est le defaut. Postgres est implemente; certains tests Postgres demandent <code>OUVRIER_TEST_POSTGRES_DSN</code>.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/provider/provider.go">internal/provider</a></td>
+            <td>Frontiere LLM: request/response, adapters, streaming optionnel, usage/cost.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Adapters multiples; le streaming natif est present sur Anthropic, OpenAI/OpenAI direct, et Codex provider.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/events/event_stream.go">internal/events</a></td>
+            <td>Event stream, hook bus, tracer, OTLP exporter, redaction.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Redaction appliquee avant append, hooks et persistence.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/cli/app.go">internal/cli</a></td>
+            <td>Commandes CLI, flags, dev, build, add, deploy, operate, state, console, fleet.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>26 fichiers de test dans <code>internal/cli</code>. Un mode est explicitement non implemente: <code>--codex-mode=app-server</code>.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/tui/operate.go">internal/tui</a>, <a href="../internal/tui/ide/model.go">internal/tui/ide</a></td>
+            <td>Bubble Tea cockpit, wizard et IDE terminal.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Import v2 Charm Bracelet utilise. IDE degrade si <code>gopls</code> absent.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/operate/runtime.go">internal/operate</a></td>
+            <td>Runtime agentique local du cockpit: sessions, transcript, native tools, gates, Codex driver.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Supporte TUI, print, JSON, RPC. Peut tourner en planner deterministe si aucun model transport.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/console/server.go">internal/console</a>, <a href="../internal/tunnel/manager.go">internal/tunnel</a></td>
+            <td>Console web loopback et federation des admin APIs via tunnels SSH.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Assets embarques, zero npm, token de session, allowlist admin, lazy tunnels.</td>
+          </tr>
+          <tr>
+            <td><a href="../internal/deploy/deploy_env.go">internal/deploy</a></td>
+            <td>Build, release layout SSH, systemd, rollback, Docker, inventory, known_hosts.</td>
+            <td><span class="status ok">Correctement implemente</span></td>
+            <td>Implementation tres testee avec seams fake; les tests ne prouvent pas un vrai host distant localement.</td>
+          </tr>
+          <tr>
+            <td><a href="../examples/ticket-triage/main.go">examples/</a></td>
+            <td>Workers exemples.</td>
+            <td><span class="status partial">Exemples volontairement stubbes</span></td>
+            <td><code>ticket-triage</code> a une source in-memory; <code>moodle-fsrs</code> declare son calcul FSRS comme placeholder.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="execution">
+      <h2>Chemin d'execution detaille</h2>
+      <div class="map">
+        <div class="stack">
+          <div class="layer"><b>API</b><span><code>ovr.Run(":8080", nodes...)</code></span></div>
+          <div class="layer"><b>Plan</b><span><code>compilePlans</code> produit <code>runtime.Plan</code></span></div>
+          <div class="layer"><b>Dispatch</b><span><code>Runner.Run</code> choisit HTTP/Cron/Stream/Mixed</span></div>
+          <div class="layer"><b>Execution</b><span><code>runPlanResultWithSession</code> puis <code>runStepsResult</code></span></div>
+          <div class="layer"><b>Harness</b><span><code>harness.New(...).Run(...)</code></span></div>
+          <div class="layer"><b>Outcome</b><span>Reply, Push, Sink, EventStream, StateStore</span></div>
+        </div>
+        <div class="card">
+          <h3>Sequence concrete</h3>
+          <ol>
+            <li>Le DSL public construit des <code>Node</code> immuables: <code>From</code>, <code>Pipe</code>, <code>Parallel</code>, <code>Map</code>, <code>Reply</code>, <code>Push</code>, <code>Sink</code>.</li>
+            <li><a href="../compile.go">compile.go</a> valide l'ordre des nodes, les compatibilites trigger/terminal, les options de trigger, et injecte le schema <code>Reply(JSON[T])</code> dans le dernier <code>Pipe</code> si besoin.</li>
+            <li><a href="../runner.go">runner.go</a> construit le runtime par defaut: provider registry depuis l'environnement, store depuis <code>OUVRIER_STATE_*</code>, event stream, admin token, durable-run config.</li>
+            <li>Le runner refuse les surfaces admin exposees hors loopback sans opt-in, puis choisit <code>newHTTPCompatibleHandler</code>, <code>serveCronPlans</code>, <code>serveStreamPlans</code> ou <code>serveMixedPlans</code>.</li>
+            <li>Chaque trigger transforme l'entree en JSON de travail, reserve l'idempotency si configuree, cree/charge une session, et appelle <code>runPlanResultWithSession</code>.</li>
+            <li><a href="../http_runtime.go">http_runtime.go</a> enregistre les tools du step dans un <code>tools.Executor</code> scope: Go funcs, Bash, SubAgent et MCP. Le provider est resolu par prefixe <code>provider/model</code>.</li>
+            <li><a href="../internal/harness/harness.go">internal/harness</a> lance la boucle LLM: budget, streaming, fallback, tool calls, schema validation/repair, session/events/state.</li>
+            <li>Les actions de sortie <code>Push</code> et <code>Sink(File)</code> repassent par un output tool interne pour appliquer la <code>PermissionPolicy</code>. <code>Sink(Log)</code> est redige avant d'etre journalise.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="harness">
+      <h2>Invariant SOTA Harness</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Composant attendu</th>
+            <th>Implementation</th>
+            <th>Etat</th>
+            <th>Ce que fait le code</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1. Harness</td>
+            <td><a href="../internal/harness/harness.go">internal/harness/harness.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Coordonne une execution de Pipe: loop LLM, retries, fallback, budgets, tool execution, schema repair, events, state.</td>
+          </tr>
+          <tr>
+            <td>2. Session</td>
+            <td><a href="../internal/runtime/session.go">internal/runtime/session.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Genere exec/session/trace IDs, parent session pour SubAgent, budgets. Persistable via state stores.</td>
+          </tr>
+          <tr>
+            <td>3. ToolExecutor</td>
+            <td><a href="../internal/tools/executor.go">internal/tools/executor.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Chemin unique pour Go funcs et handlers. Valide schemas d'arguments, applique policy, timeouts, idempotency, retry-safe, panic recovery.</td>
+          </tr>
+          <tr>
+            <td>4. Sandbox</td>
+            <td><a href="../internal/sandbox/sandbox.go">internal/sandbox</a>, <a href="../internal/tools/bash.go">internal/tools/bash.go</a></td>
+            <td><span class="status partial">OK conditionnel</span></td>
+            <td>Path sandbox et env allowlist sont implementes. Bash isole via Bubblewrap par defaut; si indisponible, le runtime echoue sauf <code>UnsafeBashHostExecution()</code>.</td>
+          </tr>
+          <tr>
+            <td>5. PermissionPolicy</td>
+            <td><a href="../internal/policy/policy.go">internal/policy</a>, <a href="../permission_policy.go">permission_policy.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>ReadOnly autorise, Idempotent exige une cle, SideEffecting exige labels et targets pour outputs/MCP/Bash. Public adapters exposes.</td>
+          </tr>
+          <tr>
+            <td>6. HookBus</td>
+            <td><a href="../internal/events/hook_bus.go">internal/events/hook_bus.go</a>, <a href="../runner_events.go">runner_events.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Hooks publics par <code>EventKind</code>, erreurs de hook observees via <code>hook_failed</code>, events sanitizes avant/apres hooks.</td>
+          </tr>
+          <tr>
+            <td>7. EventStream</td>
+            <td><a href="../internal/events/event_stream.go">internal/events/event_stream.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Append-only en memoire, IDs monotones, subscribers, redaction recursive, persistence optionnelle dans StateStore.</td>
+          </tr>
+          <tr>
+            <td>8. StateStore</td>
+            <td><a href="../internal/state/types.go">internal/state/types.go</a></td>
+            <td><span class="status ok">OK avec limite</span></td>
+            <td>Memory, SQLite et Postgres implementent execution/session/events/schema/memory/approvals/journal/leases. Les custom public <code>StateStore</code> ne supportent pas durable-run journal.</td>
+          </tr>
+          <tr>
+            <td>9. ResultSchema</td>
+            <td><a href="../internal/schema/result_schema.go">internal/schema/result_schema.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Generation depuis type Go, validation stricte JSON, extraction de JSON depuis texte/fences, repair attempts observes.</td>
+          </tr>
+          <tr>
+            <td>10. SubAgent / Task</td>
+            <td><a href="../subagent_runtime.go">subagent_runtime.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>SubAgent expose en tool gouverne, session enfant, budget ledger partage, <code>MaxParallel</code>, profondeur max, events task.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="triggers">
+      <h2>Triggers et runtimes</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Trigger/runtime</th>
+            <th>Fichiers</th>
+            <th>Etat</th>
+            <th>Details d'implementation</th>
+            <th>Limites visibles</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>HTTP</td>
+            <td><a href="../routes.go">routes.go</a>, <a href="../runtime_http.go">runtime_http.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>GET/POST, path params, JSON/text/empty body, worker pool, idempotency header, HMAC, sync/async/SSE.</td>
+            <td>Seuls GET/POST sont acceptes par le parseur public.</td>
+          </tr>
+          <tr>
+            <td>Webhook inbound</td>
+            <td><a href="../trigger.go">trigger.go</a>, <a href="../routes.go">routes.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Route <code>/webhooks/{provider}</code>, POST, provider name valide, compatible HTTP runtime, HMAC via <code>VerifySignature</code>.</td>
+            <td>Le nom provider est generique; pas de parsing specifique GitHub/Stripe dans le trigger lui-meme.</td>
+          </tr>
+          <tr>
+            <td>Cron</td>
+            <td><a href="../runtime_cron.go">runtime_cron.go</a>, <a href="../runtime_cron_lease.go">runtime_cron_lease.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Parser cron, <code>@every</code>, admin listener, worker pool, leases fencees pour replicas si store lease-capable.</td>
+            <td>Tests Postgres cron lease conditionnels a <code>OUVRIER_TEST_POSTGRES_DSN</code>.</td>
+          </tr>
+          <tr>
+            <td>Stream Kafka</td>
+            <td><a href="../runtime_stream.go">runtime_stream.go</a>, <a href="../runtime_stream_kafka.go">runtime_stream_kafka.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Kafka reader reutilise par URI, topic/brokers/group/start, commit sur ack si group configure.</td>
+            <td>Tests utilisent fake readers/writers, pas broker Kafka local dans ce run.</td>
+          </tr>
+          <tr>
+            <td>Stream Redis</td>
+            <td><a href="../runtime_stream_redis.go">runtime_stream_redis.go</a></td>
+            <td><span class="status partial">OK avec nuance</span></td>
+            <td>RESP direct, AUTH, XREAD BLOCK, body field, ack/nack via last ID local.</td>
+            <td><code>dialRedis</code> sait faire TLS <code>rediss</code>, mais <code>Stream(...)</code> et le switch receiver n'acceptent pas <code>rediss://</code>.</td>
+          </tr>
+          <tr>
+            <td>Stream NATS</td>
+            <td><a href="../runtime_stream_nats.go">runtime_stream_nats.go</a></td>
+            <td><span class="status partial">OK basique</span></td>
+            <td>Protocole NATS TCP simple: INFO, CONNECT, SUB, MSG, PING/PONG.</td>
+            <td>Pas de JetStream/durable ack visible. <code>StreamAckManual</code> est no-op si le receiver ne fournit pas d'ack closure.</td>
+          </tr>
+          <tr>
+            <td>Mixed runtime</td>
+            <td><a href="../runtime_mixed.go">runtime_mixed.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Regroupe HTTP/Webhook/Cron/Stream sous un superviseur commun; une erreur annule les autres.</td>
+            <td>Triggers inconnus ou mixes non supportes retournent <code>ErrRunNotImplemented</code>.</td>
+          </tr>
+          <tr>
+            <td>DLQ stream + replay</td>
+            <td><a href="../runtime_stream_dlq.go">runtime_stream_dlq.go</a>, <a href="../runtime_http_stream_replay.go">runtime_http_stream_replay.go</a></td>
+            <td><span class="status partial">Partiel / incoherence</span></td>
+            <td>Retry budget, dead-letter event, publication broker via <code>publishQueue</code>, copie memoire drainable, admin replay.</td>
+            <td><code>routingStreamDLQ</code> sait publier <code>http(s)</code>, <code>sqs</code>, <code>rediss</code>, mais <code>StreamDLQ(...)</code> valide encore avec <code>validateStreamURI</code> qui rejette ces schemes.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="outputs">
+      <h2>Outputs, queues et sinks</h2>
+      <div class="grid">
+        <div class="card span-4">
+          <h3>Reply</h3>
+          <p><span class="status ok">OK</span> <code>JSON[T]</code>, <code>SSE()</code>, <code>Accepted()</code>. JSON typed est reconcilie avec <code>Output[T]</code>. SSE consomme les events de token deltas.</p>
+        </div>
+        <div class="card span-4">
+          <h3>Push</h3>
+          <p><span class="status ok">OK</span> Webhook HTTP et queues <code>http(s)</code>, <code>nats</code>, <code>kafka</code>, <code>redis/rediss</code>, <code>sqs</code>. Les pushes passent par permission policy.</p>
+        </div>
+        <div class="card span-4">
+          <h3>Sink</h3>
+          <p><span class="status ok">OK</span> Log redige via EventStream; File ecrit sous sandbox et demande une autorisation target <code>file</code>.</p>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Output</th>
+            <th>Implementation</th>
+            <th>Etat</th>
+            <th>Observations</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>Reply(JSON[T]())</code></td>
+            <td><a href="../options.go">options.go</a>, <a href="../compile.go">compile.go</a>, <a href="../runtime_http.go">runtime_http.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Schema strict, violations persistables, repair configurable.</td>
+          </tr>
+          <tr>
+            <td><code>Reply(SSE())</code></td>
+            <td><a href="../runtime_http_sse.go">runtime_http_sse.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Streaming via EventStream; fallback non-streaming teste dans harness.</td>
+          </tr>
+          <tr>
+            <td><code>Push(Webhook(url))</code></td>
+            <td><a href="../runtime_http.go">runtime_http.go</a></td>
+            <td><span class="status partial">OK runtime, validation faible</span></td>
+            <td>Le POST a timeout egress. La validation publique verifie seulement non-vide; URL invalide echoue plus tard a l'execution.</td>
+          </tr>
+          <tr>
+            <td><code>Push(Queue(uri))</code></td>
+            <td><a href="../runtime_queue.go">runtime_queue.go</a>, <a href="../runtime_queue_sqs.go">runtime_queue_sqs.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>HTTP, NATS, Kafka, Redis/Rediss, SQS SigV4. Tests avec fakes/protocol recorders; credentials requis pour SQS reel.</td>
+          </tr>
+          <tr>
+            <td><code>Sink(Log())</code></td>
+            <td><a href="../runtime_http.go">runtime_http.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Redaction avant event; autorise par policy comme log redige.</td>
+          </tr>
+          <tr>
+            <td><code>Sink(File(path))</code></td>
+            <td><a href="../runtime_http.go">runtime_http.go</a>, <a href="../internal/sandbox/sandbox.go">internal/sandbox</a></td>
+            <td><span class="status ok">OK avec precondition</span></td>
+            <td>Requiert <code>WithSandbox</code> ou sandbox runtime; path resolu sous root; autorisation target <code>file</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="providers">
+      <h2>Providers LLM</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Provider</th>
+            <th>Fichier</th>
+            <th>Etat</th>
+            <th>Streaming natif</th>
+            <th>Remarques</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Anthropic</td>
+            <td><a href="../internal/provider/anthropic.go">anthropic.go</a>, <a href="../internal/provider/anthropic_stream.go">anthropic_stream.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td><span class="status ok">Oui</span></td>
+            <td>Messages, tools, cache metadata, errors classes, streaming teste.</td>
+          </tr>
+          <tr>
+            <td>OpenAI</td>
+            <td><a href="../internal/provider/openai.go">openai.go</a>, <a href="../internal/provider/openai_compat.go">openai_compat.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td><span class="status ok">Oui</span></td>
+            <td>Wrapper OpenAI sur compat; streaming teste.</td>
+          </tr>
+          <tr>
+            <td>Mistral, Groq, DeepSeek, VLLM</td>
+            <td><a href="../internal/provider/openai_compat.go">openai_compat.go</a></td>
+            <td><span class="status ok">OK completion/tool use</span></td>
+            <td><span class="status partial">Pas expose par wrappers</span></td>
+            <td>Les wrappers deleguent <code>Complete</code> au compat provider; ils ne declarent pas <code>CompleteStream</code>.</td>
+          </tr>
+          <tr>
+            <td>Azure OpenAI</td>
+            <td><a href="../internal/provider/azure_openai.go">azure_openai.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td><span class="status partial">Non expose</span></td>
+            <td>Base URL obligatoire, deployment path et <code>api-version</code>.</td>
+          </tr>
+          <tr>
+            <td>Gemini</td>
+            <td><a href="../internal/provider/gemini.go">gemini.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td><span class="status neutral">Non observe</span></td>
+            <td>Request/response mapping et tests; pas de <code>CompleteStream</code>.</td>
+          </tr>
+          <tr>
+            <td>Ollama</td>
+            <td><a href="../internal/provider/ollama.go">ollama.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td><span class="status neutral">Non observe</span></td>
+            <td>Local runtime optionnel; disponible sans API key.</td>
+          </tr>
+          <tr>
+            <td>Bedrock</td>
+            <td><a href="../internal/provider/bedrock.go">bedrock.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td><span class="status neutral">Non observe</span></td>
+            <td>SigV4, Converse request/response, tests fake doer.</td>
+          </tr>
+          <tr>
+            <td>Codex provider</td>
+            <td><a href="../internal/provider/codex/codex.go">internal/provider/codex</a></td>
+            <td><span class="status partial">OK texte seulement</span></td>
+            <td><span class="status ok">Oui texte</span></td>
+            <td>Utilise <code>codex exec</code> comme provider texte; ne surface pas les tool calls structures Ouvrier.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="state">
+      <h2>Etat, durabilite et memoire</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Sous-systeme</th>
+            <th>Implementation</th>
+            <th>Etat</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Store memoire</td>
+            <td><a href="../internal/state/memory_store.go">memory_store.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Backend test/lightweight; conformance tests pour execution, events, approvals, memory, leases, journal.</td>
+          </tr>
+          <tr>
+            <td>SQLite defaut</td>
+            <td><a href="../internal/state/sqlite_store.go">sqlite_store.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Default path <code>.ouvrier/state.db</code>, WAL, migrations idempotentes, schema version 7.</td>
+          </tr>
+          <tr>
+            <td>Postgres</td>
+            <td><a href="../internal/state/postgres_store.go">postgres_store.go</a>, <a href="../internal/state/postgres_migrations.go">postgres_migrations.go</a></td>
+            <td><span class="status ok">OK, preuve CI/env</span></td>
+            <td>Pool pgx stdlib, migrations transactionnelles sous advisory lock, warning TLS, DSN redaction. Tests locaux sautent si <code>OUVRIER_TEST_POSTGRES_DSN</code> absent; CI fournit un service Postgres.</td>
+          </tr>
+          <tr>
+            <td>Approvals humaines</td>
+            <td><a href="../runtime_http_approval.go">runtime_http_approval.go</a>, <a href="../internal/state/approval.go">approval.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Suspension <code>RequiresApproval</code>, admin list/approve/deny, resume registry, durable recovery via args hash interne.</td>
+          </tr>
+          <tr>
+            <td>Durable runs</td>
+            <td><a href="../durable_runs.go">durable_runs.go</a>, <a href="../durable_recovery.go">durable_recovery.go</a></td>
+            <td><span class="status ok">OK avec precondition</span></td>
+            <td>Checkpoint top-level steps, tool intents, leases, recovery scans, admin recover. Refuse custom public StateStore.</td>
+          </tr>
+          <tr>
+            <td>Memoire persistante agent</td>
+            <td><a href="../internal/harness/memory.go">internal/harness/memory.go</a>, <a href="../internal/tools/memory.go">internal/tools/memory.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Scope/key/value, limite 64KiB par valeur, last-write-wins, pas d'expiration auto.</td>
+          </tr>
+          <tr>
+            <td>Custom public <code>StateStore</code></td>
+            <td><a href="../runner_state.go">runner_state.go</a></td>
+            <td><span class="status partial">Partiel par design</span></td>
+            <td>Interface publique couvre execution/session/events/schema/memory/approvals, mais pas durable-run journal ni approvals by execution. <code>OUVRIER_DURABLE_RUNS=1</code> est refuse avec un custom store.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="admin">
+      <h2>Observabilite, admin et console</h2>
+      <div class="grid">
+        <div class="card span-6">
+          <h3>Admin runtime</h3>
+          <p><span class="status ok">OK</span> Endpoints implementes: <code>/admin/health</code>, <code>/admin/status</code>, <code>/admin/plans</code>, <code>/admin/capabilities</code>, <code>/admin/events</code>, <code>/admin/traces</code>, <code>/admin/trigger</code>, <code>/admin/approvals</code>, <code>/admin/runs</code>, <code>/admin/streams/replay</code>, <code>/metrics</code>, <code>/dev</code>.</p>
+          <p>Les routes sont dans <a href="../routes.go">routes.go</a>, <a href="../routes_admin_runs.go">routes_admin_runs.go</a>, <a href="../routes_admin_events.go">routes_admin_events.go</a>, <a href="../runtime_http_metrics.go">runtime_http_metrics.go</a>.</p>
+        </div>
+        <div class="card span-6">
+          <h3>Console web + tunnels</h3>
+          <p><span class="status ok">OK</span> <a href="../internal/console/server.go">internal/console</a> expose une SPA loopback tokenisee; <a href="../internal/tunnel/manager.go">internal/tunnel</a> ouvre des tunnels SSH lazy vers les admin APIs deployees. Le browser ne voit pas l'admin token des workers.</p>
+          <p>CI verifie aussi l'invariant "pas de node_modules/package.json" dans <code>internal/console</code>.</p>
+        </div>
+      </div>
+
+      <h3>Redaction et traces</h3>
+      <p>
+        Les events sont sanitizes dans <a href="../internal/events/event_stream.go">event_stream.go</a>.
+        Les payloads sensibles, tokens, secrets, cookies, bearer et assignments ressemblant a des credentials
+        sont masques avant exposition admin, traces, state store et hooks.
+      </p>
+    </section>
+
+    <section id="cli">
+      <h2>CLI, Cockpit, TUI, IDE et deploiement</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>Implementation</th>
+            <th>Etat</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>ouvrier new</code></td>
+            <td><a href="../internal/scaffold/scaffold.go">internal/scaffold</a>, <a href="../internal/tui/new_project_wizard.go">new_project_wizard.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Wizard Bubble Tea et mode <code>--yes</code>; genere HTTP/cron/webhook/stream, pip.yaml, worker manifest.</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier add</code></td>
+            <td><a href="../internal/cli/add.go">internal/cli/add*.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Ajout agent/trigger/tool/skill, edition de <code>main.go</code> avec refus si ancre absente.</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier dev</code></td>
+            <td><a href="../internal/cli/dev.go">dev.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Hot reload par polling, <code>.env</code> local optionnel, restart child process.</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier operate</code> / cockpit</td>
+            <td><a href="../internal/operate/runtime.go">internal/operate</a>, <a href="../internal/tui/operate.go">internal/tui/operate.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Runtime independant du TUI, sessions persistantes, transcript, slash commands, approvals, print/json/rpc modes, Codex exec driver et model tool loop.</td>
+          </tr>
+          <tr>
+            <td><code>operate --codex-mode=app-server</code></td>
+            <td><a href="../internal/cli/operate_flags.go">operate_flags.go</a></td>
+            <td><span class="status gap">Non implemente</span></td>
+            <td>Le flag est accepte par validation, puis <code>operateDriver</code> retourne explicitement: "designed but not implemented yet; use auto or exec".</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier ide</code></td>
+            <td><a href="../internal/tui/ide/model.go">internal/tui/ide</a>, <a href="../internal/lsp/client.go">internal/lsp</a></td>
+            <td><span class="status ok">OK avec degradation</span></td>
+            <td>IDE terminal Bubble Tea, tree/editor/problems, snippets, hover, definition, completion, build/audit. Si <code>gopls</code> absent, mode degrade.</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier deploy</code></td>
+            <td><a href="../internal/deploy/deploy_env.go">internal/deploy</a>, <a href="../internal/cli/deploy_ssh.go">internal/cli/deploy_ssh.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Release layout, host pinning, env preflight, static build, systemd, health gate, rollback, inventory. Tests via fakes.</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier console</code> / <code>fleet</code></td>
+            <td><a href="../internal/console/server.go">internal/console</a>, <a href="../internal/cli/fleet.go">internal/cli/fleet.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>Inventory local, status/logs/traces fan-out, console tokenisee, tunnels lazy.</td>
+          </tr>
+          <tr>
+            <td><code>ouvrier state migrate</code></td>
+            <td><a href="../internal/state/migrate.go">internal/state/migrate.go</a>, <a href="../internal/cli/state.go">internal/cli/state.go</a></td>
+            <td><span class="status ok">OK</span></td>
+            <td>SQLite/Postgres migrations explicites; memory backend refuse car pas de schema.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="gaps">
+      <h2>Ce qui n'est pas completement ou correctement implemente</h2>
+      <div class="note danger">
+        Cette section liste les vrais points noirs observes dans le depot local. Certains sont des limites
+        volontaires documentees; d'autres sont des incoherences de validation ou de surface.
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Point</th>
+            <th>Type</th>
+            <th>Impact</th>
+            <th>Preuve</th>
+            <th>Action recommandee</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>operate --codex-mode=app-server</code></td>
+            <td><span class="status gap">Non implemente</span></td>
+            <td>Le mode est visible dans l'aide mais inutilisable. L'utilisateur doit utiliser <code>auto</code> ou <code>exec</code>.</td>
+            <td><a href="../internal/cli/operate_flags.go">internal/cli/operate_flags.go</a></td>
+            <td>Soit implementer le transport app-server, soit retirer/masquer le mode dans l'aide jusqu'a livraison.</td>
+          </tr>
+          <tr>
+            <td>Validation <code>StreamDLQ</code> trop restrictive</td>
+            <td><span class="status gap">Incoherence</span></td>
+            <td>La DLQ runtime peut publier vers <code>http(s)</code>, <code>sqs</code>, <code>rediss</code>, mais l'API publique les rejette a la validation.</td>
+            <td><a href="../trigger.go">trigger.go</a> utilise <code>validateStreamURI</code>; <a href="../runtime_stream_dlq.go">runtime_stream_dlq.go</a> accepte davantage de schemes.</td>
+            <td>Creer un validateur dedie DLQ/queue target, et ajouter des tests pour <code>sqs://</code>, <code>https://</code>, <code>rediss://</code>.</td>
+          </tr>
+          <tr>
+            <td><code>rediss://</code> stream trigger</td>
+            <td><span class="status partial">Support incomplet</span></td>
+            <td>Le dialer Redis sait faire TLS, mais <code>Stream("rediss://...")</code> n'est pas accepte par la validation ni par le switch receiver.</td>
+            <td><a href="../runtime_stream_redis.go">runtime_stream_redis.go</a>, <a href="../trigger.go">trigger.go</a></td>
+            <td>Accepter <code>rediss</code> dans <code>validateStreamURI</code> et <code>defaultStreamReceiver.Receive</code>, avec tests.</td>
+          </tr>
+          <tr>
+            <td>Custom public <code>StateStore</code> sans durable-run journal</td>
+            <td><span class="status partial">Limite volontaire</span></td>
+            <td>Un store public custom peut faire le runtime courant, mais ne peut pas activer <code>OUVRIER_DURABLE_RUNS=1</code>.</td>
+            <td><a href="../runner_state.go">runner_state.go</a></td>
+            <td>Documenter explicitement dans l'API, ou exposer une interface publique etendue pour les stores durables.</td>
+          </tr>
+          <tr>
+            <td>DLQ replay ne draine pas les topics broker arbitraires</td>
+            <td><span class="status partial">Limite documentee</span></td>
+            <td>Le replay admin draine la copie runtime retenue, pas un topic Kafka/NATS/Redis/SQS externe independant.</td>
+            <td><a href="../runtime_stream_dlq.go">runtime_stream_dlq.go</a>, <a href="../docs/api.md">docs/api.md</a></td>
+            <td>Ajouter des consumers DLQ broker-specifiques si le produit veut rejouer depuis broker reel.</td>
+          </tr>
+          <tr>
+            <td>NATS stream sans ack durable</td>
+            <td><span class="status partial">Limite de transport</span></td>
+            <td>Le receiver NATS lit un message via protocole core; pas de JetStream durable/ack visible. Manual ack peut devenir no-op.</td>
+            <td><a href="../runtime_stream_nats.go">runtime_stream_nats.go</a>, <a href="../trigger.go">trigger.go</a></td>
+            <td>Clarifier dans docs, ou ajouter JetStream si c'est l'attente produit.</td>
+          </tr>
+          <tr>
+            <td>Validation URL webhook push tardive</td>
+            <td><span class="status partial">Validation faible</span></td>
+            <td><code>Webhook(url)</code> comme Push target n'est valide que non-vide au compile-time; URL invalide echoue au POST.</td>
+            <td><a href="../trigger.go">trigger.go</a>, <a href="../runtime_http.go">runtime_http.go</a></td>
+            <td>Parser et limiter a <code>http</code>/<code>https</code> dans <code>validatePushTarget</code>.</td>
+          </tr>
+          <tr>
+            <td>Exemples avec stubs</td>
+            <td><span class="status neutral">Volontaire</span></td>
+            <td>Ne pas interpreter les exemples comme integrations metier completes.</td>
+            <td><a href="../examples/ticket-triage/main.go">ticket-triage</a>, <a href="../examples/moodle-fsrs/main.go">moodle-fsrs</a></td>
+            <td>Conserver l'avertissement dans README; eventuellement ajouter un exemple avec vraie integration.</td>
+          </tr>
+          <tr>
+            <td>Fichiers tres volumineux</td>
+            <td><span class="status risk">Maintenabilite</span></td>
+            <td>La navigation est plus difficile dans <code>routes.go</code>, <code>runtime_http.go</code>, <code>internal/tui/operate.go</code>, <code>internal/harness/harness.go</code>, etc.</td>
+            <td><code>routes.go</code> 1918 lignes; <code>runtime_http.go</code> 1202; <code>internal/tui/operate.go</code> 1137; <code>internal/tunnel/manager.go</code> 919.</td>
+            <td>Refactorer par responsabilite uniquement quand une modification touche la zone; eviter un gros split mecanique sans tests.</td>
+          </tr>
+          <tr>
+            <td>Preuve locale des integrations externes</td>
+            <td><span class="status risk">Preuve conditionnelle</span></td>
+            <td>Le run local prouve le code et les fakes, pas un vrai broker, un vrai host SSH, ni un vrai provider LLM.</td>
+            <td>Tests conditionnels: Postgres DSN, sshd, Bubblewrap, cross-compile short mode.</td>
+            <td>Ajouter un job d'integration optionnel ou nightly avec brokers/sshd/provider mocks plus proches production.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="preuves">
+      <h2>Preuves de verification</h2>
+      <div class="grid">
+        <div class="card span-6">
+          <h3>Commandes executees</h3>
+          <ul>
+            <li><code>git status --short</code>: arbre propre avant generation du rapport.</li>
+            <li><code>go version</code>: <code>go1.25.6 linux/amd64</code>.</li>
+            <li><code>GOCACHE=/tmp/go-build-cache go list ./...</code>: packages listables, avec avertissement de stat cache module en lecture seule.</li>
+            <li><code>GOCACHE=/tmp/go-build-cache go test ./...</code>: tous les packages passent.</li>
+            <li>Inventaire: <code>194</code> fichiers <code>*_test.go</code>, environ <code>99k</code> lignes Go.</li>
+          </ul>
+        </div>
+        <div class="card span-6">
+          <h3>Gates CI declares</h3>
+          <ul>
+            <li><a href="../.github/workflows/ci.yml">.github/workflows/ci.yml</a> lance gofmt, <code>go vet ./...</code>, staticcheck, <code>go test ./...</code>.</li>
+            <li>Un service Postgres 16 est fourni dans CI pour tests Postgres.</li>
+            <li>Race tests sur <code>internal/runtime</code>, <code>state</code>, <code>events</code>, <code>tools</code>, <code>harness</code>, <code>tunnel</code>, <code>console</code>.</li>
+            <li>Build du CLI <code>go build ./cmd/ouvrier</code>.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>Tests conditionnels observes</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Condition</th>
+            <th>Ce que ca prouve / ne prouve pas</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>OUVRIER_TEST_POSTGRES_DSN</code></td>
+            <td>Sans DSN local, certains tests Postgres sont skipped; CI en fournit un.</td>
+          </tr>
+          <tr>
+            <td>Bubblewrap / Linux namespaces</td>
+            <td>Les tests d'isolation Bash peuvent se sauter si la plateforme ne peut pas l'appliquer.</td>
+          </tr>
+          <tr>
+            <td><code>OUVRIER_TEST_SSHD=1</code></td>
+            <td>L'integration sshd tunnel est optionnelle; les tests unitaires couvrent la machine d'etat avec fakes.</td>
+          </tr>
+          <tr>
+            <td>Mode <code>-short</code></td>
+            <td>Examples build, scaffold+add integration et cross-compile peuvent etre sautes en short mode.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="lecture">
+      <h2>Chemin de lecture recommande pour eviter la boite noire</h2>
+      <ol>
+        <li>Commencer par <a href="../docs/api.md">docs/api.md</a> et <a href="../api_parity_test.go">api_parity_test.go</a> pour comprendre le contrat public.</li>
+        <li>Lire <a href="../compile.go">compile.go</a> puis <a href="../internal/runtime/plan.go">internal/runtime/plan.go</a> pour voir comment le DSL devient un plan.</li>
+        <li>Lire <a href="../runner.go">runner.go</a> pour le dispatch runtime et la configuration globale.</li>
+        <li>Lire <a href="../http_runtime.go">http_runtime.go</a> puis <a href="../internal/harness/harness.go">internal/harness/harness.go</a> pour le chemin agentique.</li>
+        <li>Lire <a href="../internal/tools/executor.go">internal/tools/executor.go</a> et <a href="../internal/policy/policy.go">internal/policy/policy.go</a> pour confirmer qu'aucun tool privilegie ne bypass la policy.</li>
+        <li>Lire <a href="../internal/state/types.go">internal/state/types.go</a>, <a href="../internal/state/sqlite_store.go">sqlite_store.go</a>, <a href="../internal/state/postgres_store.go">postgres_store.go</a> pour la durabilite.</li>
+        <li>Lire <a href="../routes.go">routes.go</a> et <a href="../runtime_stream.go">runtime_stream.go</a> pour admin, HTTP, streams et replay.</li>
+        <li>Lire <a href="../internal/operate/runtime.go">internal/operate/runtime.go</a> et <a href="../internal/tui/operate.go">internal/tui/operate.go</a> pour la partie cockpit.</li>
+      </ol>
+
+      <div class="source-list">
+        <a href="../README.md">README.md</a>
+        <a href="../docs/api.md">docs/api.md</a>
+        <a href="../api_parity_test.go">api_parity_test.go</a>
+        <a href="../runner.go">runner.go</a>
+        <a href="../http_runtime.go">http_runtime.go</a>
+        <a href="../internal/harness/harness.go">internal/harness/harness.go</a>
+        <a href="../internal/tools/executor.go">internal/tools/executor.go</a>
+        <a href="../internal/state/types.go">internal/state/types.go</a>
+        <a href="../internal/cli/app.go">internal/cli/app.go</a>
+        <a href="../internal/operate/runtime.go">internal/operate/runtime.go</a>
+        <a href="../internal/console/server.go">internal/console/server.go</a>
+        <a href="../internal/deploy/deploy_env.go">internal/deploy/deploy_env.go</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
