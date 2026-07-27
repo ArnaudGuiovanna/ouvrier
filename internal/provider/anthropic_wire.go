@@ -181,8 +181,12 @@ func anthropicToolsFromProvider(tools []ToolSpec) []anthropicTool {
 }
 
 func (r anthropicResponse) toProviderResponse() (Response, error) {
+	stopReason, err := anthropicStopReason(r.StopReason)
+	if err != nil {
+		return Response{}, err
+	}
 	resp := Response{
-		StopReason: anthropicStopReason(r.StopReason),
+		StopReason: stopReason,
 		Usage: Usage{
 			InputTokens:  r.Usage.InputTokens,
 			OutputTokens: r.Usage.OutputTokens,
@@ -220,15 +224,19 @@ func (r anthropicResponse) promptCacheWriteTokens() int {
 		r.Usage.CacheCreation.Ephemeral1h
 }
 
-func anthropicStopReason(reason string) StopReason {
+// anthropicStopReason maps the wire stop reason onto the provider contract.
+// Unknown reasons (pause_turn, refusal, future additions) fail closed with an
+// error instead of passing through, so they can never masquerade as a normal
+// completion downstream.
+func anthropicStopReason(reason string) (StopReason, error) {
 	switch reason {
-	case "end_turn":
-		return StopEndTurn
+	case "", "end_turn", "stop_sequence":
+		return StopEndTurn, nil
 	case "tool_use":
-		return StopToolUse
+		return StopToolUse, nil
 	case "max_tokens":
-		return StopMaxTokens
+		return StopMaxTokens, nil
 	default:
-		return StopReason(reason)
+		return "", fmt.Errorf("unsupported anthropic stop reason %q", reason)
 	}
 }
