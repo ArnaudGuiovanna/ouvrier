@@ -83,6 +83,41 @@ func TestNewHTTPHandlerExecutesPipeThroughHarnessRuntime(t *testing.T) {
 	}
 }
 
+func TestHTTPReturnsIncompleteWhenProviderStopsAtMaxTokens(t *testing.T) {
+	scripted := &httpScriptedProvider{
+		response: provider.Response{
+			Text:       `{"status":"partial"}`,
+			StopReason: provider.StopMaxTokens,
+		},
+	}
+	handler, err := newHTTPHandlerWithRuntime([]Node{
+		From("POST /tickets"),
+		Pipe("classify ticket", Model("anthropic/claude-sonnet-4-6")),
+		Reply(JSON[httpTestReply]()),
+	}, httpRuntime{provider: scripted})
+	if err != nil {
+		t.Fatalf("newHTTPHandlerWithRuntime returned error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tickets", strings.NewReader(`{"title":"broken"}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s, want %d", rec.Code, rec.Body.String(), http.StatusBadGateway)
+	}
+	var body httpStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Status != "pipeline_execution_incomplete" {
+		t.Fatalf("body = %+v, want pipeline_execution_incomplete", body)
+	}
+	if len(scripted.requests) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
+	}
+}
+
 func TestNewHTTPHandlerPassesPathParamsAndJSONBodyToHarnessInput(t *testing.T) {
 	scripted := &httpScriptedProvider{
 		response: provider.Response{Text: `{"status":"classified"}`, StopReason: provider.StopEndTurn},

@@ -61,7 +61,15 @@ backlog plus the v0.5 Ouvrier Agent Cockpit. The latest tagged release is
 (`ouvrier ide`): a terminal IDE to review/edit/save/rebuild a worker with live
 **gopls** diagnostics, hover, go-to-definition, completion, an Ouvrier API **snippet palette**, and a Catppuccin
 Macchiato theme. The cockpit keeps its streaming TUI, approval gate (prod
-double-confirm), and Codex subscription auth. The public Go module path is:
+double-confirm), and Codex subscription auth.
+
+Post-`v0.5.5`, the two active development tracks are runtime stabilization and
+the parallel construction of a fully Go, Pi-class cockpit harness specialized
+in Ouvrier workers. Deployment PaaS and web-console development are paused
+pending redesign. See [the current project direction](docs/project-direction.md)
+for the binding scope and dependency boundaries.
+
+The public Go module path is:
 
 ```txt
 module github.com/ArnaudGuiovanna/ouvrier

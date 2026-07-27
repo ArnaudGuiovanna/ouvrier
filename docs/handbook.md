@@ -1072,6 +1072,13 @@ ouvrier deploy docker --image registry.example.com/ticket-triage --tag 0.1.0 --p
 
 ## Troubleshooting
 
+If a provider stops because its output-token limit was reached, Ouvrier marks
+the execution `truncated` and emits `budget_exceeded` with
+`budget=provider_max_tokens`. Partial text remains observable, but partial tool
+calls are never accepted or executed. HTTP pipelines return
+`pipeline_execution_incomplete` instead of presenting that response as a
+successful typed result.
+
 | Symptom | Meaning | Fix |
 | --- | --- | --- |
 | `provider_not_configured` | The model prefix has no configured provider. | Set the matching provider env vars or change `Model`. |

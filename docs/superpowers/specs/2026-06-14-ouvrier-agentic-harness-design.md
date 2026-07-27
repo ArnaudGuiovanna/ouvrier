@@ -4,6 +4,21 @@
 
 > Produced by a multi-agent design panel (PM, product designer, UX, dev-experience, staff engineer) grounded in Pi (earendil-works/pi) + Claude Code and the existing Ouvrier codebase. Supersedes the UX/engine intent of the v0.5 and v0.5.1 specs.
 
+> **Direction update — 2026-07-26:** The active direction is now defined by
+> [`docs/project-direction.md`](../../project-direction.md). The cockpit must
+> adopt Pi's harness architecture, not merely its interaction style, while
+> remaining a fully Go coding agent specialized in constructing Ouvrier
+> workers. Google ADK Go v2 is the preferred candidate for a bounded
+> architecture spike around runners, sessions, events, tools, and
+> sequential/parallel/loop workflows. Deployment PaaS and web-console work are
+> paused. Cockpit-harness work is an active track in parallel with runtime
+> stabilization; it does not wait for the complete runtime milestone and must
+> stay behind a one-way dependency boundary from cockpit to runtime. Therefore
+> the active cockpit journey currently ends at a compiled, tested, audited,
+> reviewable local artifact; create-and-deploy journeys and deploy acceptance
+> criteria below are retained as historical design material, not active
+> milestone requirements.
+
 ## Implementation status (2026-06-14)
 
 **MVP (Slices 0–4) implemented, reviewed, and merged to `main`.** Each slice was built subagent-driven (TDD, per-task spec + code-quality review) under its own plan in `docs/superpowers/plans/`:

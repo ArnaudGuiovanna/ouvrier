@@ -30,11 +30,11 @@ func (r ollamaNativeResponse) toProviderResponse() (Response, error) {
 }
 
 func ollamaNativeStopReason(reason string, hasToolCalls bool) StopReason {
+	if reason == "length" || reason == "max_tokens" {
+		return StopMaxTokens
+	}
 	if hasToolCalls {
 		return StopToolUse
-	}
-	if reason == "length" {
-		return StopMaxTokens
 	}
 	return StopEndTurn
 }

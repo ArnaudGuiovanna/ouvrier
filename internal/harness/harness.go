@@ -174,11 +174,17 @@ func (h *Harness) runLoop(runCtx context.Context, session runtimecore.Session, m
 			out.Status = StatusFailed
 			return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
 		}
-		if resp.Text != "" {
-			out.Text = resp.Text
-		}
+		out.Text = resp.Text
 		if _, payload, exceeded := h.budgetLedger.Add(resp.Usage); exceeded {
-			return h.truncateForBudget(runCtx, session, out, payload)
+			return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
+		}
+		if resp.StopReason == provider.StopMaxTokens {
+			return h.truncateForBudget(
+				context.WithoutCancel(runCtx),
+				session,
+				out,
+				providerMaxTokensBudgetPayload(resp.Usage.OutputTokens),
+			)
 		}
 		if len(resp.ToolCalls) == 0 {
 			validated, repairUsage, err := h.validateResult(runCtx, session, out.Iterations, out.Text)
@@ -186,10 +192,13 @@ func (h *Harness) runLoop(runCtx context.Context, session runtimecore.Session, m
 				out.Usage.Add(repairUsage)
 				if _, payload, exceeded := h.budgetLedger.Add(repairUsage); exceeded {
 					out.Text = validated
-					return h.truncateForBudget(runCtx, session, out, payload)
+					return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
 				}
 			}
 			out.Text = validated
+			if payload, ok := providerMaxTokensErrorPayload(err); ok {
+				return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, payload)
+			}
 			if err != nil {
 				out.Status = StatusFailed
 				return out, errors.Join(err, h.finishExecution(runCtx, session, out.Status, err))
@@ -221,7 +230,7 @@ func (h *Harness) runLoop(runCtx context.Context, session runtimecore.Session, m
 		}
 	}
 
-	return h.truncateForBudget(runCtx, session, out, map[string]any{
+	return h.truncateForBudget(context.WithoutCancel(runCtx), session, out, map[string]any{
 		"budget":         "iterations",
 		"max_iterations": h.budget.MaxIterations,
 		"iterations":     out.Iterations,
@@ -745,6 +754,22 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 		if err := h.emit(ctx, session, events.EventAfterLLM, afterLLM); err != nil {
 			return currentText, usage, err
 		}
+		currentText = resp.Text
+		if resp.StopReason == provider.StopMaxTokens {
+			stopErr := &providerMaxTokensError{outputTokens: resp.Usage.OutputTokens}
+			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
+				"schema":        h.resultSchema.Name,
+				"attempt":       attempt,
+				"max_attempts":  h.schemaRepairs,
+				"reason":        "provider_max_tokens",
+				"stop_reason":   string(resp.StopReason),
+				"output_tokens": resp.Usage.OutputTokens,
+			})
+			if emitErr != nil {
+				return currentText, usage, emitErr
+			}
+			return currentText, usage, stopErr
+		}
 		if len(resp.ToolCalls) > 0 {
 			err := errors.New("schema repair returned tool calls")
 			emitErr := h.emit(ctx, session, events.EventSchemaRepairFailed, map[string]any{
@@ -756,7 +781,6 @@ func (h *Harness) repairResult(ctx context.Context, session runtimecore.Session,
 			return currentText, usage, errors.Join(err, emitErr)
 		}
 
-		currentText = resp.Text
 		normalized, err := schema.NormalizeJSON(h.resultSchema, []byte(currentText))
 		if err != nil {
 			currentErr = err

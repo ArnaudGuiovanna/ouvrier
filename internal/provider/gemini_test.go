@@ -172,6 +172,46 @@ func TestGeminiCompleteParsesToolCalls(t *testing.T) {
 	assertProviderJSONEqual(t, call.Arguments, `{"id":"T-1"}`)
 }
 
+func TestGeminiCompletePreservesMaxTokensWithToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates": [{
+				"content": {
+					"role": "model",
+					"parts": [{
+						"functionCall": {"name": "publish", "args": {"value": "partial"}}
+					}]
+				},
+				"finishReason": "MAX_TOKENS"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	p, err := provider.NewGemini(provider.GeminiConfig{
+		APIKey:  "test-key",
+		BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewGemini returned error: %v", err)
+	}
+
+	resp, err := p.Complete(context.Background(), provider.Request{
+		Model:    "gemini/gemini-2.0-flash",
+		Messages: []provider.Message{provider.UserText("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	if resp.StopReason != provider.StopMaxTokens {
+		t.Fatalf("StopReason = %q, want max_tokens", resp.StopReason)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %d, want retained call for observability", len(resp.ToolCalls))
+	}
+}
+
 func TestGeminiCompleteSendsToolResultMessages(t *testing.T) {
 	call := provider.ToolCall{
 		ID:        "call_1",
