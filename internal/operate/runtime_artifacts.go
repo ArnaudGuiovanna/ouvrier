@@ -12,19 +12,19 @@ import (
 	"time"
 )
 
-func appendToolCall(path string, call plannedTool, result ToolResult, runErr error) error {
+func appendToolCall(path string, redactor Redactor, call plannedTool, result ToolResult, runErr error) error {
 	if path == "" {
 		return nil
 	}
 	record := map[string]any{
 		"at":      time.Now().UTC(),
 		"tool":    call.Name,
-		"input":   call.Input,
-		"summary": result.Summary,
-		"data":    result.Data,
+		"input":   redactMap(redactor, call.Input),
+		"summary": redactor.Redact(result.Summary),
+		"data":    redactMap(redactor, result.Data),
 	}
 	if runErr != nil {
-		record["error"] = runErr.Error()
+		record["error"] = redactor.Redact(runErr.Error())
 	}
 	return appendJSONLine(path, record)
 }

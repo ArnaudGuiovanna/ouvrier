@@ -253,6 +253,11 @@ func (r *AgentRuntime) toolSpecs() []provider.ToolSpec {
 		if !ok {
 			continue
 		}
+		if tool.OperatorOnly {
+			// Operator-only tools (IDE saves, the `!` shell) never reach the
+			// model tool loop; they stay behind the GovernedExecutor.
+			continue
+		}
 		specs = append(specs, provider.ToolSpec{
 			Name:        name,
 			Description: tool.Description,

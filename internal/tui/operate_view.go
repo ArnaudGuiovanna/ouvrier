@@ -443,6 +443,14 @@ func toolExtraLines(output map[string]any) []string {
 			}
 		}
 	}
+	// Shell output (run_shell) renders line by line inside the expanded card.
+	if text, ok := output["output"].(string); ok && strings.TrimSpace(text) != "" {
+		lines := strings.Split(text, "\n")
+		if len(lines) > 20 {
+			lines = append(lines[:20], "… output truncated")
+		}
+		out = append(out, lines...)
+	}
 	return out
 }
 

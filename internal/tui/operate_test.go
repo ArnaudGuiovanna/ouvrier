@@ -237,16 +237,103 @@ func TestToolCardsCollapseByDefault(t *testing.T) {
 	}
 }
 
+// drainShell consumes the live stream of a governed shell run the way the
+// Bubble Tea loop would, answering any approval prompt with decide.
+func drainShell(t *testing.T, m *operateModel, decide string) {
+	t.Helper()
+	if m.events == nil {
+		t.Fatal("shell run did not start a stream")
+	}
+	for {
+		ev, ok := <-m.events
+		m.handleStream(opStreamMsg{ev: ev, ok: ok})
+		if !ok {
+			return
+		}
+		if m.pendingApproval != nil {
+			m.handleApprovalKey(decide)
+		}
+	}
+}
+
+// assertSessionRecords fails unless the session transcript and tool-call audit
+// both contain a record for tool.
+func assertSessionRecords(t *testing.T, session *operate.Session, tool string) {
+	t.Helper()
+	transcript, err := os.ReadFile(session.TranscriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if !strings.Contains(string(transcript), `"tool_name":"`+tool+`"`) {
+		t.Fatalf("transcript missing %s record:\n%s", tool, transcript)
+	}
+	audit, err := os.ReadFile(session.ToolCallsPath)
+	if err != nil {
+		t.Fatalf("read tool-calls audit: %v", err)
+	}
+	if !strings.Contains(string(audit), `"tool":"`+tool+`"`) {
+		t.Fatalf("tool-calls audit missing %s record:\n%s", tool, audit)
+	}
+}
+
 func TestBangCommandRunsShell(t *testing.T) {
 	dir := t.TempDir()
 	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
 	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 
+	m.posture = operate.PostureAutoSafe
 	m.submit("!echo hello-ouvrier")
+	if !m.running {
+		t.Fatal("governed shell command should stream like a turn")
+	}
+	drainShell(t, m, "enter")
 	out := m.render()
 	if !strings.Contains(out, "hello-ouvrier") {
 		t.Fatalf("!cmd output not shown in transcript:\n%s", out)
+	}
+	// The governed shell leaves transcript + audit records.
+	assertSessionRecords(t, m.session, "run_shell")
+}
+
+// Under the manual posture the `!` shell is gated: denial blocks execution and
+// the denied call is still audited.
+func TestBangCommandGatedUnderManualPosture(t *testing.T) {
+	dir := t.TempDir()
+	wdir := filepath.Join(dir, "demo")
+	writeOperateWorker(t, wdir, "demo")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: wdir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	if m.posture != operate.PostureManual {
+		t.Fatalf("default posture = %q, want manual", m.posture)
+	}
+	m.submit("!touch denied-by-operator.txt")
+	sawApproval := false
+	for {
+		ev, ok := <-m.events
+		m.handleStream(opStreamMsg{ev: ev, ok: ok})
+		if !ok {
+			break
+		}
+		if m.pendingApproval != nil {
+			sawApproval = true
+			m.handleApprovalKey("esc")
+		}
+	}
+	if !sawApproval {
+		t.Fatal("manual posture must prompt before running a shell command")
+	}
+	if _, err := os.Stat(filepath.Join(wdir, "denied-by-operator.txt")); !os.IsNotExist(err) {
+		t.Fatal("denied shell command must not execute")
+	}
+	// The denial itself is audited.
+	audit, err := os.ReadFile(m.session.ToolCallsPath)
+	if err != nil {
+		t.Fatalf("read tool-calls audit: %v", err)
+	}
+	if !strings.Contains(string(audit), `"tool":"run_shell"`) || !strings.Contains(string(audit), "denied") {
+		t.Fatalf("denied shell must leave an audit record:\n%s", audit)
 	}
 }
 
@@ -255,11 +342,15 @@ func TestBangBangCommandIsSilent(t *testing.T) {
 	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
 	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.posture = operate.PostureAutoSafe
 	m.submit("!!echo secret-output")
+	drainShell(t, m, "enter")
 	out := m.render()
 	if strings.Contains(out, "secret-output") {
 		t.Fatalf("!!cmd output must be suppressed:\n%s", out)
 	}
+	// Silent only hides the UI blocks; transcript + audit records remain.
+	assertSessionRecords(t, m.session, "run_shell")
 }
 
 func TestSlashClearStartsFreshTranscript(t *testing.T) {
@@ -300,6 +391,8 @@ func TestManualEditorOpenSaveReaudit(t *testing.T) {
 	if !strings.Contains(string(data), "edited") {
 		t.Fatalf("file not saved with new content: %s", data)
 	}
+	// The manual editor save is governed: transcript + audit records exist.
+	assertSessionRecords(t, m.session, "write_worker_file")
 }
 
 func TestCockpitCtrlGOpensIDE(t *testing.T) {
