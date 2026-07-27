@@ -29,7 +29,11 @@ func (r geminiResponse) toProviderResponse() (Response, error) {
 		return resp, nil
 	}
 	candidate := r.Candidates[0]
-	resp.StopReason = geminiStopReason(candidate.FinishReason)
+	stopReason, err := geminiStopReason(candidate.FinishReason)
+	if err != nil {
+		return Response{}, err
+	}
+	resp.StopReason = stopReason
 	var text []string
 	for _, part := range candidate.Content.Parts {
 		if part.Text != "" {
@@ -62,14 +66,19 @@ func geminiProviderToolCall(call *geminiFunctionCall, index int) ToolCall {
 	}
 }
 
-func geminiStopReason(reason string) StopReason {
+// geminiStopReason maps the candidate finish reason onto the provider
+// contract. Unknown reasons (SAFETY, RECITATION, future additions) fail
+// closed with an error instead of passing through lowercased, so a blocked or
+// exotic finish can never masquerade as a normal completion — or be silently
+// rewritten to tool_use when function calls are present.
+func geminiStopReason(reason string) (StopReason, error) {
 	switch reason {
-	case "STOP":
-		return StopEndTurn
+	case "", "STOP":
+		return StopEndTurn, nil
 	case "MAX_TOKENS":
-		return StopMaxTokens
+		return StopMaxTokens, nil
 	default:
-		return StopReason(strings.ToLower(reason))
+		return "", fmt.Errorf("unsupported gemini finish reason %q", reason)
 	}
 }
 

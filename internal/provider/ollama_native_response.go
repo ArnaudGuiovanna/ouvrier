@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 )
 
@@ -25,18 +26,30 @@ func (r ollamaNativeResponse) toProviderResponse() (Response, error) {
 		}
 		resp.ToolCalls = append(resp.ToolCalls, call)
 	}
-	resp.StopReason = ollamaNativeStopReason(r.DoneReason, len(resp.ToolCalls) > 0)
+	stopReason, err := ollamaNativeStopReason(r.DoneReason, len(resp.ToolCalls) > 0)
+	if err != nil {
+		return Response{}, err
+	}
+	resp.StopReason = stopReason
 	return resp, nil
 }
 
-func ollamaNativeStopReason(reason string, hasToolCalls bool) StopReason {
-	if reason == "length" || reason == "max_tokens" {
-		return StopMaxTokens
+// ollamaNativeStopReason maps the native done_reason onto the provider
+// contract. Unknown reasons (load, unload, future additions) fail closed with
+// an error instead of defaulting to end_turn, so an abnormal finish can never
+// masquerade as a normal completion.
+func ollamaNativeStopReason(reason string, hasToolCalls bool) (StopReason, error) {
+	switch reason {
+	case "length", "max_tokens":
+		return StopMaxTokens, nil
+	case "", "stop":
+		if hasToolCalls {
+			return StopToolUse, nil
+		}
+		return StopEndTurn, nil
+	default:
+		return "", fmt.Errorf("unsupported ollama done reason %q", reason)
 	}
-	if hasToolCalls {
-		return StopToolUse
-	}
-	return StopEndTurn
 }
 
 func ollamaNativeArguments(raw json.RawMessage) json.RawMessage {

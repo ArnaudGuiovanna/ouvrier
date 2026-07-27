@@ -102,6 +102,7 @@ type anthropicPendingToolUse struct {
 func decodeAnthropicStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 	resp := Response{StopReason: StopEndTurn}
 	var text bytes.Buffer
+	var stopErr error
 	blocks := map[int]*anthropicPendingToolUse{}
 
 	scanErr := scanSSE(r, func(ev sseEvent) bool {
@@ -140,7 +141,12 @@ func decodeAnthropicStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 			}
 		case "message_delta":
 			if msg.Delta.StopReason != "" {
-				resp.StopReason = anthropicStopReason(msg.Delta.StopReason)
+				mapped, err := anthropicStopReason(msg.Delta.StopReason)
+				if err != nil {
+					stopErr = err
+					return false
+				}
+				resp.StopReason = mapped
 			}
 			if msg.Usage.OutputTokens > 0 {
 				resp.Usage.OutputTokens = msg.Usage.OutputTokens
@@ -150,6 +156,9 @@ func decodeAnthropicStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 	})
 	if scanErr != nil {
 		return Response{}, fmt.Errorf("decode anthropic stream: %w", scanErr)
+	}
+	if stopErr != nil {
+		return Response{}, stopErr
 	}
 
 	resp.Text = text.String()
