@@ -75,6 +75,39 @@ jobs:
       - name: go test
         run: go test ./...
 
+  cockpit-spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+    defaults:
+      run:
+        working-directory: spikes/adk-cockpit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          check-latest: true
+          cache-dependency-path: spikes/adk-cockpit/go.sum
+
+      - name: Download and verify isolated module
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Vet isolated cockpit spike
+        run: go vet ./...
+
+      - name: Test isolated cockpit spike
+        run: go test -count=1 ./...
+
+      - name: Race-test isolated cockpit spike
+        run: go test -race -count=1 ./...
+
   race:
     runs-on: ubuntu-latest
     timeout-minutes: 25

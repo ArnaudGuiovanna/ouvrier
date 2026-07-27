@@ -44,7 +44,7 @@ func (r geminiResponse) toProviderResponse() (Response, error) {
 		}
 	}
 	resp.Text = strings.Join(text, "\n")
-	if len(resp.ToolCalls) > 0 {
+	if len(resp.ToolCalls) > 0 && resp.StopReason != StopMaxTokens {
 		resp.StopReason = StopToolUse
 	}
 	return resp, nil
