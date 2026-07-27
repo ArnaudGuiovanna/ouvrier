@@ -116,8 +116,14 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		}
 		result := ToolResult{Summary: "skipped " + call.Tool + ": " + reason}
 		denyErr := fmt.Errorf("%s", reason)
-		_ = appendToolCall(session.ToolCallsPath, r.Options.Redactor, planned, result, denyErr)
+		auditErr := appendToolCall(session.ToolCallsPath, r.Options.Redactor, planned, result, denyErr)
+		if auditErr != nil {
+			auditErr = fmt.Errorf("operate: persist tool-call audit: %w", auditErr)
+		}
 		output := map[string]any{"summary": result.Summary, "error": reason}
+		if auditErr != nil {
+			output["audit_error"] = auditErr.Error()
+		}
 		resultEntry, aerr := r.transcript(session).Append(TranscriptEntry{
 			SessionID: session.ID,
 			Kind:      TranscriptToolResult,
@@ -130,7 +136,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		}
 		observe(resultEntry)
 		emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: denyErr})
-		return result, ErrToolDenied
+		return result, errors.Join(ErrToolDenied, auditErr)
 	}
 
 	// Execute through the registry; each tool applies its own path sandbox.
@@ -143,7 +149,11 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	}, call.Tool, call.Input)
 
 	// One audit record per governed action, success or failure.
-	_ = appendToolCall(session.ToolCallsPath, r.Options.Redactor, planned, result, runErr)
+	auditErr := appendToolCall(session.ToolCallsPath, r.Options.Redactor, planned, result, runErr)
+	if auditErr != nil {
+		auditErr = fmt.Errorf("operate: persist tool-call audit: %w", auditErr)
+	}
+	resultErr := errors.Join(runErr, auditErr)
 
 	output := result.Data
 	if output == nil {
@@ -152,6 +162,9 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	output["summary"] = result.Summary
 	if runErr != nil {
 		output["error"] = runErr.Error()
+	}
+	if auditErr != nil {
+		output["audit_error"] = auditErr.Error()
 	}
 	resultEntry, err := r.transcript(session).Append(TranscriptEntry{
 		SessionID: session.ID,
@@ -164,8 +177,8 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		return ToolResult{}, err
 	}
 	observe(resultEntry)
-	emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: runErr})
-	return result, runErr
+	emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: resultErr})
+	return result, resultErr
 }
 
 // gate blocks until the operator answers the approval request, or fails closed

@@ -179,6 +179,40 @@ func TestExecutorSuccessWritesTranscriptAndAudit(t *testing.T) {
 	}
 }
 
+// An action whose durable audit receipt cannot be written must report an
+// explicit failure, even when the underlying side effect already happened.
+func TestExecutorAuditWriteFailureIsReported(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+	rt, session := startExecutorRuntime(t, RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+
+	blockedPath := filepath.Join(t.TempDir(), "tool-calls-as-directory")
+	if err := os.Mkdir(blockedPath, 0o755); err != nil {
+		t.Fatalf("create blocked audit path: %v", err)
+	}
+	session.ToolCallsPath = blockedPath
+
+	_, err := rt.Executor().Execute(context.Background(), GovernedCall{
+		Session: session,
+		Tool:    "write_worker_file",
+		Input:   map[string]any{"path": "audit-failure.txt", "content": "side effect\n"},
+		Posture: PostureAutoSafe,
+	})
+	if err == nil || !strings.Contains(err.Error(), "persist tool-call audit") {
+		t.Fatalf("err = %v, want explicit audit persistence failure", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "audit-failure.txt")); statErr != nil {
+		t.Fatalf("expected underlying write to have happened: %v", statErr)
+	}
+	_, results := transcriptToolEntries(t, session.TranscriptPath, "write_worker_file")
+	if len(results) != 1 {
+		t.Fatalf("tool_result entries = %d, want 1", len(results))
+	}
+	if got, _ := results[0].Output["audit_error"].(string); !strings.Contains(got, "persist tool-call audit") {
+		t.Fatalf("tool_result audit_error = %q, want explicit persistence failure", got)
+	}
+}
+
 // A failing tool (path outside the sandbox) is still fully audited.
 func TestExecutorFailureIsAudited(t *testing.T) {
 	dir := t.TempDir()
