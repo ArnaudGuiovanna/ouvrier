@@ -11,9 +11,9 @@ import (
 
 const defaultOperateModel = "anthropic/claude-sonnet-4-6"
 
-// errToolDenied marks a tool skipped by the approval gate. It is non-fatal: the
+// ErrToolDenied marks a tool skipped by the approval gate. It is non-fatal: the
 // turn continues and the model is told the tool was denied.
-var errToolDenied = errors.New("operate: tool denied by approval gate")
+var ErrToolDenied = errors.New("operate: tool denied by approval gate")
 
 // RuntimeOptions configures the terminal-native operate agent runtime.
 type RuntimeOptions struct {
@@ -392,7 +392,7 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 			return turn, err
 		}
 		result, err := r.callTool(ctx, session, call, &turn, emit, ctrl)
-		if err != nil && !errors.Is(err, errToolDenied) {
+		if err != nil && !errors.Is(err, ErrToolDenied) {
 			msg := call.Name + ": " + err.Error()
 			errEntry, _ := appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
 			emit(StreamEvent{Kind: StreamError, Entry: &errEntry, Err: err})
@@ -429,6 +429,8 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	return turn, ctx.Err()
 }
 
+// callTool routes one planned tool call through the GovernedExecutor, which
+// owns the approval gate, transcript persistence, and tool-call audit.
 func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plannedTool, turn *RuntimeTurn, emit func(StreamEvent), ctrl *turnControl) (ToolResult, error) {
 	if ctrl == nil {
 		ctrl = headlessControl()
@@ -436,73 +438,21 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 	if emit == nil {
 		emit = func(StreamEvent) {}
 	}
-	if call.ID == "" {
-		id, err := randomID()
-		if err != nil {
-			return ToolResult{}, fmt.Errorf("operate: generate tool_call_id: %w", err)
-		}
-		call.ID = id
-	}
-	callEntry, err := r.transcript(session).Append(TranscriptEntry{
-		SessionID: session.ID,
-		Kind:      TranscriptToolCall,
-		ToolName:  call.Name,
-		Input:     call.Input,
-		Metadata:  map[string]any{"tool_call_id": call.ID},
+	result, err := r.Executor().Execute(ctx, GovernedCall{
+		Session:     session,
+		ID:          call.ID,
+		Tool:        call.Name,
+		Input:       call.Input,
+		Posture:     ctrl.posture,
+		Interactive: ctrl.interactive,
+		Decisions:   ctrl.decisions,
+		Emit:        emit,
+		OnEntry: func(entry TranscriptEntry) {
+			turn.Entries = append(turn.Entries, entry)
+		},
 	})
 	if err != nil {
-		return ToolResult{}, err
-	}
-	turn.Entries = append(turn.Entries, callEntry)
-	emit(StreamEvent{Kind: StreamToolStart, Entry: &callEntry})
-
-	if approved, gerr := r.gate(ctx, call, emit, ctrl); gerr != nil || !approved {
-		reason := "denied by operator"
-		if gerr != nil {
-			reason = gerr.Error()
-		}
-		result := ToolResult{Summary: "skipped " + call.Name + ": " + reason}
-		output := map[string]any{"summary": result.Summary, "error": reason}
-		resultEntry, aerr := r.transcript(session).Append(TranscriptEntry{SessionID: session.ID, Kind: TranscriptToolResult, ToolName: call.Name, Output: output, Metadata: map[string]any{"tool_call_id": call.ID}})
-		if aerr != nil {
-			return ToolResult{}, aerr
-		}
-		turn.Entries = append(turn.Entries, resultEntry)
-		emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: fmt.Errorf("%s", reason)})
-		_ = appendToolCall(session.ToolCallsPath, call, result, fmt.Errorf("%s", reason))
-		return result, errToolDenied
-	}
-
-	result, runErr := r.Tools.Execute(ctx, ToolEnv{
-		Harness:   r.Harness,
-		Runtime:   r,
-		Session:   session,
-		Workspace: r.workspace,
-		Options:   r.Options,
-	}, call.Name, call.Input)
-	output := result.Data
-	if output == nil {
-		output = map[string]any{}
-	}
-	output["summary"] = result.Summary
-	if runErr != nil {
-		output["error"] = runErr.Error()
-	}
-	resultEntry, err := r.transcript(session).Append(TranscriptEntry{
-		SessionID: session.ID,
-		Kind:      TranscriptToolResult,
-		ToolName:  call.Name,
-		Output:    output,
-		Metadata:  map[string]any{"tool_call_id": call.ID},
-	})
-	if err != nil {
-		return ToolResult{}, err
-	}
-	turn.Entries = append(turn.Entries, resultEntry)
-	emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: runErr})
-	_ = appendToolCall(session.ToolCallsPath, call, result, runErr)
-	if runErr != nil {
-		return result, runErr
+		return result, err
 	}
 	switch call.Name {
 	case "review_worker":
@@ -511,32 +461,6 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		emit(StreamEvent{Kind: StreamDiff, Diff: diffDataFromResult(result.Data)})
 	}
 	return result, nil
-}
-
-func (r *AgentRuntime) gate(ctx context.Context, call plannedTool, emit func(StreamEvent), ctrl *turnControl) (bool, error) {
-	tool, ok := r.Tools.Tool(call.Name)
-	if !ok {
-		return true, nil
-	}
-	if !tool.Governance.NeedsApproval(ctrl.posture) {
-		return true, nil
-	}
-	if !ctrl.interactive || ctrl.decisions == nil {
-		return false, fmt.Errorf("approval required for %s but no operator is attached (headless)", call.Name)
-	}
-	req := approvalRequestFor(call, tool.Governance, r.workspace)
-	emit(StreamEvent{Kind: StreamApproval, Approval: req})
-	for {
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case d := <-ctrl.decisions:
-			if d.ID != "" && d.ID != req.ID {
-				continue // ignore a stale/mismatched decision
-			}
-			return d.Approved, nil
-		}
-	}
 }
 
 func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *ApprovalRequest {
@@ -555,6 +479,10 @@ func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *Approv
 		req.Summary = "deploy worker to " + stringValue(call.Input, "env")
 	case "build_worker":
 		req.Summary = "build worker binary"
+	case "run_shell":
+		req.Summary = "run shell: " + stringValue(call.Input, "command")
+	case "write_worker_file":
+		req.Summary = "write " + stringValue(call.Input, "path")
 	default:
 		req.Summary = call.Name
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -413,6 +412,11 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 					b.toolErr = true
 				}
 			}
+			// Shell cards stay expanded so the operator sees the output, as
+			// the pre-governed `!` accelerator did.
+			if b.toolName == "run_shell" {
+				b.collapsed = false
+			}
 		}
 		m.runningToolIdx = -1
 	case operate.StreamApproval:
@@ -662,6 +666,9 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 	return m.startTurn(text)
 }
 
+// runShell routes the operator's `!`/`!!` shell accelerator through the
+// GovernedExecutor: it is gated by the current posture, and always leaves
+// transcript + tool-call audit records — silent mode only hides the output.
 func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 	silent := strings.HasPrefix(text, "!!")
 	cmdline := text
@@ -671,28 +678,57 @@ func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 	if cmdline == "" {
 		return m, nil
 	}
+	if m.err != nil || m.runtime == nil || m.session == nil {
+		m.blocks = append(m.blocks, opBlock{kind: blockError, text: "no active operate session"})
+		m.refreshViewport()
+		return m, nil
+	}
+	if m.running {
+		m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: "finish or interrupt the current turn before running a shell command"})
+		m.refreshViewport()
+		return m, nil
+	}
 	if !silent {
 		m.blocks = append(m.blocks, opBlock{kind: blockUser, text: "!" + cmdline})
 	}
-	dir := m.workspace.Dir
-	if dir == "" {
-		dir = m.opts.Dir
-	}
-	c := exec.CommandContext(m.ctx, "sh", "-c", cmdline)
-	c.Dir = dir
-	outBytes, err := c.CombinedOutput()
-	out := strings.TrimRight(string(outBytes), "\n")
-	if err != nil && out == "" {
-		out = err.Error()
-	}
-	if !silent {
-		if out == "" {
-			out = "(no output)"
+	ch := make(chan operate.StreamEvent, 32)
+	decisions := make(chan operate.ApprovalDecision, 1)
+	ctx, cancel := context.WithCancel(m.ctx)
+	executor := m.runtime.Executor()
+	session := m.session
+	posture := m.posture
+	emit := func(ev operate.StreamEvent) {
+		// Silent mode suppresses the transcript cards but the approval gate
+		// must still reach the operator.
+		if silent && ev.Kind != operate.StreamApproval {
+			return
 		}
-		m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: out})
+		select {
+		case <-ctx.Done():
+		case ch <- ev:
+		}
 	}
+	go func() {
+		defer close(ch)
+		_, _ = executor.Execute(ctx, operate.GovernedCall{
+			Session:     session,
+			Tool:        "run_shell",
+			Input:       map[string]any{"command": cmdline},
+			Posture:     posture,
+			Interactive: true,
+			Decisions:   decisions,
+			Emit:        emit,
+		})
+	}()
+	m.running = true
+	m.runningToolIdx = -1
+	m.cancel = cancel
+	m.events = ch
+	m.decisions = decisions
+	m.startedAt = time.Now()
+	m.status = ""
 	m.refreshViewport()
-	return m, nil
+	return m, tea.Batch(waitStream(ch), m.spin.Tick)
 }
 
 func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
@@ -1083,10 +1119,16 @@ func (m *operateModel) openIDE() (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
+	var executor operate.GovernedExecutor
+	if m.runtime != nil {
+		executor = m.runtime.Executor()
+	}
 	im := ide.NewIDEModel(m.ctx, ide.IDEOptions{
 		Workspace: m.workspace,
 		GoplsPath: ide.DiscoverGopls(),
 		Embedded:  true,
+		Executor:  executor,
+		Session:   m.session,
 	})
 	m.ideModel = im
 	m.ideActive = true
@@ -1095,8 +1137,21 @@ func (m *operateModel) openIDE() (tea.Model, tea.Cmd) {
 	})
 }
 
+// saveEditor persists the manual editor buffer through the GovernedExecutor so
+// the write is sandbox-checked and leaves transcript + audit records. The save
+// is an explicit operator action, so it runs under the auto-safe posture.
 func (m *operateModel) saveEditor() error {
-	if err := operate.WriteWorkerFile(m.workspace, m.editorPath, m.editor.Value()); err != nil {
+	if m.runtime == nil || m.session == nil {
+		m.editorErr = "no active operate session"
+		return fmt.Errorf("operate: no active session")
+	}
+	_, err := m.runtime.Executor().Execute(m.ctx, operate.GovernedCall{
+		Session: m.session,
+		Tool:    "write_worker_file",
+		Input:   map[string]any{"path": m.editorPath, "content": m.editor.Value()},
+		Posture: operate.PostureAutoSafe,
+	})
+	if err != nil {
 		m.editorErr = err.Error()
 		return err
 	}

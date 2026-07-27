@@ -2,6 +2,7 @@ package ide
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,12 @@ type IDEOptions struct {
 	Workspace operate.Workspace
 	GoplsPath string // "" -> no LSP
 	Embedded  bool   // true -> ctrl+q returns ExitMsg instead of tea.Quit
+
+	// Executor and Session route every side-effecting IDE action (save, audit,
+	// build) through the Ouvrier GovernedExecutor so it is gated, transcribed,
+	// and audited. Without them the IDE is read-only: saves fail closed.
+	Executor operate.GovernedExecutor
+	Session  *operate.Session
 }
 
 // ExitMsg is sent by the embedded IDE when the user presses ctrl+q,
@@ -47,6 +54,10 @@ type ideModel struct {
 	height   int
 	ready    bool
 	embedded bool // true when hosted inside the cockpit
+
+	// governed execution path for save/audit/build
+	exec    operate.GovernedExecutor
+	session *operate.Session
 
 	// file tree
 	tree    []treeItem
@@ -189,6 +200,8 @@ func newIDEModel(ctx context.Context, opts IDEOptions) *ideModel {
 		goplsPath: opts.GoplsPath,
 		lspStatus: "",
 		embedded:  opts.Embedded,
+		exec:      opts.Executor,
+		session:   opts.Session,
 	}
 
 	// Determine the initial open path from the workspace manifest.
@@ -744,9 +757,9 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "ctrl+s":
-		// Save the current file.
+		// Save the current file through the GovernedExecutor.
 		if m.ws.Dir != "" {
-			if err := operate.WriteWorkerFile(m.ws, m.openPath, m.editor.Value()); err != nil {
+			if err := m.saveFile(); err != nil {
 				m.status = "save failed: " + err.Error()
 				m.statusKind = "fail"
 				return m, nil // keep dirty; do NOT audit a write that didn't happen
@@ -930,27 +943,117 @@ func (m *ideModel) rebuildProblems() {
 	}
 }
 
-// runAudit returns a Cmd that runs the audit and returns an auditMsg.
+// errNoGovernedSession fails IDE side effects closed when the IDE was opened
+// without a GovernedExecutor + session.
+var errNoGovernedSession = errors.New("no governed session; open the IDE from the cockpit or `ouvrier ide`")
+
+// saveFile persists the editor buffer through the GovernedExecutor so the
+// write is sandbox-checked and leaves transcript + audit records. The save is
+// an explicit operator action, so it runs under the auto-safe posture.
+func (m *ideModel) saveFile() error {
+	if m.exec == nil || m.session == nil {
+		return errNoGovernedSession
+	}
+	_, err := m.exec.Execute(m.ctx, operate.GovernedCall{
+		Session: m.session,
+		Tool:    "write_worker_file",
+		Input:   map[string]any{"path": m.openPath, "content": m.editor.Value()},
+		Posture: operate.PostureAutoSafe,
+	})
+	return err
+}
+
+// runAudit returns a Cmd that runs the audit through the GovernedExecutor and
+// returns an auditMsg.
 func (m *ideModel) runAudit() tea.Cmd {
 	ctx := m.ctx
-	dir := m.ws.Dir
+	executor := m.exec
+	session := m.session
 	return func() tea.Msg {
-		report, err := operate.NewAuditRunner().Run(ctx, dir)
-		return auditMsg{report: report, err: err}
+		if executor == nil || session == nil {
+			return auditMsg{err: errNoGovernedSession}
+		}
+		result, err := executor.Execute(ctx, operate.GovernedCall{
+			Session: session,
+			Tool:    "audit_worker",
+			Posture: operate.PostureAutoSafe,
+		})
+		if err != nil {
+			return auditMsg{err: err}
+		}
+		return auditMsg{report: auditReportFromData(result.Data)}
 	}
 }
 
-// runBuild returns a Cmd that builds the worker and returns a buildMsg.
+// runBuild returns a Cmd that builds the worker through the GovernedExecutor
+// and returns a buildMsg.
 func (m *ideModel) runBuild() tea.Cmd {
 	ctx := m.ctx
-	dir := m.ws.Dir
-	auditPassed := m.auditPassed
+	executor := m.exec
+	session := m.session
 	return func() tea.Msg {
-		artifact, err := operate.BuildCoordinator{}.Build(
-			ctx, "ide", dir, "", auditPassed, operate.ProgressWriter{Out: io.Discard, Err: io.Discard},
-		)
-		return buildMsg{artifact: artifact, err: err}
+		if executor == nil || session == nil {
+			return buildMsg{err: errNoGovernedSession}
+		}
+		result, err := executor.Execute(ctx, operate.GovernedCall{
+			Session: session,
+			Tool:    "build_worker",
+			Posture: operate.PostureAutoSafe,
+		})
+		if err != nil {
+			return buildMsg{err: err}
+		}
+		artifact := operate.BuildArtifact{}
+		if s, ok := result.Data["binary_path"].(string); ok {
+			artifact.BinaryPath = s
+		}
+		if s, ok := result.Data["sha256"].(string); ok {
+			artifact.SHA256 = s
+		}
+		if s, ok := result.Data["target"].(string); ok {
+			artifact.Target = s
+		}
+		return buildMsg{artifact: artifact}
 	}
+}
+
+// auditReportFromData reconstructs the audit report from the audit_worker tool
+// result payload.
+func auditReportFromData(data map[string]any) operate.AuditReport {
+	report := operate.AuditReport{}
+	if passed, ok := data["passed"].(bool); ok {
+		report.Passed = passed
+	}
+	gates, ok := data["gates"].([]map[string]any)
+	if !ok {
+		if raw, ok := data["gates"].([]any); ok {
+			for _, item := range raw {
+				if g, ok := item.(map[string]any); ok {
+					gates = append(gates, g)
+				}
+			}
+		}
+	}
+	for _, g := range gates {
+		gr := operate.GateResult{}
+		if v, ok := g["name"].(string); ok {
+			gr.Name = v
+		}
+		switch status := g["status"].(type) {
+		case operate.GateStatus:
+			gr.Status = status
+		case string:
+			gr.Status = operate.GateStatus(status)
+		}
+		if v, ok := g["error"].(string); ok {
+			gr.Error = v
+		}
+		if v, ok := g["output"].(string); ok {
+			gr.Output = v
+		}
+		report.Results = append(report.Results, gr)
+	}
+	return report
 }
 
 // listenDiag returns a Cmd that waits for one diagnostic notification.
