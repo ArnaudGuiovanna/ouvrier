@@ -23,16 +23,19 @@ func TestRunIDECommandOpensWorkspace(t *testing.T) {
 	must("ouvrier.worker.json", `{"name":"demo","events":["POST /x"],"outcomes":["y"]}`+"\n")
 
 	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}))
-	var gotDir string
+	var gotOpts ide.IDEOptions
 	app.runIDE = func(_ context.Context, _ io.Reader, _ io.Writer, opts ide.IDEOptions) error {
-		gotDir = opts.Workspace.Dir
+		gotOpts = opts
 		return nil
 	}
 	if err := app.run(context.Background(), []string{"ide", "--dir", dir}); err != nil {
 		t.Fatalf("run ide: %v", err)
 	}
-	if gotDir == "" {
+	if gotOpts.Workspace.Dir == "" {
 		t.Fatal("ide command did not open a workspace")
+	}
+	if gotOpts.Executor == nil || gotOpts.Session == nil {
+		t.Fatal("standalone ide must receive a GovernedExecutor and session")
 	}
 }
 

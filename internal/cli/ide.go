@@ -40,8 +40,23 @@ func (app *App) runIDECommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%w: no Ouvrier worker here (need pip.yaml + main.go)", ErrUsage)
 	}
+	// Side-effecting IDE actions (save, audit, build) run through the governed
+	// executor, so the standalone IDE needs an operate session too.
+	runtime, err := operate.NewAgentRuntime(operate.RuntimeOptions{Dir: ws.Dir, Driver: operate.ManualDriver{}, DriverID: "manual"})
+	if err != nil {
+		return err
+	}
+	started, err := runtime.Start(ctx, operate.RuntimeStartRequest{Dir: ws.Dir})
+	if err != nil {
+		return err
+	}
 	goplsPath, _ := lsp.Discover()
-	return app.runIDE(ctx, app.in, app.out, ide.IDEOptions{Workspace: ws, GoplsPath: goplsPath})
+	return app.runIDE(ctx, app.in, app.out, ide.IDEOptions{
+		Workspace: ws,
+		GoplsPath: goplsPath,
+		Executor:  runtime.Executor(),
+		Session:   started.Session,
+	})
 }
 
 func printIDEHelp(w io.Writer) { fmt.Fprint(w, ideHelp) }

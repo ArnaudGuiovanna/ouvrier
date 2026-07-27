@@ -56,11 +56,32 @@ func TestIDEOpensAndRenders(t *testing.T) {
 	}
 }
 
+// newGovernedIDE returns an ideModel wired to a real GovernedExecutor and
+// session, the way the cockpit and `ouvrier ide` open it.
+func newGovernedIDE(t *testing.T, dir string, ws operate.Workspace) (*ideModel, *operate.Session) {
+	t.Helper()
+	rt, err := operate.NewAgentRuntime(operate.RuntimeOptions{Dir: dir, Driver: operate.ManualDriver{}})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	started, err := rt.Start(context.Background(), operate.RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	m := newIDEModel(context.Background(), IDEOptions{
+		Workspace: ws,
+		GoplsPath: "",
+		Executor:  rt.Executor(),
+		Session:   started.Session,
+	})
+	return m, started.Session
+}
+
 func TestIDESaveWritesFile(t *testing.T) {
 	dir := writeIDEWorker(t)
 	ws := makeIDEWorkspace(t, dir)
 
-	m := newIDEModel(context.Background(), IDEOptions{Workspace: ws, GoplsPath: ""})
+	m, session := newGovernedIDE(t, dir, ws)
 	// Initialize to load file content.
 	cmds := m.Init()
 	_ = cmds // cmds run asynchronously in real usage
@@ -85,6 +106,110 @@ func TestIDESaveWritesFile(t *testing.T) {
 	}
 	if m.dirty {
 		t.Fatal("dirty flag should be cleared after ctrl+s")
+	}
+
+	// The governed save must leave a transcript tool_call/tool_result pair and
+	// one tool-call audit record.
+	transcript, err := os.ReadFile(session.TranscriptPath)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if !strings.Contains(string(transcript), `"tool_name":"write_worker_file"`) {
+		t.Fatalf("transcript missing governed write_worker_file record:\n%s", transcript)
+	}
+	audit, err := os.ReadFile(session.ToolCallsPath)
+	if err != nil {
+		t.Fatalf("read tool-calls audit: %v", err)
+	}
+	if !strings.Contains(string(audit), `"tool":"write_worker_file"`) {
+		t.Fatalf("tool-calls audit missing write_worker_file record:\n%s", audit)
+	}
+}
+
+// Without a governed executor the IDE save fails closed: no write, no silent
+// bypass of transcript/audit.
+func TestIDESaveWithoutExecutorFailsClosed(t *testing.T) {
+	dir := writeIDEWorker(t)
+	ws := makeIDEWorkspace(t, dir)
+
+	m := newIDEModel(context.Background(), IDEOptions{Workspace: ws, GoplsPath: ""})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.editor.SetValue("package main\n\nfunc main() { /* must not land */ }\n")
+	m.dirty = true
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
+	m = result.(*ideModel)
+
+	data, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if strings.Contains(string(data), "must not land") {
+		t.Fatal("ungoverned IDE save must not write the file")
+	}
+	if !m.dirty {
+		t.Fatal("dirty flag must survive a refused save")
+	}
+	if m.statusKind != "fail" || !strings.Contains(m.status, "save failed") {
+		t.Fatalf("status = %q/%q, want failed save status", m.statusKind, m.status)
+	}
+}
+
+// fakeExecutor records governed calls for routing assertions.
+type fakeExecutor struct {
+	calls  []operate.GovernedCall
+	result operate.ToolResult
+	err    error
+}
+
+func (f *fakeExecutor) Execute(_ context.Context, call operate.GovernedCall) (operate.ToolResult, error) {
+	f.calls = append(f.calls, call)
+	return f.result, f.err
+}
+
+// ctrl+s audits and ctrl+b builds through the GovernedExecutor, not through
+// direct AuditRunner/BuildCoordinator calls.
+func TestIDEAuditAndBuildRouteThroughExecutor(t *testing.T) {
+	dir := writeIDEWorker(t)
+	ws := makeIDEWorkspace(t, dir)
+	fake := &fakeExecutor{result: operate.ToolResult{
+		Summary: "audit passed with 1 gate(s)",
+		Data: map[string]any{
+			"passed":      true,
+			"gates":       []map[string]any{{"name": "gofmt", "status": operate.GatePass}},
+			"binary_path": "/tmp/worker-bin",
+		},
+	}}
+	m := newIDEModel(context.Background(), IDEOptions{
+		Workspace: ws,
+		GoplsPath: "",
+		Executor:  fake,
+		Session:   &operate.Session{ID: "s1"},
+	})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	msg := m.runAudit()()
+	am, ok := msg.(auditMsg)
+	if !ok {
+		t.Fatalf("runAudit returned %T, want auditMsg", msg)
+	}
+	if am.err != nil || !am.report.Passed || len(am.report.Results) != 1 {
+		t.Fatalf("audit report not reconstructed: %+v err=%v", am.report, am.err)
+	}
+	msg = m.runBuild()()
+	bm, ok := msg.(buildMsg)
+	if !ok {
+		t.Fatalf("runBuild returned %T, want buildMsg", msg)
+	}
+	if bm.err != nil || bm.artifact.BinaryPath != "/tmp/worker-bin" {
+		t.Fatalf("build artifact not reconstructed: %+v err=%v", bm.artifact, bm.err)
+	}
+
+	if len(fake.calls) != 2 {
+		t.Fatalf("executor calls = %d, want 2", len(fake.calls))
+	}
+	if fake.calls[0].Tool != "audit_worker" || fake.calls[1].Tool != "build_worker" {
+		t.Fatalf("executor tools = %q, %q; want audit_worker, build_worker", fake.calls[0].Tool, fake.calls[1].Tool)
 	}
 }
 

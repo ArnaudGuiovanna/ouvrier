@@ -21,7 +21,11 @@ type Tool struct {
 	Name        string
 	Description string
 	Governance  Governance
-	Run         ToolFunc
+	// OperatorOnly hides the tool from the model tool-calling loop; it stays
+	// executable through the GovernedExecutor for explicit operator actions
+	// (IDE saves, the `!` shell).
+	OperatorOnly bool
+	Run          ToolFunc
 }
 
 // ToolFunc executes one native Ouvrier operation.
@@ -60,6 +64,8 @@ func NewToolRegistry() *ToolRegistry {
 	registry.Register(Tool{Name: "accept_risk", Description: "Record an explicit accepted-risk rationale for gated transfer.", Governance: GovSideEffecting, Run: toolAcceptRisk})
 	registry.Register(Tool{Name: "export_session", Description: "Export the transcript to Markdown.", Governance: GovReadOnly, Run: toolExportSession})
 	registry.Register(Tool{Name: "login_codex", Description: "Probe/delegate Codex authentication without storing Codex tokens.", Governance: GovSideEffecting, Run: toolLoginCodex})
+	registry.Register(Tool{Name: "write_worker_file", Description: "Write one file inside the selected worker (operator save).", Governance: GovSideEffecting, OperatorOnly: true, Run: toolWriteWorkerFile})
+	registry.Register(Tool{Name: "run_shell", Description: "Run one operator shell command in the worker directory.", Governance: GovSideEffecting, OperatorOnly: true, Run: toolRunShell})
 	return registry
 }
 
@@ -93,8 +99,10 @@ func (r *ToolRegistry) Names() []string {
 	return names
 }
 
-// Execute runs a tool by name.
-func (r *ToolRegistry) Execute(ctx context.Context, env ToolEnv, name string, input map[string]any) (ToolResult, error) {
+// execute runs a tool by name. It is deliberately unexported: every governed
+// operation must cross GovernedExecutor.Execute, which owns the approval gate,
+// transcript persistence, and tool-call audit around this raw dispatch.
+func (r *ToolRegistry) execute(ctx context.Context, env ToolEnv, name string, input map[string]any) (ToolResult, error) {
 	if r == nil {
 		r = NewToolRegistry()
 	}
