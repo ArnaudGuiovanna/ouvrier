@@ -135,3 +135,8 @@ func readToolCallAuditIDs(path string) (map[string]bool, error) {
 	}
 	return ids, nil
 }
+
+func repairTrailingToolCallAudit(path string) (bool, error) {
+	repair, err := repairJSONLTail(path, "tool-call audit")
+	return repair == jsonlTailDiscarded, err
+}

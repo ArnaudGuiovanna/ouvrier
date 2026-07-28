@@ -378,7 +378,7 @@ func TestResumeRepairsOnlyInvalidUnterminatedTranscriptTail(t *testing.T) {
 	}
 }
 
-func TestRepairTrailingTranscriptPreservesValidFinalRecord(t *testing.T) {
+func TestRepairTrailingTranscriptCompletesValidFinalRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "transcript.jsonl")
 	data := []byte(`{"id":"1","session_id":"s","kind":"status"}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -389,14 +389,102 @@ func TestRepairTrailingTranscriptPreservesValidFinalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	if repaired {
-		t.Fatal("valid unterminated final record was incorrectly discarded")
+		t.Fatal("valid unterminated final record was incorrectly reported as discarded")
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(data) {
-		t.Fatalf("transcript = %q, want %q", got, data)
+	want := append(data, '\n')
+	if string(got) != string(want) {
+		t.Fatalf("transcript = %q, want %q", got, want)
+	}
+}
+
+func TestResumeRepairsToolCallAuditTail(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		tail       string
+		diagnostic bool
+	}{
+		{name: "valid final line", tail: `{"tool_call_id":"valid"}`},
+		{name: "torn final line", tail: `{"tool_call_id":"torn"`, diagnostic: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runtime, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(started.Session.ToolCallsPath, []byte(tc.tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			resumer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = resumer.Close() })
+			resumed, err := resumer.Resume(context.Background(), started.Session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var diagnostic bool
+			for _, entry := range resumed.Transcript {
+				if entry.Metadata["recovery"] == "torn_tool_call_audit_tail_discarded" {
+					diagnostic = true
+				}
+			}
+			if diagnostic != tc.diagnostic {
+				t.Fatalf("recovery diagnostic = %v, want %v", diagnostic, tc.diagnostic)
+			}
+			data, err := os.ReadFile(started.Session.ToolCallsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.diagnostic && !strings.HasSuffix(string(data), "\n") {
+				t.Fatalf("repaired audit = %q, want newline-terminated JSONL", data)
+			}
+			if tc.diagnostic && strings.Contains(string(data), `"torn"`) {
+				t.Fatalf("repaired audit still contains torn tail: %q", data)
+			}
+		})
+	}
+}
+
+func TestResumeRejectsMiddleToolCallAuditCorruption(t *testing.T) {
+	dir := t.TempDir()
+	runtime, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content := "{\"tool_call_id\":\"first\"}\nnot-json\n{\"tool_call_id\":\"last\"}\n"
+	if err := os.WriteFile(started.Session.ToolCallsPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resumer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resumer.Close() })
+	if _, err := resumer.Resume(context.Background(), started.Session.ID); err == nil ||
+		!strings.Contains(err.Error(), "tool-call audit") ||
+		!strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("Resume() error = %v, want middle audit corruption at line 2", err)
 	}
 }
 

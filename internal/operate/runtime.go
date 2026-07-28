@@ -209,6 +209,10 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 	if err != nil {
 		return RuntimeSession{}, err
 	}
+	repairedAuditTail, err := repairTrailingToolCallAudit(session.ToolCallsPath)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
 	transcript, err := ReadTranscript(session.TranscriptPath)
 	if err != nil {
 		return RuntimeSession{}, err
@@ -219,6 +223,18 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 			Kind:      TranscriptStatus,
 			Text:      "recovery discarded an invalid, unterminated final transcript line after an interrupted write",
 			Metadata:  map[string]any{"recovery": "torn_transcript_tail_discarded"},
+		})
+		if err != nil {
+			return RuntimeSession{}, err
+		}
+		transcript = append(transcript, entry)
+	}
+	if repairedAuditTail {
+		entry, err := r.transcript(session).Append(TranscriptEntry{
+			SessionID: session.ID,
+			Kind:      TranscriptStatus,
+			Text:      "recovery discarded an invalid, unterminated final tool-call audit line after an interrupted write",
+			Metadata:  map[string]any{"recovery": "torn_tool_call_audit_tail_discarded"},
 		})
 		if err != nil {
 			return RuntimeSession{}, err
