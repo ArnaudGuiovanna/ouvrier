@@ -48,6 +48,7 @@ var checkBashIsolationAvailable = tools.CheckBashIsolationAvailable
 type httpStatusResponse struct {
 	Status string `json:"status"`
 	Output string `json:"output,omitempty"`
+	Budget string `json:"budget,omitempty"`
 }
 
 func newHTTPHandler(nodes []Node) (http.Handler, error) {
@@ -395,7 +396,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		case errors.Is(err, errHTTPProviderNotConfigured):
 			writeJSONStatus(w, http.StatusServiceUnavailable, "provider_not_configured")
 		case errors.Is(err, errHTTPPipelineIncomplete):
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete")
+			writeJSONPipelineIncomplete(w, err)
 		default:
 			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 		}
@@ -1106,6 +1107,13 @@ func writeJSONStatus(w http.ResponseWriter, code int, status string) {
 
 func writeJSONOutput(w http.ResponseWriter, code int, status, output string) {
 	writeJSON(w, code, httpStatusResponse{Status: status, Output: output})
+}
+
+func writeJSONPipelineIncomplete(w http.ResponseWriter, err error) {
+	writeJSON(w, http.StatusBadGateway, httpStatusResponse{
+		Status: "pipeline_execution_incomplete",
+		Budget: httpPipelineBudget(err),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {

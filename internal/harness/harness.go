@@ -665,6 +665,9 @@ func (h *Harness) wallClockBudgetPayload(ctx context.Context) (map[string]any, b
 
 func (h *Harness) truncateForBudget(ctx context.Context, session runtimecore.Session, out Outcome, payload map[string]any) (Outcome, error) {
 	out.Status = StatusTruncated
+	if budget, ok := payload["budget"].(string); ok {
+		out.BudgetExceeded = budget
+	}
 	if err := h.emit(ctx, session, events.EventBudgetExceeded, payload); err != nil {
 		out.Status = StatusFailed
 		return out, errors.Join(err, h.finishExecution(ctx, session, out.Status))

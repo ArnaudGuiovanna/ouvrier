@@ -1150,7 +1150,7 @@ func writeAdminTriggerPlanError(w http.ResponseWriter, result planRunResult, err
 	case errors.Is(err, errHTTPProviderNotConfigured):
 		writeAdminTriggerStatus(w, http.StatusServiceUnavailable, "provider_not_configured", result)
 	case errors.Is(err, errHTTPPipelineIncomplete):
-		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_incomplete", result)
+		writeAdminTriggerIncomplete(w, result, err)
 	default:
 		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
 	}
@@ -1602,6 +1602,7 @@ type adminTriggerResponse struct {
 	ExecID    string `json:"exec_id,omitempty"`
 	TraceID   string `json:"trace_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	Budget    string `json:"budget,omitempty"`
 }
 
 func writeAdminTriggerStatus(w http.ResponseWriter, code int, status string, result planRunResult) {
@@ -1616,6 +1617,19 @@ func writeAdminTriggerOutput(w http.ResponseWriter, code int, status string, res
 		response.SessionID = result.Session.SessionID
 	}
 	writeJSON(w, code, response)
+}
+
+func writeAdminTriggerIncomplete(w http.ResponseWriter, result planRunResult, err error) {
+	response := adminTriggerResponse{
+		Status: "pipeline_execution_incomplete",
+		Budget: httpPipelineBudget(err),
+	}
+	if result.HasSession {
+		response.ExecID = result.Session.ExecID
+		response.TraceID = result.Session.TraceID
+		response.SessionID = result.Session.SessionID
+	}
+	writeJSON(w, http.StatusBadGateway, response)
 }
 
 func (r adminTriggerRequest) kind() runtimeplan.TriggerKind {

@@ -23,6 +23,40 @@ var (
 	errHTTPPipelineIncomplete    = errors.New("http runtime pipeline incomplete")
 )
 
+type httpPipelineIncompleteError struct {
+	status harness.Status
+	budget string
+}
+
+func (e *httpPipelineIncompleteError) Error() string {
+	if e == nil {
+		return errHTTPPipelineIncomplete.Error()
+	}
+	if e.budget == "" {
+		return fmt.Sprintf("%s: %s", errHTTPPipelineIncomplete, e.status)
+	}
+	return fmt.Sprintf("%s: %s (budget=%s)", errHTTPPipelineIncomplete, e.status, e.budget)
+}
+
+func (e *httpPipelineIncompleteError) Unwrap() error {
+	return errHTTPPipelineIncomplete
+}
+
+func newHTTPPipelineIncompleteError(out harness.Outcome) error {
+	return &httpPipelineIncompleteError{
+		status: out.Status,
+		budget: out.BudgetExceeded,
+	}
+}
+
+func httpPipelineBudget(err error) string {
+	var incomplete *httpPipelineIncompleteError
+	if !errors.As(err, &incomplete) || incomplete == nil {
+		return ""
+	}
+	return incomplete.budget
+}
+
 type httpRuntime struct {
 	provider             provider.Provider
 	providers            *provider.Registry
@@ -474,7 +508,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 						return resumedResult, resumeErr
 					}
 					if resumed.Status != harness.StatusCompleted {
-						return resumedResult, fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, resumed.Status)
+						return resumedResult, newHTTPPipelineIncompleteError(resumed)
 					}
 					if err := scope.durable.checkpoint(resumeCtx, suspendedStepIndex, resumed.Text); err != nil {
 						return resumedResult, err
@@ -503,7 +537,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 		}
 		if out.Status != harness.StatusCompleted {
 			result.Output = out.Text
-			return result, fmt.Errorf("%w: %s", errHTTPPipelineIncomplete, out.Status)
+			return result, newHTTPPipelineIncompleteError(out)
 		}
 		if err := scope.durable.checkpoint(ctx, stepIndex, out.Text); err != nil {
 			result.Output = out.Text

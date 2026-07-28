@@ -113,6 +113,9 @@ func TestHTTPReturnsIncompleteWhenProviderStopsAtMaxTokens(t *testing.T) {
 	if body.Status != "pipeline_execution_incomplete" {
 		t.Fatalf("body = %+v, want pipeline_execution_incomplete", body)
 	}
+	if body.Budget != "provider_max_tokens" {
+		t.Fatalf("body budget = %q, want provider_max_tokens", body.Budget)
+	}
 	if len(scripted.requests) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(scripted.requests))
 	}

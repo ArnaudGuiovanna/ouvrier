@@ -159,11 +159,15 @@ func (rt httpRuntime) runApprovedResume(ctx context.Context, approvalID string, 
 		if rt.rememberSuspendedPlan(err, resume.plan, resume.session) {
 			return
 		}
-		rt.emitApprovalResumeEvent(context.WithoutCancel(ctx), approvalID, resume, events.EventPipelineFailed, map[string]any{
+		payload := map[string]any{
 			"approval_id": approvalID,
 			"error":       err.Error(),
 			"resumed":     true,
-		})
+		}
+		if budget := httpPipelineBudget(err); budget != "" {
+			payload["budget"] = budget
+		}
+		rt.emitApprovalResumeEvent(context.WithoutCancel(ctx), approvalID, resume, events.EventPipelineFailed, payload)
 		_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), resume.session, resume.plan, "failed", err)
 		return
 	}

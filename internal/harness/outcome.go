@@ -15,10 +15,11 @@ const (
 )
 
 type Outcome struct {
-	Status     Status
-	Text       string
-	Iterations int
-	Session    runtimecore.Session
-	ToolCalls  []provider.ToolCall
-	Usage      provider.Usage
+	Status         Status
+	Text           string
+	Iterations     int
+	Session        runtimecore.Session
+	ToolCalls      []provider.ToolCall
+	Usage          provider.Usage
+	BudgetExceeded string
 }

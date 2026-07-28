@@ -138,6 +138,9 @@ func TestRunStopsAtIterationBudget(t *testing.T) {
 	if out.Status != harness.StatusTruncated {
 		t.Fatalf("Status = %q, want truncated", out.Status)
 	}
+	if out.BudgetExceeded != "iterations" {
+		t.Fatalf("BudgetExceeded = %q, want iterations", out.BudgetExceeded)
+	}
 	if out.Iterations != 2 {
 		t.Fatalf("Iterations = %d, want 2", out.Iterations)
 	}
@@ -184,6 +187,7 @@ func TestRunStoresConfiguredTokenAndCostBudgetOnSession(t *testing.T) {
 }
 
 func TestRunStopsWhenWallClockBudgetExceeded(t *testing.T) {
+	store := state.NewMemoryStore()
 	stream, err := events.NewEventStream()
 	if err != nil {
 		t.Fatalf("NewEventStream returned error: %v", err)
@@ -197,6 +201,7 @@ func TestRunStopsWhenWallClockBudgetExceeded(t *testing.T) {
 			MaxCostUSD:    1,
 			MaxWallClock:  10 * time.Millisecond,
 		}),
+		harness.WithStateStore(store),
 		harness.WithEventStream(stream),
 	)
 	if err != nil {
@@ -210,6 +215,9 @@ func TestRunStopsWhenWallClockBudgetExceeded(t *testing.T) {
 	if out.Status != harness.StatusTruncated {
 		t.Fatalf("Status = %q, want truncated", out.Status)
 	}
+	if out.BudgetExceeded != "wallclock" {
+		t.Fatalf("BudgetExceeded = %q, want wallclock", out.BudgetExceeded)
+	}
 	select {
 	case <-p.started:
 	default:
@@ -222,6 +230,17 @@ func TestRunStopsWhenWallClockBudgetExceeded(t *testing.T) {
 	}
 	if event.Payload["budget"] != "wallclock" || event.Payload["max_wallclock_ms"] != int64(10) {
 		t.Fatalf("budget event = %+v, want wallclock details", event)
+	}
+	persisted, err := store.Events(context.Background(), out.Session.ExecID)
+	if err != nil {
+		t.Fatalf("Events returned error: %v", err)
+	}
+	if _, ok := findEvent(persisted, events.EventBudgetExceeded); !ok {
+		t.Fatalf("persisted events = %+v, want budget exceeded after deadline", persisted)
+	}
+	execution, ok, err := store.Execution(context.Background(), out.Session.ExecID)
+	if err != nil || !ok || execution.Status != state.ExecutionTruncated {
+		t.Fatalf("Execution = %+v ok=%v err=%v, want persisted truncated execution", execution, ok, err)
 	}
 }
 
@@ -273,6 +292,9 @@ func TestRunStopsBeforeNextLLMWhenTokenBudgetExceeded(t *testing.T) {
 	}
 	if out.Status != harness.StatusTruncated {
 		t.Fatalf("Status = %q, want truncated", out.Status)
+	}
+	if out.BudgetExceeded != "tokens" {
+		t.Fatalf("BudgetExceeded = %q, want tokens", out.BudgetExceeded)
 	}
 	if out.Iterations != 2 {
 		t.Fatalf("Iterations = %d, want 2", out.Iterations)
@@ -354,6 +376,9 @@ func TestRunStopsBeforeNextLLMWhenCostBudgetExceeded(t *testing.T) {
 	}
 	if out.Status != harness.StatusTruncated {
 		t.Fatalf("Status = %q, want truncated", out.Status)
+	}
+	if out.BudgetExceeded != "cost_usd" {
+		t.Fatalf("BudgetExceeded = %q, want cost_usd", out.BudgetExceeded)
 	}
 	if len(p.requests) != 2 {
 		t.Fatalf("provider calls = %d, want 2", len(p.requests))

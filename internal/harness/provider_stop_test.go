@@ -43,6 +43,9 @@ func TestRunTreatsProviderMaxTokensAsTruncated(t *testing.T) {
 	if out.Status != harness.StatusTruncated {
 		t.Fatalf("Status = %q, want truncated", out.Status)
 	}
+	if out.BudgetExceeded != "provider_max_tokens" {
+		t.Fatalf("BudgetExceeded = %q, want provider_max_tokens", out.BudgetExceeded)
+	}
 	if out.Text != `{"status":"partial"}` {
 		t.Fatalf("Text = %q, want partial output preserved", out.Text)
 	}

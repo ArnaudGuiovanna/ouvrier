@@ -50,7 +50,7 @@ func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, in
 		case outcome := <-done:
 			r.runtime.writeSSEEventsSince(w, pipelineSession.ExecID, lastEventID)
 			if outcome.err != nil {
-				writeSSEStatus(w, "error", pipelineErrorStatus(outcome.err))
+				writeSSEPipelineError(w, outcome.err)
 				flushSSE(w)
 				return
 			}
@@ -156,6 +156,17 @@ func writeSSEStatus(w io.Writer, eventName, status string) {
 		return
 	}
 	writeSSEOutputEvent(w, eventName, string(payload))
+}
+
+func writeSSEPipelineError(w io.Writer, err error) {
+	payload, marshalErr := json.Marshal(httpStatusResponse{
+		Status: pipelineErrorStatus(err),
+		Budget: httpPipelineBudget(err),
+	})
+	if marshalErr != nil {
+		return
+	}
+	writeSSEOutputEvent(w, "error", string(payload))
 }
 
 type sseRuntimeEvent struct {
