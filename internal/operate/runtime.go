@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,6 +53,8 @@ type AgentRuntime struct {
 
 	repoRoot  string
 	workspace *Workspace
+	lockMu    sync.Mutex
+	locks     map[string]*os.File
 }
 
 // RuntimeStartRequest creates or resumes one cockpit session.
@@ -131,6 +135,7 @@ func NewAgentRuntime(opts RuntimeOptions) (*AgentRuntime, error) {
 		Tools:    opts.Tools,
 		Options:  opts,
 		repoRoot: repoRoot,
+		locks:    make(map[string]*os.File),
 	}, nil
 }
 
@@ -184,6 +189,9 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 			}
 		}
 	}
+	if err := r.lockSession(session); err != nil {
+		return RuntimeSession{}, err
+	}
 
 	ws, _ := DetectWorkspace(session.Dir)
 	if ws.Dir != "" {
@@ -201,6 +209,10 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 	if err != nil {
 		return RuntimeSession{}, err
 	}
+	transcript, err = r.recoverInterruptedCalls(session, transcript)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
 	if len(transcript) == 0 {
 		entry, err := r.transcript(session).Append(TranscriptEntry{
 			SessionID: session.ID,
@@ -213,6 +225,23 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 		transcript = append(transcript, entry)
 	}
 	return RuntimeSession{Session: session, Workspace: r.workspace, Transcript: transcript}, ctx.Err()
+}
+
+// Close releases session writer locks held by this runtime.
+func (r *AgentRuntime) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.lockMu.Lock()
+	defer r.lockMu.Unlock()
+	var errs []error
+	for id, lock := range r.locks {
+		if err := releaseSessionLock(lock); err != nil {
+			errs = append(errs, fmt.Errorf("operate: release session %s lock: %w", id, err))
+		}
+		delete(r.locks, id)
+	}
+	return errors.Join(errs...)
 }
 
 // Prompt executes one free-form operator prompt.

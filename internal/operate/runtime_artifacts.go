@@ -17,11 +17,12 @@ func appendToolCall(path string, redactor Redactor, call plannedTool, result Too
 		return nil
 	}
 	record := map[string]any{
-		"at":      time.Now().UTC(),
-		"tool":    call.Name,
-		"input":   redactMap(redactor, call.Input),
-		"summary": redactor.Redact(result.Summary),
-		"data":    redactMap(redactor, result.Data),
+		"at":           time.Now().UTC(),
+		"tool_call_id": call.ID,
+		"tool":         call.Name,
+		"input":        redactMap(redactor, call.Input),
+		"summary":      redactor.Redact(result.Summary),
+		"data":         redactMap(redactor, result.Data),
 	}
 	if runErr != nil {
 		record["error"] = redactor.Redact(runErr.Error())
@@ -42,8 +43,10 @@ func appendJSONLine(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(f, string(data))
-	return err
+	if _, err = fmt.Fprintln(f, string(data)); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func readEvents(path string) ([]Event, error) {

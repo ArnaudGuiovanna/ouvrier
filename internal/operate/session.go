@@ -292,6 +292,10 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		cleanup()
 		return fmt.Errorf("operate: write temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("operate: sync temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("operate: close temp file: %w", err)
@@ -299,6 +303,14 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("operate: replace %s: %w", path, err)
+	}
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("operate: open parent directory: %w", err)
+	}
+	defer dirHandle.Close()
+	if err := dirHandle.Sync(); err != nil {
+		return fmt.Errorf("operate: sync parent directory: %w", err)
 	}
 	return nil
 }

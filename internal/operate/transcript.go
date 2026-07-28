@@ -84,6 +84,9 @@ func (s *TranscriptStore) Append(entry TranscriptEntry) (TranscriptEntry, error)
 	if _, err := fmt.Fprintln(f, string(data)); err != nil {
 		return TranscriptEntry{}, fmt.Errorf("operate: append transcript entry: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		return TranscriptEntry{}, fmt.Errorf("operate: sync transcript entry: %w", err)
+	}
 	return entry, nil
 }
 
@@ -102,10 +105,12 @@ func ReadTranscript(path string) ([]TranscriptEntry, error) {
 	var entries []TranscriptEntry
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	line := 0
 	for scanner.Scan() {
+		line++
 		var entry TranscriptEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			return nil, fmt.Errorf("operate: parse transcript: %w", err)
+			return nil, fmt.Errorf("operate: parse transcript %s at line %d: %w", path, line, err)
 		}
 		entries = append(entries, entry)
 	}
