@@ -586,6 +586,10 @@ metadata, never Codex subscription tokens. Sessions and artifacts live under
 remains the remote observation and approval surface for workers and fleets;
 `operate` is the local construction harness.
 
+Known limitation: the single-writer session lock is enforced on Unix systems.
+The current Windows implementation is a no-op, so concurrent `operate`
+processes must not resume or write the same session.
+
 The introspection commands (`show`, `status`, `logs`, `trace`) read from the
 project filesystem (`pip.yaml`) or talk to a running worker through
 `/admin/*` using `OUVRIER_ADMIN_TOKEN` for bearer auth. `ouvrier build`

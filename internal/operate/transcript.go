@@ -2,6 +2,7 @@ package operate
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,6 +119,75 @@ func ReadTranscript(path string) ([]TranscriptEntry, error) {
 		return nil, fmt.Errorf("operate: read transcript: %w", err)
 	}
 	return entries, nil
+}
+
+// repairTrailingTranscript discards only an invalid final JSONL fragment that
+// has no terminating newline. A valid final record is preserved, and malformed
+// records before the final line remain hard errors in ReadTranscript.
+func repairTrailingTranscript(path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("operate: open transcript for recovery: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return false, fmt.Errorf("operate: stat transcript for recovery: %w", err)
+	}
+	size := info.Size()
+	if size == 0 {
+		return false, nil
+	}
+	last := []byte{0}
+	if _, err := f.ReadAt(last, size-1); err != nil {
+		return false, fmt.Errorf("operate: inspect transcript tail: %w", err)
+	}
+	if last[0] == '\n' {
+		return false, nil
+	}
+
+	const blockSize = int64(64 * 1024)
+	start := size
+	lineStart := int64(0)
+	for start > 0 {
+		end := start
+		start -= blockSize
+		if start < 0 {
+			start = 0
+		}
+		block := make([]byte, end-start)
+		if _, err := f.ReadAt(block, start); err != nil {
+			return false, fmt.Errorf("operate: inspect transcript tail: %w", err)
+		}
+		if index := bytes.LastIndexByte(block, '\n'); index >= 0 {
+			lineStart = start + int64(index) + 1
+			break
+		}
+	}
+	const maxTranscriptLine = int64(4 * 1024 * 1024)
+	if size-lineStart > maxTranscriptLine {
+		return false, fmt.Errorf("operate: transcript final line exceeds %d bytes", maxTranscriptLine)
+	}
+	tail := make([]byte, size-lineStart)
+	if _, err := f.ReadAt(tail, lineStart); err != nil {
+		return false, fmt.Errorf("operate: read transcript tail: %w", err)
+	}
+	if json.Valid(tail) {
+		return false, nil
+	}
+	if err := f.Truncate(lineStart); err != nil {
+		return false, fmt.Errorf("operate: truncate torn transcript tail: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return false, fmt.Errorf("operate: sync repaired transcript: %w", err)
+	}
+	return true, nil
 }
 
 func redactMap(redactor Redactor, in map[string]any) map[string]any {

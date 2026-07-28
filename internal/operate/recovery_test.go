@@ -326,6 +326,80 @@ func TestReadTranscriptReportsTrailingAndMiddleCorruption(t *testing.T) {
 	}
 }
 
+func TestResumeRepairsOnlyInvalidUnterminatedTranscriptTail(t *testing.T) {
+	dir := t.TempDir()
+	runtime, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(started.Session.TranscriptPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"id":"torn"`); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resumer.Close() })
+	resumed, err := resumer.Resume(context.Background(), started.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diagnostic bool
+	for _, entry := range resumed.Transcript {
+		if entry.Metadata["recovery"] == "torn_transcript_tail_discarded" {
+			diagnostic = true
+		}
+	}
+	if !diagnostic {
+		t.Fatal("resume did not persist a torn-tail recovery diagnostic")
+	}
+	data, err := os.ReadFile(started.Session.TranscriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `{"id":"torn"`) || !strings.HasSuffix(string(data), "\n") {
+		t.Fatalf("repaired transcript tail = %q", data)
+	}
+}
+
+func TestRepairTrailingTranscriptPreservesValidFinalRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	data := []byte(`{"id":"1","session_id":"s","kind":"status"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := repairTrailingTranscript(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired {
+		t.Fatal("valid unterminated final record was incorrectly discarded")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("transcript = %q, want %q", got, data)
+	}
+}
+
 func assertInterruptedResultCount(t *testing.T, entries []TranscriptEntry, id string, want int) {
 	t.Helper()
 	var count int

@@ -205,9 +205,25 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 		r.workspace = nil
 	}
 
+	repairedTail, err := repairTrailingTranscript(session.TranscriptPath)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
 	transcript, err := ReadTranscript(session.TranscriptPath)
 	if err != nil {
 		return RuntimeSession{}, err
+	}
+	if repairedTail {
+		entry, err := r.transcript(session).Append(TranscriptEntry{
+			SessionID: session.ID,
+			Kind:      TranscriptStatus,
+			Text:      "recovery discarded an invalid, unterminated final transcript line after an interrupted write",
+			Metadata:  map[string]any{"recovery": "torn_transcript_tail_discarded"},
+		})
+		if err != nil {
+			return RuntimeSession{}, err
+		}
+		transcript = append(transcript, entry)
 	}
 	transcript, err = r.recoverInterruptedCalls(session, transcript)
 	if err != nil {
