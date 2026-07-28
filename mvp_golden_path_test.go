@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -47,24 +48,21 @@ func TestMVPGoldenPath(t *testing.T) {
 		order         []string
 	)
 	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/v1/messages" {
-			t.Errorf("provider: path = %q, want /v1/messages", req.URL.Path)
-			http.Error(w, "provider: unexpected path", http.StatusNotFound)
-			return
-		}
 		var body map[string]any
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Errorf("provider: decode request: %v", err)
+			t.Error(mvpStageError("provider", fmt.Errorf("decode request: %w", err)))
 			http.Error(w, "provider: invalid request", http.StatusBadRequest)
 			return
 		}
 		providerCalls++
+		if err := mvpValidateProviderRequest(req.URL.Path, body, providerCalls, ticketID); err != nil {
+			t.Error(err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch providerCalls {
 		case 1:
-			if tools, ok := body["tools"].([]any); !ok || len(tools) != 1 {
-				t.Errorf("provider: tools = %#v, want one governed tool", body["tools"])
-			}
 			_, _ = fmt.Fprintf(w, `{
 				"content":[{
 					"type":"tool_use",
@@ -76,20 +74,12 @@ func TestMVPGoldenPath(t *testing.T) {
 				"usage":{"input_tokens":3,"output_tokens":5}
 			}`, toolCallID, ticketID)
 		case 2:
-			messages, _ := body["messages"].([]any)
-			encoded, _ := json.Marshal(messages)
-			if !strings.Contains(string(encoded), "tool_result") || !strings.Contains(string(encoded), ticketID) {
-				t.Errorf("provider: second request does not contain real tool result: %s", encoded)
-			}
 			text := fmt.Sprintf(`{"status":"classified","ticket_id":%q}`, ticketID)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"content":     []map[string]any{{"type": "text", "text": text}},
 				"stop_reason": "end_turn",
 				"usage":       map[string]any{"input_tokens": 7, "output_tokens": 9},
 			})
-		default:
-			t.Errorf("provider: calls = %d, want exactly 2", providerCalls)
-			http.Error(w, "provider: unexpected extra call", http.StatusInternalServerError)
 		}
 	}))
 	t.Cleanup(providerServer.Close)
@@ -136,48 +126,24 @@ func TestMVPGoldenPath(t *testing.T) {
 	}
 
 	server := httptest.NewServer(handler)
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/tickets", strings.NewReader(`{"id":"T-53"}`))
+	t.Cleanup(server.Close)
+	responseBody, err := mvpTriggerHTTP(server.Client(), server.URL+"/tickets")
 	if err != nil {
-		t.Fatalf("http trigger: build request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := server.Client().Do(req)
-	if err != nil {
-		t.Fatalf("http trigger: POST /tickets: %v", err)
-	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("http trigger: read response: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
 		executions, _ := store.Executions(context.Background())
 		var persisted []events.Event
 		if len(executions) > 0 {
 			persisted, _ = store.Events(context.Background(), executions[0].ExecID)
 		}
-		t.Fatalf("http trigger: status = %d body=%s provider_calls=%d order=%v events=%+v, want 200",
-			resp.StatusCode, responseBody, providerCalls, order, persisted)
+		t.Fatalf("%v; provider_calls=%d order=%v events=%+v", err, providerCalls, order, persisted)
 	}
-	var response httpStatusResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		t.Fatalf("typed output: decode HTTP response: %v", err)
-	}
-	var output mvpGoldenReply
-	if err := json.Unmarshal([]byte(response.Output), &output); err != nil {
-		t.Fatalf("typed output: decode worker output: %v", err)
-	}
-	if output != (mvpGoldenReply{Status: "classified", TicketID: ticketID}) {
-		t.Fatalf("typed output: output = %+v", output)
+	if _, err := mvpValidateTypedOutput(responseBody, mvpGoldenReply{Status: "classified", TicketID: ticketID}); err != nil {
+		t.Fatal(err)
 	}
 	if providerCalls != 2 {
 		t.Fatalf("provider: calls = %d, want 2", providerCalls)
 	}
-	if toolCalls != 1 {
-		t.Fatalf("governed tool: calls = %d, want 1", toolCalls)
-	}
-	if len(order) != 2 || !strings.HasPrefix(order[0], "permission:lookup_ticket:"+toolCallID) || order[1] != "tool:"+ticketID {
-		t.Fatalf("governed tool: order = %v, want permission before one tool effect", order)
+	if err := mvpValidateGovernedTool(toolCalls, order, toolCallID, ticketID); err != nil {
+		t.Fatal(err)
 	}
 
 	executions, err := store.Executions(context.Background())
@@ -201,30 +167,8 @@ func TestMVPGoldenPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("durable events: read after reopen: %v", err)
 	}
-	if len(afterReopen) != len(beforeClose) {
-		t.Fatalf("durable events: after reopen = %d, before close = %d", len(afterReopen), len(beforeClose))
-	}
-	required := []events.EventKind{
-		events.EventPermissionDecision,
-		events.EventToolCallStarted,
-		events.EventToolCallCompleted,
-		events.EventSchemaValidationPassed,
-		events.EventPipelineCompleted,
-	}
-	var kinds []events.EventKind
-	for i, event := range afterReopen {
-		kinds = append(kinds, event.Kind)
-		if event.ExecID != execID || event.SessionID == "" {
-			t.Fatalf("durable events: event[%d] identifiers = %+v", i, event)
-		}
-		if i > 0 && event.ID <= afterReopen[i-1].ID {
-			t.Fatalf("durable events: IDs are not increasing at %d: %d <= %d", i, event.ID, afterReopen[i-1].ID)
-		}
-	}
-	for _, kind := range required {
-		if !slices.Contains(kinds, kind) {
-			t.Fatalf("durable events: missing %q in %v", kind, kinds)
-		}
+	if err := mvpValidateDurableEvents(beforeClose, afterReopen, execID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -347,38 +291,225 @@ func TestMVPGoldenPathBuildsCoveredWorker(t *testing.T) {
 		t.Fatalf("build worker: resolve repository root: %v", err)
 	}
 	out := filepath.Join(t.TempDir(), "ticket-triage")
-	cmd := exec.Command("go", "build", "-o", out, ".")
-	cmd.Dir = filepath.Join(root, "examples", "ticket-triage")
-	cmd.Env = append(os.Environ(), "GOWORK=off")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build worker: go build: %v\n%s", err, output)
-	}
-	info, err := os.Stat(out)
-	if err != nil {
-		t.Fatalf("build worker: stat binary: %v", err)
-	}
-	if info.Size() == 0 || info.Mode()&0o111 == 0 {
-		t.Fatalf("build worker: binary size=%d mode=%v, want non-empty executable", info.Size(), info.Mode())
+	if err := mvpBuildCoveredWorker(root, out, mvpGoBuild); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestMVPGoldenPathStageDiagnostics(t *testing.T) {
-	stages := []string{
-		"http trigger",
-		"provider",
-		"governed tool",
-		"typed output",
-		"durable events",
-		"build worker",
+	stages := []struct {
+		name      string
+		wantCause string
+		inject    func() error
+	}{
+		{
+			name:      "http trigger",
+			wantCause: "injected-invalid-url",
+			inject: func() error {
+				_, err := mvpTriggerHTTP(http.DefaultClient, "://injected-invalid-url")
+				return err
+			},
+		},
+		{
+			name:      "provider",
+			wantCause: "injected-wrong-path",
+			inject: func() error {
+				return mvpValidateProviderRequest("/injected-wrong-path", nil, 1, "T-53")
+			},
+		},
+		{
+			name:      "governed tool",
+			wantCause: "calls = 0",
+			inject: func() error {
+				return mvpValidateGovernedTool(0, nil, "toolu_mvp_1", "T-53")
+			},
+		},
+		{
+			name:      "typed output",
+			wantCause: "cannot unmarshal number",
+			inject: func() error {
+				_, err := mvpValidateTypedOutput(
+					[]byte(`{"status":"ok","output":"{\"status\":42,\"ticket_id\":\"T-53\"}"}`),
+					mvpGoldenReply{Status: "classified", TicketID: "T-53"},
+				)
+				return err
+			},
+		},
+		{
+			name:      "durable events",
+			wantCause: "after reopen = 0",
+			inject: func() error {
+				before := []events.Event{{ID: 1, ExecID: "exec-53", SessionID: "session-53"}}
+				return mvpValidateDurableEvents(before, nil, "exec-53")
+			},
+		},
+		{
+			name:      "build worker",
+			wantCause: "injected compiler failure",
+			inject: func() error {
+				return mvpBuildCoveredWorker("", "", func(_, _ string) ([]byte, error) {
+					return nil, fmt.Errorf("injected compiler failure")
+				})
+			},
+		},
 	}
 	for _, stage := range stages {
-		t.Run(stage, func(t *testing.T) {
-			err := mvpStageError(stage, fmt.Errorf("injected regression"))
-			if !strings.Contains(err.Error(), stage) || !strings.Contains(err.Error(), "injected regression") {
-				t.Fatalf("stage diagnostic = %q, want stage and cause", err)
+		t.Run(stage.name, func(t *testing.T) {
+			err := stage.inject()
+			if err == nil {
+				t.Fatalf("injected %s regression produced no error", stage.name)
+			}
+			if !strings.Contains(err.Error(), stage.name) || !strings.Contains(err.Error(), stage.wantCause) {
+				t.Fatalf("stage diagnostic = %q, want %q and cause %q", err, stage.name, stage.wantCause)
 			}
 		})
 	}
+}
+
+func mvpTriggerHTTP(client *http.Client, url string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"id":"T-53"}`))
+	if err != nil {
+		return nil, mvpStageError("http trigger", fmt.Errorf("build request: %w", err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, mvpStageError("http trigger", fmt.Errorf("POST /tickets: %w", err))
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, mvpStageError("http trigger", fmt.Errorf("read response: %w", err))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, mvpStageError(
+			"http trigger",
+			fmt.Errorf("status = %d body=%s, want 200", resp.StatusCode, responseBody),
+		)
+	}
+	return responseBody, nil
+}
+
+func mvpValidateProviderRequest(path string, body map[string]any, call int, ticketID string) error {
+	if path != "/v1/messages" {
+		return mvpStageError("provider", fmt.Errorf("path = %q, want /v1/messages", path))
+	}
+	switch call {
+	case 1:
+		if tools, ok := body["tools"].([]any); !ok || len(tools) != 1 {
+			return mvpStageError("provider", fmt.Errorf("tools = %#v, want one governed tool", body["tools"]))
+		}
+	case 2:
+		messages, _ := body["messages"].([]any)
+		encoded, _ := json.Marshal(messages)
+		if !strings.Contains(string(encoded), "tool_result") || !strings.Contains(string(encoded), ticketID) {
+			return mvpStageError(
+				"provider",
+				fmt.Errorf("second request does not contain real tool result: %s", encoded),
+			)
+		}
+	default:
+		return mvpStageError("provider", fmt.Errorf("calls = %d, want exactly 2", call))
+	}
+	return nil
+}
+
+func mvpValidateGovernedTool(toolCalls int, order []string, toolCallID, ticketID string) error {
+	if toolCalls != 1 {
+		return mvpStageError("governed tool", fmt.Errorf("calls = %d, want 1", toolCalls))
+	}
+	if len(order) != 2 ||
+		!strings.HasPrefix(order[0], "permission:lookup_ticket:"+toolCallID) ||
+		order[1] != "tool:"+ticketID {
+		return mvpStageError(
+			"governed tool",
+			fmt.Errorf("order = %v, want permission before one tool effect", order),
+		)
+	}
+	return nil
+}
+
+func mvpValidateTypedOutput(responseBody []byte, want mvpGoldenReply) (mvpGoldenReply, error) {
+	var response httpStatusResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return mvpGoldenReply{}, mvpStageError("typed output", fmt.Errorf("decode HTTP response: %w", err))
+	}
+	var output mvpGoldenReply
+	if err := json.Unmarshal([]byte(response.Output), &output); err != nil {
+		return mvpGoldenReply{}, mvpStageError("typed output", fmt.Errorf("decode worker output: %w", err))
+	}
+	if output != want {
+		return mvpGoldenReply{}, mvpStageError("typed output", fmt.Errorf("output = %+v, want %+v", output, want))
+	}
+	return output, nil
+}
+
+func mvpValidateDurableEvents(beforeClose, afterReopen []events.Event, execID string) error {
+	if len(afterReopen) != len(beforeClose) {
+		return mvpStageError(
+			"durable events",
+			fmt.Errorf("after reopen = %d, before close = %d", len(afterReopen), len(beforeClose)),
+		)
+	}
+	required := []events.EventKind{
+		events.EventPermissionDecision,
+		events.EventToolCallStarted,
+		events.EventToolCallCompleted,
+		events.EventSchemaValidationPassed,
+		events.EventPipelineCompleted,
+	}
+	var kinds []events.EventKind
+	for i, event := range afterReopen {
+		kinds = append(kinds, event.Kind)
+		if !reflect.DeepEqual(event, beforeClose[i]) {
+			return mvpStageError(
+				"durable events",
+				fmt.Errorf("event[%d] changed after reopen: before=%+v after=%+v", i, beforeClose[i], event),
+			)
+		}
+		if event.ExecID != execID || event.SessionID == "" {
+			return mvpStageError("durable events", fmt.Errorf("event[%d] identifiers = %+v", i, event))
+		}
+		if i > 0 && event.ID <= afterReopen[i-1].ID {
+			return mvpStageError(
+				"durable events",
+				fmt.Errorf("IDs are not increasing at %d: %d <= %d", i, event.ID, afterReopen[i-1].ID),
+			)
+		}
+	}
+	for _, kind := range required {
+		if !slices.Contains(kinds, kind) {
+			return mvpStageError("durable events", fmt.Errorf("missing %q in %v", kind, kinds))
+		}
+	}
+	return nil
+}
+
+type mvpBuildRunner func(workDir, outputPath string) ([]byte, error)
+
+func mvpBuildCoveredWorker(root, out string, build mvpBuildRunner) error {
+	output, err := build(filepath.Join(root, "examples", "ticket-triage"), out)
+	if err != nil {
+		return mvpStageError("build worker", fmt.Errorf("go build: %w\n%s", err, output))
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		return mvpStageError("build worker", fmt.Errorf("stat binary: %w", err))
+	}
+	if info.Size() == 0 || info.Mode()&0o111 == 0 {
+		return mvpStageError(
+			"build worker",
+			fmt.Errorf("binary size=%d mode=%v, want non-empty executable", info.Size(), info.Mode()),
+		)
+	}
+	return nil
+}
+
+func mvpGoBuild(workDir, outputPath string) ([]byte, error) {
+	cmd := exec.Command("go", "build", "-o", outputPath, ".")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	return cmd.CombinedOutput()
 }
 
 func mvpStageError(stage string, err error) error {
