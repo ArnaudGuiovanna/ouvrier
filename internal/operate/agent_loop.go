@@ -63,7 +63,7 @@ func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn 
 	tools := r.toolSpecs()
 
 	appendAssistant := func(text string) error {
-		entry, err := r.transcript(session).Append(TranscriptEntry{
+		entry, err := r.appendTranscript(session, TranscriptEntry{
 			SessionID: session.ID, Kind: TranscriptAssistant, Role: "assistant", Text: text,
 		})
 		if err != nil {
@@ -99,7 +99,7 @@ func (r *AgentRuntime) runAgentLoop(ctx context.Context, session *Session, turn 
 		})
 		if err != nil {
 			msg := "model error: " + err.Error()
-			entry, _ := r.transcript(session).Append(TranscriptEntry{SessionID: session.ID, Kind: TranscriptError, Role: "assistant", Text: msg})
+			entry, _ := r.appendTranscript(session, TranscriptEntry{SessionID: session.ID, Kind: TranscriptError, Role: "assistant", Text: msg})
 			turn.Entries = append(turn.Entries, entry)
 			emit(StreamEvent{Kind: StreamError, Entry: &entry, Err: err})
 			return finish(msg, err)

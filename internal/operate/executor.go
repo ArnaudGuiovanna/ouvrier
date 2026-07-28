@@ -73,6 +73,9 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	if strings.TrimSpace(call.Tool) == "" {
 		return ToolResult{}, errors.New("operate: governed call requires a tool name")
 	}
+	if err := r.requireSessionWriter(call.Session); err != nil {
+		return ToolResult{}, err
+	}
 	if call.Posture == "" {
 		call.Posture = PostureManual
 	}
@@ -95,7 +98,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	planned := plannedTool{ID: call.ID, Name: call.Tool, Input: call.Input}
 
 	// Persist the tool_call before anything can run.
-	callEntry, err := r.transcript(session).Append(TranscriptEntry{
+	callEntry, err := r.appendTranscript(session, TranscriptEntry{
 		SessionID: session.ID,
 		Kind:      TranscriptToolCall,
 		ToolName:  call.Tool,
@@ -116,7 +119,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		}
 		result := ToolResult{Summary: "skipped " + call.Tool + ": " + reason}
 		denyErr := fmt.Errorf("%s", reason)
-		auditErr := appendToolCall(session.ToolCallsPath, r.Options.Redactor, planned, result, denyErr)
+		auditErr := r.appendToolCall(session, planned, result, denyErr)
 		if auditErr != nil {
 			auditErr = fmt.Errorf("operate: persist tool-call audit: %w", auditErr)
 		}
@@ -124,7 +127,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		if auditErr != nil {
 			output["audit_error"] = auditErr.Error()
 		}
-		resultEntry, aerr := r.transcript(session).Append(TranscriptEntry{
+		resultEntry, aerr := r.appendTranscript(session, TranscriptEntry{
 			SessionID: session.ID,
 			Kind:      TranscriptToolResult,
 			ToolName:  call.Tool,
@@ -149,7 +152,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	}, call.Tool, call.Input)
 
 	// One audit record per governed action, success or failure.
-	auditErr := appendToolCall(session.ToolCallsPath, r.Options.Redactor, planned, result, runErr)
+	auditErr := r.appendToolCall(session, planned, result, runErr)
 	if auditErr != nil {
 		auditErr = fmt.Errorf("operate: persist tool-call audit: %w", auditErr)
 	}
@@ -166,7 +169,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	if auditErr != nil {
 		output["audit_error"] = auditErr.Error()
 	}
-	resultEntry, err := r.transcript(session).Append(TranscriptEntry{
+	resultEntry, err := r.appendTranscript(session, TranscriptEntry{
 		SessionID: session.ID,
 		Kind:      TranscriptToolResult,
 		ToolName:  call.Tool,

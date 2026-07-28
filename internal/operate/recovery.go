@@ -47,7 +47,7 @@ func (r *AgentRuntime) recoverInterruptedCalls(session *Session, entries []Trans
 			continue
 		}
 		message := fmt.Sprintf("tool %s was interrupted; explicit operator action is required to retry", call.tool)
-		entry, err := r.transcript(session).Append(TranscriptEntry{
+		entry, err := r.appendTranscript(session, TranscriptEntry{
 			SessionID: session.ID,
 			Kind:      TranscriptToolResult,
 			ToolName:  call.tool,
@@ -93,9 +93,8 @@ func (r *AgentRuntime) ensureInterruptedAudits(session *Session, entries []Trans
 			return fmt.Errorf("operate: recovered tool result %s has no matching call", id)
 		}
 		summary, _ := entry.Output["summary"].(string)
-		if err := appendToolCall(
-			session.ToolCallsPath,
-			r.Options.Redactor,
+		if err := r.appendToolCall(
+			session,
 			plannedTool{ID: id, Name: call.tool, Input: call.input},
 			ToolResult{Summary: summary},
 			ErrToolInterrupted,

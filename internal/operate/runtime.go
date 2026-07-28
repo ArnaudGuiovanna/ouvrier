@@ -218,7 +218,7 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 		return RuntimeSession{}, err
 	}
 	if repairedTail {
-		entry, err := r.transcript(session).Append(TranscriptEntry{
+		entry, err := r.appendTranscript(session, TranscriptEntry{
 			SessionID: session.ID,
 			Kind:      TranscriptStatus,
 			Text:      "recovery discarded an invalid, unterminated final transcript line after an interrupted write",
@@ -230,7 +230,7 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 		transcript = append(transcript, entry)
 	}
 	if repairedAuditTail {
-		entry, err := r.transcript(session).Append(TranscriptEntry{
+		entry, err := r.appendTranscript(session, TranscriptEntry{
 			SessionID: session.ID,
 			Kind:      TranscriptStatus,
 			Text:      "recovery discarded an invalid, unterminated final tool-call audit line after an interrupted write",
@@ -246,7 +246,7 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 		return RuntimeSession{}, err
 	}
 	if len(transcript) == 0 {
-		entry, err := r.transcript(session).Append(TranscriptEntry{
+		entry, err := r.appendTranscript(session, TranscriptEntry{
 			SessionID: session.ID,
 			Kind:      TranscriptStatus,
 			Text:      r.startMessage(session),
@@ -294,7 +294,7 @@ func (r *AgentRuntime) FollowUp(ctx context.Context, sessionID, text string) (Ru
 // Interrupt records an interrupt request. Long-lived transports can later map
 // this to a process/session cancellation primitive.
 func (r *AgentRuntime) Interrupt(_ context.Context, sessionID, reason string) (RuntimeTurn, error) {
-	session, err := r.Store.Load(sessionID)
+	session, err := r.writableSession(sessionID)
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
@@ -302,7 +302,7 @@ func (r *AgentRuntime) Interrupt(_ context.Context, sessionID, reason string) (R
 	if msg == "" {
 		msg = "operator interrupt requested"
 	}
-	entry, err := r.transcript(session).Append(TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "interrupt"}})
+	entry, err := r.appendTranscript(session, TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "interrupt"}})
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
@@ -311,12 +311,12 @@ func (r *AgentRuntime) Interrupt(_ context.Context, sessionID, reason string) (R
 
 // Compact records a compaction checkpoint request.
 func (r *AgentRuntime) Compact(_ context.Context, sessionID string) (RuntimeTurn, error) {
-	session, err := r.Store.Load(sessionID)
+	session, err := r.writableSession(sessionID)
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
 	msg := "session compaction checkpoint recorded"
-	entry, err := r.transcript(session).Append(TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "compact"}})
+	entry, err := r.appendTranscript(session, TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "compact"}})
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
@@ -339,7 +339,10 @@ func (r *AgentRuntime) Fork(ctx context.Context, sessionID string) (RuntimeSessi
 	if err != nil {
 		return RuntimeSession{}, err
 	}
-	entry, err := r.transcript(child).Append(TranscriptEntry{
+	if err := r.lockSession(child); err != nil {
+		return RuntimeSession{}, err
+	}
+	entry, err := r.appendTranscript(child, TranscriptEntry{
 		SessionID: child.ID,
 		Kind:      TranscriptStatus,
 		Text:      "forked from session " + parent.ID,
@@ -391,7 +394,7 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	if text == "" {
 		return RuntimeTurn{}, fmt.Errorf("operate: prompt is empty")
 	}
-	session, err := r.Store.Load(sessionID)
+	session, err := r.writableSession(sessionID)
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
@@ -403,7 +406,7 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	turn.SessionID = session.ID
 	appendEntry := func(entry TranscriptEntry) (TranscriptEntry, error) {
 		entry.SessionID = session.ID
-		saved, err := r.transcript(session).Append(entry)
+		saved, err := r.appendTranscript(session, entry)
 		if err != nil {
 			return TranscriptEntry{}, err
 		}
@@ -551,6 +554,13 @@ func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *Approv
 		req.Details["worker"] = ws.Name
 	}
 	return req
+}
+
+func (r *AgentRuntime) appendTranscript(session *Session, entry TranscriptEntry) (TranscriptEntry, error) {
+	if err := r.requireSessionWriter(session); err != nil {
+		return TranscriptEntry{}, err
+	}
+	return r.transcript(session).Append(entry)
 }
 
 func (r *AgentRuntime) transcript(session *Session) *TranscriptStore {

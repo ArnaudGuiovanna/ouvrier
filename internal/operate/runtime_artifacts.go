@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+func (r *AgentRuntime) appendToolCall(session *Session, call plannedTool, result ToolResult, runErr error) error {
+	if err := r.requireSessionWriter(session); err != nil {
+		return err
+	}
+	return appendToolCall(session.ToolCallsPath, r.Options.Redactor, call, result, runErr)
+}
+
 func appendToolCall(path string, redactor Redactor, call plannedTool, result ToolResult, runErr error) error {
 	if path == "" {
 		return nil
