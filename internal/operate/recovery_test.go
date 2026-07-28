@@ -202,6 +202,81 @@ func TestResumeDoesNotAlterCompletedToolCall(t *testing.T) {
 	}
 }
 
+func TestResumeRepairsMissingInterruptedAudit(t *testing.T) {
+	dir := t.TempDir()
+	runtime, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := runtime.transcript(started.Session)
+	for _, entry := range []TranscriptEntry{
+		{
+			SessionID: started.Session.ID,
+			Kind:      TranscriptToolCall,
+			ToolName:  "interrupted",
+			Input:     map[string]any{"value": "input"},
+			Metadata:  map[string]any{"tool_call_id": "repair-call"},
+		},
+		{
+			SessionID: started.Session.ID,
+			Kind:      TranscriptToolResult,
+			ToolName:  "interrupted",
+			Output:    map[string]any{"summary": "interrupted", "interrupted": true},
+			Metadata:  map[string]any{"tool_call_id": "repair-call", "recovered": true},
+		},
+	} {
+		if _, err := store.Append(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resumer.Close() })
+	if _, err := resumer.Resume(context.Background(), started.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := readToolCallAuditIDs(started.Session.ToolCallsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ids["repair-call"] || len(ids) != 1 {
+		t.Fatalf("audit IDs = %v, want only repair-call", ids)
+	}
+}
+
+func TestReadToolCallAuditIDsAcceptsLargeLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool-calls.jsonl")
+	record := map[string]any{
+		"tool_call_id": "large-call",
+		"input":        strings.Repeat("x", 256*1024),
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := readToolCallAuditIDs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ids["large-call"] {
+		t.Fatalf("audit IDs = %v, want large-call", ids)
+	}
+}
+
 func TestSessionRejectsConcurrentWriter(t *testing.T) {
 	dir := t.TempDir()
 	first, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})

@@ -118,6 +118,7 @@ func readToolCallAuditIDs(path string) (map[string]bool, error) {
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	line := 0
 	for scanner.Scan() {
 		line++
