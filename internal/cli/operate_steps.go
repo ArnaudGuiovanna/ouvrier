@@ -39,10 +39,11 @@ func (app *App) runOperateAudit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "audit worker", "manual", "")
+	sessionRuntime, session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "audit worker", "manual", "")
 	if err != nil {
 		return err
 	}
+	defer sessionRuntime.Close()
 	report, err := h.RunAudit(ctx, session, operate.CandidateDir(session, ws))
 	if err != nil {
 		return err
@@ -70,10 +71,11 @@ func (app *App) runOperateBuild(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "build worker", "manual", "")
+	sessionRuntime, session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "build worker", "manual", "")
 	if err != nil {
 		return err
 	}
+	defer sessionRuntime.Close()
 	auditPassed := operate.LatestAuditPassed(session.AuditPath)
 	if !auditPassed && !cfg.AllowFail {
 		return fmt.Errorf("operate: build requires a passing audit; run `ouvrier operate audit --session %s` or pass --allow-failed", session.ID)
@@ -99,10 +101,11 @@ func (app *App) runOperateTransfer(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "transfer worker", "manual", "")
+	sessionRuntime, session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "transfer worker", "manual", "")
 	if err != nil {
 		return err
 	}
+	defer sessionRuntime.Close()
 	auditPassed := operate.LatestAuditPassed(session.AuditPath)
 	reviewPassed := operate.ReviewPassed(session.ReviewPath)
 	report, err := h.Transfer(ctx, session, operate.TransferRequest{

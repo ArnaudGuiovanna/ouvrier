@@ -139,9 +139,10 @@ func NewAgentRuntime(opts RuntimeOptions) (*AgentRuntime, error) {
 	}, nil
 }
 
-// Start creates or resumes a session. Unlike Harness.Start, this works from a
-// parent factory directory too, so the first prompt can create a worker.
-func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (RuntimeSession, error) {
+// OpenSessionWriter creates or loads a session, acquires its mono-writer lock,
+// and repairs interrupted journal tails before returning it to a caller that
+// will mutate session state. Close releases the retained lock.
+func (r *AgentRuntime) OpenSessionWriter(ctx context.Context, req RuntimeStartRequest) (_ RuntimeSession, retErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -168,6 +169,7 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 	}
 
 	var session *Session
+	created := false
 	var err error
 	if strings.TrimSpace(req.SessionID) != "" {
 		session, err = r.Store.Load(req.SessionID)
@@ -183,14 +185,23 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 		if err != nil {
 			return RuntimeSession{}, err
 		}
-		if strings.TrimSpace(req.InitialPrompt) != "" {
-			if err := writeAtomic(session.GoalPath, []byte(strings.TrimSpace(req.InitialPrompt)+"\n"), 0o600); err != nil {
-				return RuntimeSession{}, err
-			}
-		}
+		created = true
 	}
-	if err := r.lockSession(session); err != nil {
+	acquired, err := r.lockSession(session)
+	if err != nil {
 		return RuntimeSession{}, err
+	}
+	if acquired {
+		defer func() {
+			if retErr != nil {
+				retErr = errors.Join(retErr, r.unlockSession(session.ID))
+			}
+		}()
+	}
+	if created && strings.TrimSpace(req.InitialPrompt) != "" {
+		if err := writeAtomic(session.GoalPath, []byte(strings.TrimSpace(req.InitialPrompt)+"\n"), 0o600); err != nil {
+			return RuntimeSession{}, err
+		}
 	}
 
 	ws, _ := DetectWorkspace(session.Dir)
@@ -245,18 +256,32 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 	if err != nil {
 		return RuntimeSession{}, err
 	}
-	if len(transcript) == 0 {
-		entry, err := r.appendTranscript(session, TranscriptEntry{
-			SessionID: session.ID,
-			Kind:      TranscriptStatus,
-			Text:      r.startMessage(session),
-		})
-		if err != nil {
-			return RuntimeSession{}, err
-		}
-		transcript = append(transcript, entry)
-	}
 	return RuntimeSession{Session: session, Workspace: r.workspace, Transcript: transcript}, ctx.Err()
+}
+
+// Start creates or resumes a session. Unlike Harness.Start, this works from a
+// parent factory directory too, so the first prompt can create a worker.
+func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (RuntimeSession, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	started, err := r.OpenSessionWriter(ctx, req)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	if len(started.Transcript) != 0 {
+		return started, ctx.Err()
+	}
+	entry, err := r.appendTranscript(started.Session, TranscriptEntry{
+		SessionID: started.Session.ID,
+		Kind:      TranscriptStatus,
+		Text:      r.startMessage(started.Session),
+	})
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	started.Transcript = append(started.Transcript, entry)
+	return started, ctx.Err()
 }
 
 // Close releases session writer locks held by this runtime.
@@ -339,7 +364,7 @@ func (r *AgentRuntime) Fork(ctx context.Context, sessionID string) (RuntimeSessi
 	if err != nil {
 		return RuntimeSession{}, err
 	}
-	if err := r.lockSession(child); err != nil {
+	if _, err := r.lockSession(child); err != nil {
 		return RuntimeSession{}, err
 	}
 	entry, err := r.appendTranscript(child, TranscriptEntry{

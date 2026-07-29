@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -123,6 +124,7 @@ func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, dri
 	if err != nil {
 		return err
 	}
+	defer runtime.Close()
 	if cfg.Mode == "rpc" {
 		return app.runOperateRPC(ctx, runtime, cfg)
 	}
@@ -292,10 +294,11 @@ func (app *App) runOperateReviewWorker(ctx context.Context, args []string) error
 	if err != nil {
 		return err
 	}
-	session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "review worker: "+cfg.Subject, driverID, codexMode)
+	sessionRuntime, session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "review worker: "+cfg.Subject, driverID, codexMode)
 	if err != nil {
 		return err
 	}
+	defer sessionRuntime.Close()
 	report, err := h.ReviewWorker(ctx, session, ws, operate.ReviewScope(cfg.Scope), cfg.Subject)
 	if err != nil {
 		return err
@@ -333,10 +336,11 @@ func (app *App) runOperatePatch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	session, ws, err := startOrLoadOperateSession(ctx, h, cfg, cfg.Goal, driverID, codexMode)
+	sessionRuntime, session, ws, err := startOrLoadOperateSession(ctx, h, cfg, cfg.Goal, driverID, codexMode)
 	if err != nil {
 		return err
 	}
+	defer sessionRuntime.Close()
 	report, err := h.PatchWorker(ctx, session, ws, cfg.Goal)
 	if err != nil {
 		return err
@@ -360,10 +364,11 @@ func (app *App) runOperateFixWorker(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "fix worker: "+cfg.Subject, driverID, codexMode)
+	sessionRuntime, session, ws, err := startOrLoadOperateSession(ctx, h, cfg, "fix worker: "+cfg.Subject, driverID, codexMode)
 	if err != nil {
 		return err
 	}
+	defer sessionRuntime.Close()
 	report, err := h.FixWorker(ctx, session, ws, cfg.Subject)
 	if err != nil {
 		return err
@@ -372,19 +377,41 @@ func (app *App) runOperateFixWorker(ctx context.Context, args []string) error {
 	return nil
 }
 
-func startOrLoadOperateSession(ctx context.Context, h *operate.Harness, cfg operateConfig, goal, driverID, codexMode string) (*operate.Session, operate.Workspace, error) {
+func startOrLoadOperateSession(ctx context.Context, h *operate.Harness, cfg operateConfig, goal, driverID, codexMode string) (*operate.AgentRuntime, *operate.Session, operate.Workspace, error) {
 	if strings.TrimSpace(cfg.Session) == "" {
-		return h.Start(ctx, cfg.Dir, goal, driverID, codexMode)
+		if _, err := operate.DetectWorkspace(cfg.Dir); err != nil {
+			return nil, nil, operate.Workspace{}, err
+		}
 	}
-	session, err := h.Store.Load(cfg.Session)
+	sessionRuntime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
+		Dir:      cfg.Dir,
+		Driver:   h.Driver,
+		Store:    h.Store,
+		Harness:  h,
+		Redactor: h.Redactor,
+	})
 	if err != nil {
-		return nil, operate.Workspace{}, err
+		return nil, nil, operate.Workspace{}, err
 	}
-	ws, err := operate.DetectWorkspace(session.Dir)
+	started, err := sessionRuntime.OpenSessionWriter(ctx, operate.RuntimeStartRequest{
+		Dir:           cfg.Dir,
+		SessionID:     cfg.Session,
+		InitialPrompt: goal,
+		DriverID:      driverID,
+		CodexMode:     codexMode,
+	})
 	if err != nil {
-		return nil, operate.Workspace{}, err
+		_ = sessionRuntime.Close()
+		return nil, nil, operate.Workspace{}, err
 	}
-	return session, ws, ctx.Err()
+	ws, err := operate.DetectWorkspace(started.Session.Dir)
+	if err != nil {
+		return nil, nil, operate.Workspace{}, errors.Join(err, sessionRuntime.Close())
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, operate.Workspace{}, errors.Join(err, sessionRuntime.Close())
+	}
+	return sessionRuntime, started.Session, ws, nil
 }
 
 func printPatchReport(w io.Writer, verb string, ws operate.Workspace, session *operate.Session, report operate.PatchReport) {

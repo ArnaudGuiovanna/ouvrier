@@ -14,31 +14,50 @@ var (
 	ErrSessionWriterActive  = errors.New("operate: session already has an active writer")
 )
 
-func (r *AgentRuntime) lockSession(session *Session) error {
+func (r *AgentRuntime) lockSession(session *Session) (bool, error) {
 	if session == nil {
-		return errors.New("operate: nil session")
+		return false, errors.New("operate: nil session")
 	}
 	if r == nil || r.Store == nil {
-		return errors.New("operate: nil runtime")
+		return false, errors.New("operate: nil runtime")
 	}
 	r.lockMu.Lock()
 	defer r.lockMu.Unlock()
 	if _, ok := r.locks[session.ID]; ok {
-		return nil
+		return false, nil
 	}
 	path := r.sessionWriterLockPath(session.ID)
 	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("operate: open session writer lock: %w", err)
+		return false, fmt.Errorf("operate: open session writer lock: %w", err)
 	}
 	if err := acquireSessionLock(lock); err != nil {
 		_ = lock.Close()
 		if errors.Is(err, errSessionLockBusy) {
-			return fmt.Errorf("%w: %s", ErrSessionWriterActive, session.ID)
+			return false, fmt.Errorf("%w: %s", ErrSessionWriterActive, session.ID)
 		}
-		return fmt.Errorf("operate: acquire session writer lock: %w", err)
+		return false, fmt.Errorf("operate: acquire session writer lock: %w", err)
 	}
 	r.locks[session.ID] = lock
+	return true, nil
+}
+
+func (r *AgentRuntime) unlockSession(sessionID string) error {
+	if r == nil {
+		return nil
+	}
+	r.lockMu.Lock()
+	lock, ok := r.locks[sessionID]
+	if ok {
+		delete(r.locks, sessionID)
+	}
+	r.lockMu.Unlock()
+	if !ok {
+		return nil
+	}
+	if err := releaseSessionLock(lock); err != nil {
+		return fmt.Errorf("operate: release session %s lock: %w", sessionID, err)
+	}
 	return nil
 }
 
