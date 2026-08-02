@@ -39,6 +39,11 @@ jobs:
           go-version: "1.25.x"
           check-latest: true
 
+      - name: Download and verify audit module dependencies
+        run: |
+          CGO_ENABLED=0 go mod download
+          go mod verify
+
       - name: Install audit sandbox dependency
         run: |
           sudo apt-get update
@@ -151,6 +156,11 @@ jobs:
         with:
           go-version: "1.25.x"
           check-latest: true
+
+      - name: Download and verify audit module dependencies
+        run: |
+          CGO_ENABLED=0 go mod download
+          go mod verify
 
       - name: Install audit sandbox dependency
         run: |
