@@ -317,7 +317,7 @@ func TestNothingTokenShapedTouchesDiskOrArgvOrOutput(t *testing.T) {
 	fr := &fakeRunner{handler: handler}
 	h := newHarness(fr)
 	remote := &fakeRemote{envFor: func(int) string { return dotenvWith(token) }}
-	sockDir := filepath.Join(t.TempDir(), "tun")
+	sockDir := shortTestSocketDir(t)
 	m := newTestManager(t, h, Options{Remote: remote, SocketDir: sockDir})
 
 	rt, _ := m.Transport("w1")

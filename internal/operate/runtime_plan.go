@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func (r *AgentRuntime) planPrompt(text string) promptPlan {
+func (r *AgentRuntime) planPrompt(text string, workspace *Workspace) promptPlan {
 	if strings.HasPrefix(strings.TrimSpace(text), "/") {
 		return r.planSlash(text)
 	}
@@ -17,10 +17,10 @@ func (r *AgentRuntime) planPrompt(text string) promptPlan {
 		return promptPlan{Tools: []plannedTool{{Name: "login_codex"}}}
 	case looksLikeCreateWorker(lower):
 		return r.planCreateWorker(text)
+	case strings.Contains(lower, "fix") || strings.Contains(lower, "repair") || strings.Contains(lower, "corrige"):
+		return mutationValidationPlan(plannedTool{Name: "fix_worker", Input: map[string]any{"subject": text}})
 	case strings.Contains(lower, "review"):
 		return promptPlan{Tools: []plannedTool{{Name: "read_ouvrier_api"}, {Name: "review_worker", Input: map[string]any{"subject": text}}}}
-	case strings.Contains(lower, "fix") || strings.Contains(lower, "repair") || strings.Contains(lower, "corrige"):
-		return promptPlan{Tools: []plannedTool{{Name: "fix_worker", Input: map[string]any{"subject": text}}}}
 	case strings.Contains(lower, "audit"):
 		return promptPlan{Tools: []plannedTool{{Name: "audit_worker"}}}
 	case strings.Contains(lower, "diff"):
@@ -31,10 +31,23 @@ func (r *AgentRuntime) planPrompt(text string) promptPlan {
 	case strings.Contains(lower, "build") || strings.Contains(lower, "binary") || strings.Contains(lower, "binaire"):
 		return promptPlan{Tools: []plannedTool{{Name: "build_worker", Input: map[string]any{"target": inferTarget(text)}}}}
 	default:
-		if r.workspace == nil {
+		if workspace == nil {
 			return promptPlan{Assistant: "No worker is selected yet. Describe a worker to create, for example: create a worker that receives POST /tickets, or use /new worker --name ticket-triage --trigger \"POST /tickets\"."}
 		}
-		return promptPlan{Tools: []plannedTool{{Name: "read_ouvrier_api"}, {Name: "patch_worker", Input: map[string]any{"goal": text}}}}
+		if !mutationIntent(text) {
+			return promptPlan{
+				Assistant: "I will inspect the selected worker without changing it. Use an explicit create, add, edit, fix, or remove request to authorize a mutation plan.",
+				Tools: []plannedTool{
+					{Name: "read_ouvrier_api"},
+					{Name: "list_worker_files", Input: map[string]any{"limit": 100}},
+					{Name: "read_worker_file", Input: map[string]any{"path": "main.go"}},
+				},
+			}
+		}
+		return mutationValidationPlan(
+			plannedTool{Name: "read_ouvrier_api"},
+			plannedTool{Name: "patch_worker", Input: map[string]any{"goal": text}},
+		)
 	}
 }
 
@@ -75,7 +88,7 @@ func (r *AgentRuntime) planSlash(text string) promptPlan {
 	case "review":
 		return promptPlan{Tools: []plannedTool{{Name: "read_ouvrier_api"}, {Name: "review_worker", Input: map[string]any{"subject": strings.Join(rest, " ")}}}}
 	case "fix":
-		return promptPlan{Tools: []plannedTool{{Name: "fix_worker", Input: map[string]any{"subject": strings.Join(rest, " ")}}}}
+		return mutationValidationPlan(plannedTool{Name: "fix_worker", Input: map[string]any{"subject": strings.Join(rest, " ")}})
 	case "audit":
 		return promptPlan{Tools: []plannedTool{{Name: "audit_worker"}}}
 	case "build":
@@ -138,16 +151,22 @@ func (r *AgentRuntime) planWorkerSpec(spec workerSpec, goal string) promptPlan {
 	if strings.Contains(lower, "review") || strings.Contains(lower, "audit") || strings.Contains(lower, "build") || strings.Contains(lower, "deploy") || strings.Contains(lower, "transfer") {
 		tools = append(tools, plannedTool{Name: "review_worker", Input: map[string]any{"subject": "post-generation review"}})
 	}
-	if strings.Contains(lower, "audit") || strings.Contains(lower, "build") || strings.Contains(lower, "deploy") || strings.Contains(lower, "transfer") {
-		tools = append(tools, plannedTool{Name: "audit_worker"})
-	}
-	if strings.Contains(lower, "build") || strings.Contains(lower, "deploy") || strings.Contains(lower, "transfer") {
-		tools = append(tools, plannedTool{Name: "build_worker", Input: map[string]any{"target": inferTarget(goal)}})
-	}
+	// Scaffolding and agent editing are mutations. A deterministic fallback
+	// plan must satisfy the same completion contract as the structured model
+	// loop: current audit evidence followed by a source-bound local artifact.
+	tools = append(tools,
+		plannedTool{Name: "audit_worker"},
+		plannedTool{Name: "build_worker", Input: map[string]any{"target": inferTarget(goal)}},
+	)
 	if strings.Contains(lower, "deploy") || strings.Contains(lower, "transfer") {
 		tools = append(tools, plannedTool{Name: "transfer_worker", Input: map[string]any{"env": inferDeployEnv(goal)}})
 	}
 	return promptPlan{Assistant: fmt.Sprintf("Plan: scaffold %s (%s), load Ouvrier API context, then let the configured agent specialize the worker.", spec.Name, spec.Trigger), Tools: tools}
+}
+
+func mutationValidationPlan(tools ...plannedTool) promptPlan {
+	tools = append(tools, plannedTool{Name: "audit_worker"}, plannedTool{Name: "build_worker"})
+	return promptPlan{Tools: tools}
 }
 
 type workerSpec struct {
@@ -428,6 +447,7 @@ func operateSlashHelp() string {
 		"/read main.go",
 		"/docs Tool",
 		"/accept-risk rationale",
+		"/compact",
 		"/export",
 		"/workers",
 		"/tools",

@@ -171,10 +171,16 @@ type defMsg struct {
 
 // RunIDE drives the IDE TUI until the user exits.
 func RunIDE(ctx context.Context, in io.Reader, out io.Writer, opts IDEOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	program := tea.NewProgram(
-		newIDEModel(ctx, opts),
+		newIDEModel(runCtx, opts),
 		tea.WithInput(in),
 		tea.WithOutput(out),
+		tea.WithContext(runCtx),
 	)
 	_, err := program.Run()
 	return err
@@ -310,6 +316,19 @@ func (m *ideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenDiag(m.client)
 
 	case auditMsg:
+		if msg.err != nil {
+			m.auditPassed = false
+			m.status = "audit failed: " + msg.err.Error()
+			m.statusKind = "fail"
+			m.auditProbs = []Problem{{
+				Source:   "audit",
+				Severity: 1,
+				Message:  msg.err.Error(),
+				Origin:   "audit",
+			}}
+			m.rebuildProblems()
+			return m, nil
+		}
 		// Convert audit gate results to Problem records.
 		m.auditProbs = nil
 		if msg.report.Passed {
@@ -795,18 +814,6 @@ func (m *ideModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.editor.Focus()
 		}
 		m.editor.Blur()
-		return m, nil
-
-	case "]d":
-		if m.problemSel < len(m.problems)-1 {
-			m.problemSel++
-		}
-		return m, nil
-
-	case "[d":
-		if m.problemSel > 0 {
-			m.problemSel--
-		}
 		return m, nil
 
 	case "r":

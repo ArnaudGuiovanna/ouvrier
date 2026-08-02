@@ -53,19 +53,22 @@ func NewToolRegistry() *ToolRegistry {
 	registry.Register(Tool{Name: "search_ouvrier_docs", Description: "Search the shipped Ouvrier docs and API reference.", Governance: GovReadOnly, Run: toolSearchDocs})
 	registry.Register(Tool{Name: "read_ouvrier_api", Description: "Read a compact Ouvrier API primitive reference.", Governance: GovReadOnly, Run: toolReadAPI})
 	registry.Register(Tool{Name: "read_worker_file", Description: "Read a project file from the selected worker.", Governance: GovReadOnly, Run: toolReadWorkerFile})
+	registry.Register(Tool{Name: "list_worker_files", Description: "List bounded, paginated metadata for safe files in the selected worker.", Governance: GovReadOnly, Run: toolListWorkerFiles})
+	registry.Register(Tool{Name: "search_worker_files", Description: "Search safe UTF-8 worker files with a bounded, paginated literal query.", Governance: GovReadOnly, Run: toolSearchWorkerFiles})
 	registry.Register(Tool{Name: "scaffold_worker", Description: "Create a new readable Go worker using Ouvrier's scaffold engine.", Governance: GovSideEffecting, Run: toolScaffoldWorker})
-	registry.Register(Tool{Name: "patch_worker", Description: "Ask the configured coding agent to edit the selected worker.", Governance: GovSideEffecting, Run: toolPatchWorker})
-	registry.Register(Tool{Name: "review_worker", Description: "Review worker code in read-only mode and persist review.json.", Governance: GovReadOnly, Run: toolReviewWorker})
-	registry.Register(Tool{Name: "fix_worker", Description: "Ask the configured coding agent to repair review/audit findings.", Governance: GovSideEffecting, Run: toolFixWorker})
-	registry.Register(Tool{Name: "audit_worker", Description: "Run deterministic audit gates and persist audit.json.", Governance: GovReadOnly, Run: toolAuditWorker})
+	registry.Register(Tool{Name: "patch_worker", Description: "Ask the configured coding agent to edit the selected worker (explicit operator action).", Governance: GovSideEffecting, OperatorOnly: true, Run: toolPatchWorker})
+	registry.Register(Tool{Name: "review_worker", Description: "Run the configured external review driver and persist review.json.", Governance: GovSideEffecting, Run: toolReviewWorker})
+	registry.Register(Tool{Name: "fix_worker", Description: "Ask the configured coding agent to repair findings (explicit operator action).", Governance: GovSideEffecting, OperatorOnly: true, Run: toolFixWorker})
+	registry.Register(Tool{Name: "audit_worker", Description: "Execute worker tests/vet/build audit gates and persist audit.json.", Governance: GovSideEffecting, Run: toolAuditWorker})
 	registry.Register(Tool{Name: "diff_worker", Description: "Show the current candidate diff.", Governance: GovReadOnly, Run: toolDiffWorker})
 	registry.Register(Tool{Name: "build_worker", Description: "Compile the worker binary through Ouvrier's build engine.", Governance: GovSideEffecting, Run: toolBuildWorker})
 	registry.Register(Tool{Name: "transfer_worker", Description: "Transfer/deploy the worker through Ouvrier's deploy engine.", Governance: GovRequiresApproval, Run: toolTransferWorker})
-	registry.Register(Tool{Name: "accept_risk", Description: "Record an explicit accepted-risk rationale for gated transfer.", Governance: GovSideEffecting, Run: toolAcceptRisk})
+	registry.Register(Tool{Name: "accept_risk", Description: "Record an explicit operator-approved risk rationale for gated transfer.", Governance: GovRequiresApproval, OperatorOnly: true, Run: toolAcceptRisk})
 	registry.Register(Tool{Name: "export_session", Description: "Export the transcript to Markdown.", Governance: GovReadOnly, Run: toolExportSession})
 	registry.Register(Tool{Name: "login_codex", Description: "Probe/delegate Codex authentication without storing Codex tokens.", Governance: GovSideEffecting, Run: toolLoginCodex})
-	registry.Register(Tool{Name: "write_worker_file", Description: "Write one file inside the selected worker (operator save).", Governance: GovSideEffecting, OperatorOnly: true, Run: toolWriteWorkerFile})
-	registry.Register(Tool{Name: "run_shell", Description: "Run one operator shell command in the worker directory.", Governance: GovSideEffecting, OperatorOnly: true, Run: toolRunShell})
+	registry.Register(Tool{Name: "write_worker_file", Description: "Write one bounded UTF-8 source file inside the selected worker through Ouvrier governance.", Governance: GovSideEffecting, Run: toolWriteWorkerFile})
+	registry.Register(Tool{Name: "remove_worker_file", Description: "Remove one worker file or internal symlink with source-fingerprint evidence.", Governance: GovSideEffecting, Run: toolRemoveWorkerFile})
+	registry.Register(Tool{Name: "run_shell", Description: "Run one explicitly approved operator command in the isolated worker sandbox.", Governance: GovRequiresApproval, OperatorOnly: true, Run: toolRunShell})
 	return registry
 }
 
@@ -188,19 +191,9 @@ func toolReadWorkerFile(_ context.Context, env ToolEnv, input map[string]any) (T
 	if rel == "" || rel == "." {
 		rel = "main.go"
 	}
-	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") || rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
-		return ToolResult{}, fmt.Errorf("operate: unsafe worker file path %q", rel)
-	}
-	path := filepath.Join(ws.Dir, rel)
-	data, err := os.ReadFile(path)
+	text, truncated, err := readWorkerFilePrefix(ws, rel, maxModelWorkerReadBytes)
 	if err != nil {
 		return ToolResult{}, err
-	}
-	text := string(data)
-	truncated := false
-	if len(text) > 64*1024 {
-		text = text[:64*1024]
-		truncated = true
 	}
 	return ToolResult{Summary: "read " + rel, Data: map[string]any{"path": rel, "text": text, "truncated": truncated}}, nil
 }
@@ -255,14 +248,6 @@ func stringValue(values map[string]any, key string) string {
 	default:
 		return ""
 	}
-}
-
-func boolValue(values map[string]any, key string) bool {
-	if values == nil {
-		return false
-	}
-	value, _ := values[key].(bool)
-	return value
 }
 
 func detectOperateCandidates(dir string) []Workspace {

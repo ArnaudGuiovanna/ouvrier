@@ -405,6 +405,176 @@ func TestExecutorSkipsDuplicateIdempotentToolCall(t *testing.T) {
 	}
 }
 
+func TestExecutorNamespacesIdempotencyAcrossPipeDefinitions(t *testing.T) {
+	store := state.NewMemoryStore()
+	called := 0
+	executor := NewExecutor()
+	if err := executor.Register("publish", func(_ context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		called++
+		return args.Ticket.ID, nil
+	}, WithMetadata(Metadata{Effect: policy.EffectIdempotent, IdempotencyKey: "ticket.id"})); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_1", Name: "publish", Arguments: []byte(`{"ticket":{"id":"T-1"}}`)}
+
+	for _, execution := range []struct {
+		execID    string
+		namespace string
+	}{
+		{execID: "exec_pipe_a", namespace: "pipe-definition-a"},
+		{execID: "exec_pipe_b", namespace: "pipe-definition-b"},
+	} {
+		ctx := ContextWithIdempotencyStoreNamespace(context.Background(), store, execution.execID, execution.namespace)
+		result, err := executor.Execute(ctx, call)
+		if err != nil || result.IsError {
+			t.Fatalf("Execute(%s) result=%s err=%v, want independent success", execution.namespace, result.Content, err)
+		}
+	}
+	if called != 2 {
+		t.Fatalf("called = %d, want one call per Pipe definition", called)
+	}
+
+	duplicateCtx := ContextWithIdempotencyStoreNamespace(context.Background(), store, "exec_pipe_a_duplicate", "pipe-definition-a")
+	duplicate, err := executor.Execute(duplicateCtx, call)
+	if err != nil {
+		t.Fatalf("duplicate Execute: %v", err)
+	}
+	if !duplicate.IsError || called != 2 {
+		t.Fatalf("same-definition duplicate = %+v called=%d, want blocked", duplicate, called)
+	}
+}
+
+func TestExecutorRetriesIdempotentToolAfterDefiniteFailure(t *testing.T) {
+	store := state.NewMemoryStore()
+	firstCtx := ContextWithIdempotencyStore(context.Background(), store, "exec_1")
+	secondCtx := ContextWithIdempotencyStore(context.Background(), store, "exec_2")
+	calls := 0
+	executor := NewExecutor()
+	if err := executor.Register("publish", func(_ context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("publish rejected")
+		}
+		return args.Ticket.ID, nil
+	}, WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_1", Name: "publish", Arguments: []byte(`{"ticket":{"id":"T-1"}}`)}
+
+	first, err := executor.Execute(firstCtx, call)
+	if err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if !first.IsError {
+		t.Fatalf("first result = %+v, want definite tool failure", first)
+	}
+	second, err := executor.Execute(secondCtx, call)
+	if err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+	if second.IsError {
+		t.Fatalf("second result = %+v, want failed reservation retried", second)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want failed attempt plus retry", calls)
+	}
+	third, err := executor.Execute(secondCtx, call)
+	if err != nil || third.IsError {
+		t.Fatalf("third duplicate result=%+v err=%v, want successful dedupe", third, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d after duplicate, want 2", calls)
+	}
+}
+
+func TestExecutorRetriesIdempotentToolAfterPanic(t *testing.T) {
+	store := state.NewMemoryStore()
+	firstCtx := ContextWithIdempotencyStore(context.Background(), store, "exec_1")
+	secondCtx := ContextWithIdempotencyStore(context.Background(), store, "exec_2")
+	calls := 0
+	executor := NewExecutor()
+	if err := executor.Register("publish", func(_ context.Context, args struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		calls++
+		if calls == 1 {
+			panic("publisher crashed")
+		}
+		return args.Ticket.ID, nil
+	}, WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+	})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_1", Name: "publish", Arguments: []byte(`{"ticket":{"id":"T-1"}}`)}
+
+	first, err := executor.Execute(firstCtx, call)
+	if err != nil || !first.IsError {
+		t.Fatalf("first result=%+v err=%v, want definite panic failure", first, err)
+	}
+	second, err := executor.Execute(secondCtx, call)
+	if err != nil || second.IsError {
+		t.Fatalf("second result=%+v err=%v, want retry success", second, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want panic plus retry", calls)
+	}
+}
+
+func TestExecutorOnlyReentersPendingIdempotencyDuringDurableReplay(t *testing.T) {
+	store := state.NewMemoryStore()
+	args := json.RawMessage(`{"ticket":{"id":"T-1"}}`)
+	key, err := idempotencyReservationKey("publish", "ticket.id", args)
+	if err != nil {
+		t.Fatalf("idempotencyReservationKey returned error: %v", err)
+	}
+	if _, reserved, err := store.ReserveIdempotency(context.Background(), key, "exec_1"); err != nil || !reserved {
+		t.Fatalf("pre-reserve pending key reserved=%v err=%v", reserved, err)
+	}
+	calls := 0
+	executor := NewExecutor()
+	if err := executor.Register("publish", func(_ context.Context, input struct {
+		Ticket struct {
+			ID string `json:"id"`
+		} `json:"ticket"`
+	}) (string, error) {
+		calls++
+		return input.Ticket.ID, nil
+	}, WithMetadata(Metadata{Effect: policy.EffectIdempotent, IdempotencyKey: "ticket.id"})); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_1", Name: "publish", Arguments: args}
+	ctx := ContextWithIdempotencyStore(context.Background(), store, "exec_1")
+
+	blocked, err := executor.Execute(ctx, call)
+	if err != nil || !blocked.IsError || calls != 0 {
+		t.Fatalf("ordinary pending call result=%+v err=%v calls=%d, want blocked", blocked, err, calls)
+	}
+	replayCtx := ContextWithIdempotencyReplay(ctx)
+	replayed, err := executor.Execute(replayCtx, call)
+	if err != nil || replayed.IsError || calls != 1 {
+		t.Fatalf("durable replay result=%+v err=%v calls=%d, want one execution", replayed, err, calls)
+	}
+	record, ok, err := store.Idempotency(context.Background(), key)
+	if err != nil || !ok || record.Outcome != state.IdempotencySucceeded {
+		t.Fatalf("record=%+v ok=%v err=%v, want succeeded", record, ok, err)
+	}
+}
+
 func TestExecutorRequiresStateStoreForIdempotentToolCall(t *testing.T) {
 	called := false
 	executor := NewExecutor()

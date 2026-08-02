@@ -158,6 +158,16 @@ var postgresMigrations = []postgresMigration{
 			`ALTER TABLE ouvrier_approvals ADD COLUMN args_hash TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		// Outcome-aware idempotency. Existing rows predate outcome tracking,
+		// so preserve their at-most-once behavior by treating them as succeeded.
+		// ReserveIdempotency explicitly writes pending for every new row.
+		version: 5,
+		statements: []string{
+			`ALTER TABLE ouvrier_idempotency_keys ADD COLUMN outcome TEXT NOT NULL DEFAULT 'succeeded'`,
+			`ALTER TABLE ouvrier_idempotency_keys ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+		},
+	},
 }
 
 // migrate applies pending migrations inside one transaction, serialized by a

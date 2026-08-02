@@ -269,6 +269,8 @@ func (m *operateModel) renderStatusBar(width int) string {
 
 	var state string
 	switch {
+	case m.err != nil:
+		state = lipgloss.NewStyle().Foreground(lipgloss.Color(redHex)).Render("unavailable")
 	case m.running:
 		elapsed := time.Since(m.startedAt).Round(time.Second)
 		state = lipgloss.NewStyle().Foreground(lipgloss.Color(runningHex)).Render(m.spin.View() + " working " + elapsed.String())
@@ -291,10 +293,11 @@ func (m *operateModel) renderStatusBar(width int) string {
 		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("sign in: /login codex")
 	}
 
+	modelLabel, modelValue := m.modelStatus()
 	segs := []string{
 		state,
 		authSeg,
-		seg("model", m.currentModel()),
+		seg(modelLabel, modelValue),
 		seg("worker", worker),
 		seg("posture", string(m.posture)),
 	}
@@ -317,22 +320,37 @@ func (m *operateModel) renderHints(width int) string {
 	parts := []string{
 		key.Render("enter") + hint.Render(" send"),
 		key.Render("alt+enter") + hint.Render(" newline"),
-		key.Render("esc") + hint.Render(" stop"),
 		key.Render("ctrl+e") + hint.Render(" edit"),
 		key.Render("ctrl+g") + hint.Render(" IDE"),
 		key.Render("ctrl+o") + hint.Render(" fold"),
 		key.Render("!cmd") + hint.Render(" shell"),
-		key.Render("ctrl+p") + hint.Render(" model"),
 		key.Render("/") + hint.Render(" cmds"),
 		key.Render("?") + hint.Render(" help"),
 		key.Render("ctrl+c") + hint.Render(" quit"),
+	}
+	if m.err != nil {
+		parts = []string{
+			key.Render("pgup/pgdn") + hint.Render(" scroll"),
+			key.Render("?") + hint.Render(" help"),
+			key.Render("ctrl+c") + hint.Render(" quit"),
+		}
 	}
 	if m.running {
 		parts = []string{
 			key.Render("esc") + hint.Render(" interrupt"),
 			key.Render("enter") + hint.Render(" queue follow-up"),
 			key.Render("pgup/pgdn") + hint.Render(" scroll"),
-			key.Render("ctrl+c") + hint.Render(" quit"),
+			key.Render("ctrl+c") + hint.Render(" cancel+quit"),
+		}
+	}
+	if m.pendingApproval != nil {
+		parts = []string{
+			key.Render("enter/y") + hint.Render(" approve"),
+			key.Render("esc/n") + hint.Render(" deny"),
+			key.Render("ctrl+c") + hint.Render(" cancel+quit"),
+		}
+		if m.pendingApproval.Prod {
+			parts[0] = key.Render("type name+enter") + hint.Render(" approve")
 		}
 	}
 	return truncateANSI(strings.Join(parts, hint.Render("  ")), width)
@@ -354,13 +372,12 @@ func (m *operateModel) renderHelp() string {
 		key.Render("  ctrl+e") + muted.Render("      open manual editor"),
 		key.Render("  ctrl+g") + muted.Render("      open IDE (embedded, ctrl+q to return)"),
 		key.Render("  ctrl+o") + muted.Render("      collapse / expand tool cards"),
-		key.Render("  ctrl+p") + muted.Render("      cycle model"),
 		key.Render("  pgup/pgdn") + muted.Render("   scroll transcript"),
 		key.Render("  /") + muted.Render("           open the command menu"),
-		key.Render("  !cmd") + muted.Render("        run shell command"),
-		key.Render("  !!cmd") + muted.Render("       run shell command silently"),
+		key.Render("  !cmd") + muted.Render("        run governed shell command"),
+		key.Render("  !!cmd") + muted.Render("       run governed shell command silently"),
 		key.Render("  ?") + muted.Render("           toggle this help"),
-		key.Render("  ctrl+c") + muted.Render("      quit (session is saved)"),
+		key.Render("  ctrl+c") + muted.Render("      quit (cancels an active turn)"),
 		"",
 		title.Render("Commands"),
 	}
@@ -656,9 +673,6 @@ func (m *operateModel) renderReview() string {
 			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
 		}
 		row := fmt.Sprintf("%s %-8s %s  %s", severityGlyph(f.Severity), f.Severity, loc, f.Title)
-		if st := m.findingState[i]; st != "" {
-			row += "  [" + st + "]"
-		}
 		if i == m.reviewIndex {
 			lines = append(lines, sel.Render(" "+row+" "))
 		} else {
@@ -679,7 +693,7 @@ func (m *operateModel) renderReview() string {
 		lines = append(lines, "", title.Render("Diff"))
 		lines = append(lines, renderDiffLines(m.diff.Patch)...)
 	}
-	lines = append(lines, "", muted.Render("↑↓ select  f fix(agent)  a accept  x dismiss  ctrl+r/esc/q close"))
+	lines = append(lines, "", muted.Render("↑↓ select  f fix(agent)  ctrl+r/esc/q close · use /accept-risk with a rationale"))
 	box := lipgloss.NewStyle().Padding(0, 1).Width(max(m.width-2, 20))
 	return box.Render(strings.Join(lines, "\n"))
 }

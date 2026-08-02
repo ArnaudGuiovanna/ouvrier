@@ -111,7 +111,8 @@ func decodeAnthropicStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 		}
 		var msg anthropicStreamEvent
 		if err := json.Unmarshal([]byte(ev.Data), &msg); err != nil {
-			return true
+			stopErr = fmt.Errorf("decode anthropic stream event: %w", err)
+			return false
 		}
 		switch msg.Type {
 		case "message_start":
@@ -123,12 +124,28 @@ func decodeAnthropicStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 			}
 		case "content_block_start":
 			if msg.ContentBlock.Type == "tool_use" {
+				if msg.Index < 0 || msg.Index >= maxProviderToolCalls {
+					stopErr = fmt.Errorf("anthropic stream tool index %d exceeds limit %d", msg.Index, maxProviderToolCalls)
+					return false
+				}
+				if _, exists := blocks[msg.Index]; !exists && len(blocks) >= maxProviderToolCalls {
+					stopErr = fmt.Errorf("anthropic stream exceeds %d tool calls", maxProviderToolCalls)
+					return false
+				}
+				if err := validateProviderToolIdentity(msg.ContentBlock.ID, msg.ContentBlock.Name); err != nil {
+					stopErr = err
+					return false
+				}
 				blocks[msg.Index] = &anthropicPendingToolUse{id: msg.ContentBlock.ID, name: msg.ContentBlock.Name}
 			}
 		case "content_block_delta":
 			switch msg.Delta.Type {
 			case "text_delta":
 				if msg.Delta.Text != "" {
+					if err := providerTextOverflow(text.Len(), len(msg.Delta.Text)); err != nil {
+						stopErr = err
+						return false
+					}
 					text.WriteString(msg.Delta.Text)
 					if onDelta != nil {
 						onDelta(Delta{Text: msg.Delta.Text})
@@ -136,6 +153,10 @@ func decodeAnthropicStream(r io.Reader, onDelta func(Delta)) (Response, error) {
 				}
 			case "input_json_delta":
 				if b := blocks[msg.Index]; b != nil {
+					if err := providerToolArgsOverflow(b.args.Len(), len(msg.Delta.PartialJSON)); err != nil {
+						stopErr = err
+						return false
+					}
 					b.args.WriteString(msg.Delta.PartialJSON)
 				}
 			}

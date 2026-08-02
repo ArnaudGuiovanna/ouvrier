@@ -30,6 +30,7 @@ type adminRunResponse struct {
 	LeaseExpiresAt  string `json:"lease_expires_at,omitempty"`
 	Checkpoints     int    `json:"checkpoints"`
 	OpenIntents     int    `json:"open_intents"`
+	ReplayUnsafe    bool   `json:"replay_unsafe"`
 }
 
 type adminRunsResponse struct {
@@ -91,6 +92,7 @@ func (rt httpRuntime) serveAdminRuns(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		row.Checkpoints = len(checkpoints)
+		_, _, row.ReplayUnsafe, _, _ = durableReplayInput(journal, checkpoints)
 		intents, err := rt.stateStore.ToolIntents(req.Context(), journal.ExecID)
 		if err != nil {
 			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
@@ -185,6 +187,15 @@ func (rt httpRuntime) serveAdminRunRecover(w http.ResponseWriter, req *http.Requ
 	// run back to running.
 	if execution.Status == state.ExecutionCompleted {
 		writeJSONStatus(w, http.StatusConflict, "run_completed")
+		return
+	}
+	checkpoints, err := rt.stateStore.RunCheckpoints(req.Context(), execID)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+		return
+	}
+	if _, _, replayUnsafe, _, _ := durableReplayInput(journal, checkpoints); replayUnsafe {
+		writeJSONStatus(w, http.StatusConflict, "replay_input_redacted")
 		return
 	}
 

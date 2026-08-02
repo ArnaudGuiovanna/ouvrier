@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,8 @@ type OperateOptions struct {
 	Target    string
 	Keep      int
 	AllowFail bool
+	AutoSafe  bool
+	Redactor  operate.Redactor
 
 	// Model enables the Ouvrier-owned model tool-calling loop; ModelID is the
 	// provider/model id shown in the status bar and used for requests. When nil
@@ -98,13 +101,12 @@ type operateModel struct {
 	queue          []string
 	runningToolIdx int
 	startedAt      time.Time
+	turnFailed     bool
+	interrupting   bool
 
 	slashActive  bool
 	slashMatches []slashCmd
 	slashIndex   int
-
-	models     []string
-	modelIndex int
 
 	showHelp      bool
 	showEditor    bool
@@ -127,7 +129,6 @@ type operateModel struct {
 	reviewSummary string
 	showReview    bool
 	reviewIndex   int
-	findingState  map[int]string
 
 	// embedded IDE
 	ideActive bool
@@ -206,11 +207,12 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 		spin:           newSpinner(),
 		vp:             viewport.New(),
 		runningToolIdx: -1,
-		models:         defaultModelChoices(opts),
 		posture:        operate.PostureManual,
 		authState:      opts.AuthState,
 		authAccount:    opts.AuthAccount,
-		findingState:   map[int]string{},
+	}
+	if opts.AutoSafe {
+		model.posture = operate.PostureAutoSafe
 	}
 
 	runtime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
@@ -223,6 +225,7 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 		Target:    opts.Target,
 		Keep:      opts.Keep,
 		AllowFail: opts.AllowFail,
+		Redactor:  opts.Redactor,
 		Model:     opts.Model,
 		ModelID:   opts.ModelID,
 	})
@@ -289,20 +292,6 @@ func newSpinner() spinner.Model {
 	return s
 }
 
-func defaultModelChoices(opts OperateOptions) []string {
-	if strings.TrimSpace(opts.ModelID) != "" {
-		return []string{opts.ModelID}
-	}
-	if strings.EqualFold(opts.Agent, "manual") {
-		return []string{"manual"}
-	}
-	return []string{
-		"codex",
-		"anthropic/claude-sonnet-4-6",
-		"openai/gpt-5.5",
-	}
-}
-
 func (m *operateModel) Init() tea.Cmd { return m.composer.Focus() }
 
 func (m *operateModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -362,19 +351,72 @@ func (m *operateModel) handleStream(msg opStreamMsg) (tea.Model, tea.Cmd) {
 			m.cancel = nil
 		}
 		m.events = nil
+		m.decisions = nil
 		m.runningToolIdx = -1
+		incomplete := m.settleOpenBlocks()
+		failed := m.turnFailed || incomplete || m.pendingApproval != nil
+		interrupted := m.interrupting
+		m.pendingApproval = nil
+		m.prodConfirm = ""
+		m.turnFailed = false
+		m.interrupting = false
 		m.refreshViewport()
-		if len(m.queue) > 0 {
+		if len(m.queue) > 0 && !failed && !interrupted {
 			next := m.queue[0]
 			m.queue = m.queue[1:]
 			return m.startTurn(next)
 		}
-		m.status = ""
+		if len(m.queue) > 0 {
+			discarded := len(m.queue)
+			m.queue = nil
+			reason := "failed"
+			if interrupted {
+				reason = "was interrupted"
+			}
+			m.blocks = append(m.blocks, opBlock{
+				kind: blockNotice,
+				text: fmt.Sprintf("%d queued follow-up(s) were not run because the turn %s", discarded, reason),
+			})
+			m.refreshViewport()
+		}
+		switch {
+		case interrupted:
+			m.status = "turn interrupted"
+		case failed:
+			m.status = "turn failed"
+		default:
+			m.status = ""
+		}
 		return m, nil
 	}
 	m.applyStream(msg.ev)
 	m.refreshViewport()
 	return m, waitStream(m.events)
+}
+
+// settleOpenBlocks removes stale "running" UI state when a stream closes
+// without the matching terminal event. This is deliberately fail-closed: an
+// unfinished tool card is shown as failed instead of looking active forever.
+func (m *operateModel) settleOpenBlocks() bool {
+	incomplete := false
+	for i := range m.blocks {
+		b := &m.blocks[i]
+		if b.streaming {
+			b.streaming = false
+			incomplete = true
+		}
+		if b.kind != blockTool || !b.running {
+			continue
+		}
+		b.running = false
+		b.toolErr = true
+		b.collapsed = false
+		if b.toolOutput == nil {
+			b.toolOutput = map[string]any{"error": "turn ended before the tool returned a result"}
+		}
+		incomplete = true
+	}
+	return incomplete
 }
 
 func (m *operateModel) applyStream(ev operate.StreamEvent) {
@@ -384,6 +426,9 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 	case operate.StreamStatus:
 		if strings.TrimSpace(ev.Final) != "" {
 			m.blocks = append(m.blocks, opBlock{kind: blockAssistant, text: ev.Final})
+		}
+		if strings.EqualFold(strings.TrimSpace(ev.Final), "interrupted") {
+			m.interrupting = true
 		}
 	case operate.StreamAssistantDelta:
 		m.appendDelta(ev.Delta)
@@ -423,21 +468,31 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 		m.pendingApproval = ev.Approval
 		m.prodConfirm = ""
 	case operate.StreamError:
-		if ev.Entry == nil {
-			return
-		}
+		m.turnFailed = true
 		// A failed tool already renders its error inside the card; only add a
 		// standalone error block for non-tool failures.
 		if n := len(m.blocks); n > 0 && m.blocks[n-1].kind == blockTool && m.blocks[n-1].toolErr {
 			return
 		}
-		m.blocks = append(m.blocks, opBlock{kind: blockError, text: ev.Entry.Text})
+		text := ""
+		if ev.Entry != nil {
+			text = strings.TrimSpace(ev.Entry.Text)
+		}
+		if text == "" && ev.Err != nil {
+			text = ev.Err.Error()
+			if m.runtime != nil {
+				text = m.runtime.Redact(text)
+			}
+		}
+		if text == "" {
+			text = "operate turn failed"
+		}
+		m.blocks = append(m.blocks, opBlock{kind: blockError, text: text})
 	case operate.StreamReview:
 		if ev.Review != nil {
 			m.findings = ev.Review.Findings
 			m.reviewSummary = ev.Review.Summary
 			m.reviewIndex = 0
-			m.findingState = map[int]string{}
 			if len(m.findings) > 0 {
 				m.showReview = true
 			}
@@ -447,6 +502,9 @@ func (m *operateModel) applyStream(ev operate.StreamEvent) {
 			m.diff = ev.Diff
 		}
 	case operate.StreamDone:
+		if ev.Err != nil && !errors.Is(ev.Err, operate.ErrToolDenied) {
+			m.turnFailed = true
+		}
 		m.pendingApproval = nil
 		m.prodConfirm = ""
 		if ev.Workspace != nil {
@@ -528,13 +586,11 @@ func (m *operateModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.running && m.cancel != nil {
+			m.interrupting = true
 			m.cancel()
 			m.status = "interrupting…"
 			return m, nil
 		}
-		return m, nil
-	case "ctrl+p":
-		m.cycleModel()
 		return m, nil
 	case "ctrl+r":
 		if len(m.findings) > 0 || m.diff != nil {
@@ -659,7 +715,7 @@ func (m *operateModel) submit(text string) (tea.Model, tea.Cmd) {
 	if m.running {
 		m.queue = append(m.queue, text)
 		m.status = fmt.Sprintf("queued follow-up (%d pending)", len(m.queue))
-		m.blocks = append(m.blocks, opBlock{kind: blockUser, text: text})
+		m.blocks = append(m.blocks, opBlock{kind: blockNotice, text: "queued follow-up: " + m.runtime.Redact(text)})
 		m.refreshViewport()
 		return m, nil
 	}
@@ -689,7 +745,7 @@ func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !silent {
-		m.blocks = append(m.blocks, opBlock{kind: blockUser, text: "!" + cmdline})
+		m.blocks = append(m.blocks, opBlock{kind: blockUser, text: m.runtime.Redact("!" + cmdline)})
 	}
 	ch := make(chan operate.StreamEvent, 32)
 	decisions := make(chan operate.ApprovalDecision, 1)
@@ -697,10 +753,14 @@ func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 	executor := m.runtime.Executor()
 	session := m.session
 	posture := m.posture
+	emittedFailure := false
 	emit := func(ev operate.StreamEvent) {
+		if ev.Kind == operate.StreamError || ev.Err != nil {
+			emittedFailure = true
+		}
 		// Silent mode suppresses the transcript cards but the approval gate
 		// must still reach the operator.
-		if silent && ev.Kind != operate.StreamApproval {
+		if silent && ev.Kind != operate.StreamApproval && ev.Kind != operate.StreamError {
 			return
 		}
 		select {
@@ -710,7 +770,7 @@ func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 	}
 	go func() {
 		defer close(ch)
-		_, _ = executor.Execute(ctx, operate.GovernedCall{
+		_, runErr := executor.Execute(ctx, operate.GovernedCall{
 			Session:     session,
 			Tool:        "run_shell",
 			Input:       map[string]any{"command": cmdline},
@@ -719,6 +779,9 @@ func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 			Decisions:   decisions,
 			Emit:        emit,
 		})
+		if runErr != nil && !emittedFailure {
+			emit(operate.StreamEvent{Kind: operate.StreamError, Err: runErr})
+		}
 	}()
 	m.running = true
 	m.runningToolIdx = -1
@@ -727,12 +790,14 @@ func (m *operateModel) runShell(text string) (tea.Model, tea.Cmd) {
 	m.decisions = decisions
 	m.startedAt = time.Now()
 	m.status = ""
+	m.turnFailed = false
+	m.interrupting = false
 	m.refreshViewport()
 	return m, tea.Batch(waitStream(ch), m.spin.Tick)
 }
 
 func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
-	m.blocks = append(m.blocks, opBlock{kind: blockUser, text: text})
+	m.blocks = append(m.blocks, opBlock{kind: blockUser, text: m.runtime.Redact(text)})
 	ctx, cancel := context.WithCancel(m.ctx)
 	ch, dec, err := m.runtime.RunTurnInteractive(ctx, m.session.ID, text, "prompt", m.posture)
 	if err != nil {
@@ -748,6 +813,8 @@ func (m *operateModel) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.decisions = dec
 	m.startedAt = time.Now()
 	m.status = ""
+	m.turnFailed = false
+	m.interrupting = false
 	m.refreshViewport()
 	return m, tea.Batch(waitStream(ch), m.spin.Tick)
 }
@@ -767,6 +834,7 @@ func (m *operateModel) selectCandidate(index int) (*operateModel, tea.Cmd) {
 		Target:    m.opts.Target,
 		Keep:      m.opts.Keep,
 		AllowFail: m.opts.AllowFail,
+		Redactor:  m.opts.Redactor,
 		Model:     m.opts.Model,
 		ModelID:   m.opts.ModelID,
 	})
@@ -780,10 +848,15 @@ func (m *operateModel) selectCandidate(index int) (*operateModel, tea.Cmd) {
 		CodexMode: m.opts.CodexMode,
 	})
 	if err != nil {
+		_ = runtime.Close()
 		m.err = err
 		return m, nil
 	}
+	previousRuntime := m.runtime
 	m.runtime = runtime
+	if previousRuntime != nil {
+		_ = previousRuntime.Close()
+	}
 	m.session = started.Session
 	if started.Workspace != nil {
 		m.workspace = *started.Workspace
@@ -799,18 +872,14 @@ func (m *operateModel) selectCandidate(index int) (*operateModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m *operateModel) cycleModel() {
-	if len(m.models) == 0 {
-		return
+func (m *operateModel) modelStatus() (label, value string) {
+	if m.opts.Model == nil {
+		return "planner", "deterministic"
 	}
-	m.modelIndex = (m.modelIndex + 1) % len(m.models)
-}
-
-func (m *operateModel) currentModel() string {
-	if len(m.models) == 0 {
-		return m.opts.Agent
+	if id := strings.TrimSpace(m.opts.ModelID); id != "" {
+		return "model", id
 	}
-	return m.models[m.modelIndex]
+	return "model", "configured"
 }
 
 func (m *operateModel) updateSlash() {
@@ -1057,16 +1126,6 @@ func (m *operateModel) handleReviewKey(keyStr string) (tea.Model, tea.Cmd) {
 			m.reviewIndex++
 		}
 		return m, nil
-	case "a":
-		if m.reviewIndex < len(m.findings) {
-			m.findingState[m.reviewIndex] = "accepted"
-		}
-		return m, nil
-	case "x":
-		if m.reviewIndex < len(m.findings) {
-			m.findingState[m.reviewIndex] = "dismissed"
-		}
-		return m, nil
 	case "f":
 		if m.reviewIndex < len(m.findings) {
 			f := m.findings[m.reviewIndex]
@@ -1178,15 +1237,34 @@ func (m *operateModel) handleEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 }
 
 // RunOperate drives the local operate cockpit until the user exits.
-func RunOperate(ctx context.Context, in io.Reader, out io.Writer, opts OperateOptions) error {
+func RunOperate(ctx context.Context, in io.Reader, out io.Writer, opts OperateOptions) (retErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancelRun := context.WithCancel(ctx)
 	if opts.Driver != nil {
-		defer opts.Driver.Close()
+		defer func() { retErr = errors.Join(retErr, opts.Driver.Close()) }()
+	}
+	model := newOperateModel(runCtx, opts)
+	if cockpit, ok := model.(*operateModel); ok {
+		defer func() {
+			cancelRun()
+			if cockpit.cancel != nil {
+				cockpit.cancel()
+			}
+			if cockpit.runtime != nil {
+				retErr = errors.Join(retErr, cockpit.runtime.Close())
+			}
+		}()
+	} else {
+		defer cancelRun()
 	}
 	program := tea.NewProgram(
-		newOperateModel(ctx, opts),
+		model,
 		tea.WithInput(in),
 		tea.WithOutput(out),
+		tea.WithContext(runCtx),
 	)
-	_, err := program.Run()
-	return err
+	_, retErr = program.Run()
+	return retErr
 }

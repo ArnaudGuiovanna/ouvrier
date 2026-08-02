@@ -27,7 +27,7 @@ func (r *AgentRuntime) lockSession(session *Session) (bool, error) {
 		return false, nil
 	}
 	path := r.sessionWriterLockPath(session.ID)
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := openSessionArtifact(path, os.O_CREATE|os.O_RDWR, 0o600, false)
 	if err != nil {
 		return false, fmt.Errorf("operate: open session writer lock: %w", err)
 	}
@@ -111,7 +111,7 @@ func (r *AgentRuntime) requireSessionWriter(session *Session) error {
 }
 
 func (r *AgentRuntime) sessionWriterActive(sessionID string) (bool, error) {
-	lock, err := os.OpenFile(r.sessionWriterLockPath(sessionID), os.O_RDWR, 0)
+	lock, err := openSessionArtifact(r.sessionWriterLockPath(sessionID), os.O_RDWR, 0, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

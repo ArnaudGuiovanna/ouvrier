@@ -144,7 +144,15 @@ func StaticBuild(ctx context.Context, dir, target string, out, errOut io.Writer,
 
 func buildEnv(cfg BuildConfig) []string {
 	env := os.Environ()
-	overrides := map[string]string{}
+	// Builds must not silently import an ambient go.work graph outside the
+	// worker. Local dependencies remain explicit through go.mod replace
+	// directives, which the cockpit can fingerprint and audit.
+	overrides := map[string]string{
+		"GOWORK":      "off",
+		"GOENV":       "off",
+		"GOTOOLCHAIN": "local",
+		"GOFLAGS":     "",
+	}
 	if cfg.Static {
 		overrides["CGO_ENABLED"] = "0"
 	}
@@ -153,9 +161,6 @@ func buildEnv(cfg BuildConfig) []string {
 		goos, goarch, _ := SplitTarget(cfg.Target)
 		overrides["GOOS"] = goos
 		overrides["GOARCH"] = goarch
-	}
-	if len(overrides) == 0 {
-		return env
 	}
 	out := make([]string, 0, len(env)+len(overrides))
 	consumed := make(map[string]bool, len(overrides))

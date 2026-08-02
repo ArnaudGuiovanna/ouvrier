@@ -2,10 +2,13 @@
 
 Ouvrier exposes execution through three layers:
 
-1. **EventStream** — append-only structured events for everything the harness
-   does (pipeline, pipe, session, LLM call, tool call, schema validation,
-   subagent task, hook invocation, permission decision). Events are persisted
-   to `StateStore` and redacted before any external output.
+1. **EventStream** — logically append-only structured events for everything the
+   harness does (pipeline, pipe, session, LLM call, tool call, schema
+   validation, subagent task, hook invocation, permission decision). The
+   in-process stream keeps a bounded recent window of 4,096 sanitized events;
+   subscribers still receive every event in monotonic ID order, and events are
+   persisted to `StateStore` independently of that memory window. All external
+   output is redacted.
 2. **Admin HTTP endpoints** — `/admin/health`, `/admin/status`,
    `/admin/plans`, `/admin/capabilities`, `/admin/events`,
    `/admin/traces?last=N`, `/admin/traces/<exec-id>`, `POST /admin/trigger`,
@@ -14,6 +17,34 @@ Ouvrier exposes execution through three layers:
    viewer UI.
 3. **Tracer hooks** — an OTel-compatible `Tracer` interface that pairs
    `*_started` and `*_completed` / `*_failed` events into spans.
+
+## Cockpit session journals
+
+The local `ouvrier operate` cockpit has its own per-session append-only files
+under `.ouvrier/operate/sessions/<id>/`; these are distinct from the worker
+runtime `EventStream` above. `transcript.jsonl` accepts records up to 8 MiB and
+is capped at 64 MiB; transcript readers and export reject more than 100,000
+entries. `/compact` appends a deterministic context checkpoint instead of
+rewriting this history, and the Markdown export is atomically capped at
+128 MiB.
+
+`events.jsonl` accepts individual events up to 4 MiB. Resume and replay reject
+an event journal over 64 MiB or 100,000 entries. All event fields are redacted
+before persistence, and an append error propagates to the agent turn so it
+cannot report success after losing its audit trail. `Subscribe` validates the
+whole journal before returning a stream and never emits a partial replay for a
+corrupt or oversized file.
+
+With the session writer lock held, resume may add a missing newline to a valid
+last JSONL record or discard only an invalid unterminated final fragment. A
+discard is made observable by a status entry in `transcript.jsonl`. Corruption
+in a complete or middle record remains an error and is never silently repaired.
+Patch and audit coordinator errors are likewise observable in `session.json`:
+their durable states are `patch_failed` and `audit_failed`, with a redacted
+`last_error` and transition reason. A completed audit whose gates report
+failure also transitions to `audit_failed`; `audit.json` and the transition
+reason remain the evidence when there is no execution error to store in
+`last_error`.
 
 ## Admin endpoints
 
@@ -106,6 +137,10 @@ ouvrier_tool_call_duration_ms    # paired tool_call_started -> completed/failed
 Values are derived purely from canonical event kinds and the already-sanitized
 `latency_ms` payload, plus event timestamps for the paired durations, so no raw
 payload content (and therefore no secrets) ever reaches the exposition.
+The `_total`, `_sum`, and `_count` values use fixed-cardinality lifetime
+aggregates, so evicting old events from the in-process recent window cannot make
+a metric decrease during the process lifetime. Durable `StateStore` history is
+merged when available and remains the source across restarts.
 
 Scrape it with Prometheus:
 
@@ -225,3 +260,7 @@ downstream systems. `Tracer` adapters typically map `TraceID` to OTel's
 - **Trace persistence** uses the same `StateStore` as everything else
   (SQLite by default). For high-volume production workloads, configure a
   longer-retention backend by implementing `state.Store`.
+- **The in-process EventStream is a recent-event cache.** Admin trace and event
+  APIs read the durable `StateStore` first and therefore are not truncated by
+  the 4,096-event memory window. A deliberately store-less internal harness can
+  expose only that retained window through its fallback admin surface.

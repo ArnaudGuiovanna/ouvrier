@@ -39,6 +39,19 @@ jobs:
           go-version: "1.25.x"
           check-latest: true
 
+      - name: Install audit sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Verify audit sandbox namespaces
+        run: |
+          bwrap --die-with-parent --unshare-all --unshare-user --new-session \
+            --disable-userns --cap-drop ALL --ro-bind /usr /usr \
+            --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --proc /proc --dev /dev --clearenv --setenv PATH /usr/bin:/bin \
+            -- /usr/bin/true
+
       - name: Verify gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -110,7 +123,7 @@ jobs:
 
   race:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:16-alpine
@@ -137,14 +150,31 @@ jobs:
           go-version: "1.25.x"
           check-latest: true
 
+      - name: Install audit sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Verify audit sandbox namespaces
+        run: |
+          bwrap --die-with-parent --unshare-all --unshare-user --new-session \
+            --disable-userns --cap-drop ALL --ro-bind /usr /usr \
+            --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --proc /proc --dev /dev --clearenv --setenv PATH /usr/bin:/bin \
+            -- /usr/bin/true
+
       - name: Race tests for concurrency-sensitive packages
         run: |
-          go test -race \
+          go test -race -count=1 \
+            . \
             ./internal/runtime/... \
             ./internal/state/... \
             ./internal/events/... \
             ./internal/tools/... \
             ./internal/harness/... \
+            ./internal/operate/... \
+            ./internal/cli/... \
+            ./internal/provider/... \
             ./internal/tunnel/... \
             ./internal/console/...
 

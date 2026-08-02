@@ -4,8 +4,23 @@ This file is a single-source map of the public surface in package
 `ovr "github.com/ArnaudGuiovanna/ouvrier"`. It mirrors the shipped framework
 contract documented in the handbook and is exercised by the
 `TestPublicAPIParityCompiles` golden test so the doc cannot drift away from the
-code. As of June 2026, `main` contains the v0.1-v0.5 shipped work, and
-`v0.5.0` is the latest tagged release.
+code. As of August 2026, `main` contains the v0.1-v0.5 shipped work, and
+`v0.5.5` is the latest tagged release.
+
+## Scope And Stabilization Status
+
+This reference defines only the public Go framework contract. Post-`v0.5.5`
+work on `main` is an active stabilization line and is not a new stable release
+until its full repository gates pass. Cockpit implementation details such as
+headless posture, Codex transport selection, worker-file tools, and
+audit/review/build evidence remain internal CLI contracts; they do not add
+public `ovr` primitives or let the cockpit silently change worker syntax.
+
+The active cockpit journey ends at a verified local artifact. Existing deploy
+and web-console surfaces remain available for compatibility, maintenance, and
+security fixes, but their product development is paused pending redesign. See
+the [handbook](handbook.md#operate-harness) for current cockpit behavior and
+[project direction](project-direction.md) for the binding workstream boundary.
 
 ## Triggers
 
@@ -26,7 +41,7 @@ Trigger options (passed inside the trigger constructor or via `From`-level
 | `WorkerPool(limit int) FromOption`                 | Cap concurrent trigger handlers.                     |
 | `StreamDLQ(target string, maxAttempts int) FromOption` | Route a poisoned stream message to a dead-letter target after `maxAttempts` failed deliveries. Broker targets are published over the real queue transport; runtime replay drains the retained runtime DLQ copy for that plan. |
 | `StreamMaxInFlight(limit int) FromOption`          | Bound concurrently processed stream messages so a slow handler applies backpressure to the broker. |
-| `StreamAckPolicy(policy StreamAckMode) FromOption` | Per-broker acknowledgement mode: `StreamAckAuto` (default; runtime acks after successful processing) or `StreamAckManual` (handler owns the ack, broker redelivers until acked). No-op for brokers whose receiver exposes no ack closure. |
+| `StreamAckPolicy(policy StreamAckMode) FromOption` | Runtime-managed acknowledgement. `StreamAckAuto` is supported and is the default. `StreamAckManual` remains defined for source compatibility but is rejected by validation with `ErrInvalidNode`, because worker handlers do not expose an acknowledgement capability. |
 
 ## Pipe
 
@@ -45,11 +60,14 @@ ovr.Pipe(goal string, options ...PipeOption) Node
 | `SequentialTools()`                     | Run a turn's tool calls one at a time.             |
 | `Tool(name string, fn any, opts...)`    | Expose a Go function as a tool.                    |
 | `Skill(dir string)`                     | Load a `skills/<dir>/SKILL.md`.                    |
+| `MCP(name string)`                      | Expose tools from the configured MCP server.       |
 | `Retry(max int, BackoffPolicy?)`        | Provider/transient retries + retry-safe tool retries. |
 | `SubAgent(name string, p PipelineSpec, opts...)` | Expose a child pipeline as a governed tool. |
 | `Output[T]()`                           | Force the Pipe to produce JSON matching `T`.       |
 
 ### Tool options
+
+The constructors in this table return `ToolOption`.
 
 | Option                                  | Purpose                                            |
 | --------------------------------------- | -------------------------------------------------- |
@@ -62,6 +80,8 @@ ovr.Pipe(goal string, options ...PipeOption) Node
 | `ToolTimeout(value string)`             | Per-tool wall-clock.                               |
 
 ### SubAgent options
+
+The constructors in this table return `SubAgentOption`.
 
 | Option                  | Purpose                                                       |
 | ----------------------- | ------------------------------------------------------------- |
@@ -87,9 +107,9 @@ ovr.Sink(target SinkTarget) Node     // terminate without reply (log/file)
 | `JSON[T]() JSONReply[T]`  | Typed JSON reply with strict schema validation.    |
 | `SSE() SSEReply`          | Server-Sent Events streaming reply.                |
 | `Accepted() AcceptedReply`| HTTP 202 reply while the pipeline runs async.      |
-| `Queue(uri string)`       | Push target publishing to a queue URI (`http(s)://`, `nats://`, `kafka://`, `redis://`, `sqs://`). |
+| `Queue(uri string) QueueTarget` | Push target publishing to a queue URI (`http(s)://`, `nats://`, `kafka://`, `redis://`, `sqs://`). |
 | `Log() LogSink`           | Sink writing to logs.                              |
-| `File(path string)`       | Sink writing the result to a file.                 |
+| `File(path string) FileSink` | Sink writing the result to a file.              |
 
 `Webhook(url string)` is also valid as a `Push` target for HTTP webhooks (the
 trigger constructor reuses the same name for inbound webhooks; context
@@ -124,6 +144,10 @@ ovr.Bash(sandbox ovr.SandboxConfig, options ...ovr.BashOption) ovr.PipeOption
 | `BashMaxOutputBytes(max int)`   | Bound captured stdout/stderr.                      |
 | `UnsafeBashHostExecution()`     | Allow host-shell fallback (no OS sandbox).         |
 
+`UnsafeBashHostExecution` applies only to an explicitly configured runtime
+`Bash` tool. It does not weaken `ouvrier operate audit`: candidate-executing Go
+audit gates require Linux Bubblewrap isolation and fail closed without it.
+
 ### Sandbox
 
 ```go
@@ -147,12 +171,37 @@ Fails fast at boot if any named env var is missing.
 ```go
 runner := ovr.NewRunner(opts ...ovr.RunnerOption)
 runner.Run(addr string, nodes ...ovr.Node) error
+runner.Handler(nodes ...ovr.Node) (http.Handler, error)
 ovr.Run(addr string, nodes ...ovr.Node) error      // convenience for the default runner
 ovr.Validate(nodes ...ovr.Node) error              // validation without serving
+ovr.Handler(nodes ...ovr.Node) (http.Handler, error)
 ```
+
+`Runner.Run` serves a worker on network listeners. `Runner.Handler` compiles
+the same HTTP and Webhook worker routes into an in-process `http.Handler`,
+without opening a listener; the package-level `Handler` uses a default runner.
+Cron and Stream triggers are not served by this handler seam.
+
+When `OUVRIER_DURABLE_RUNS=1`, the run journal hashes the complete compiled
+replay contract and refuses to resume it after any trigger, step, tool, schema,
+retry, budget, terminal, or worker-executable change. The executable fingerprint
+binds private Go handler/tool implementations that are not representable in the
+compiled plan. Replicas can recover each other's journals only when they run a
+byte-identical artifact; a rebuild cleanly abandons older journals through the
+existing `plan_hash_mismatch` event. Durable HTTP and Webhook plans currently
+require at least one `Pipe`; runner setup fails closed for a direct zero-step
+terminal. Zero-step Cron and Stream plans are journaled and supported.
+
+### Provider injection
+
+`Provider` is the LLM completion boundary accepted by `WithProvider`. The
+scripted provider in package `ovrtest` implements it for deterministic tests;
+production runners normally resolve providers from model IDs and environment
+credentials.
 
 | Option                                  | Purpose                                            |
 | --------------------------------------- | -------------------------------------------------- |
+| `WithProvider(p Provider)`              | Inject one provider for every model ID, primarily for deterministic worker tests. |
 | `WithPermissionPolicy(p PermissionPolicy)` | Install production permission policy.            |
 | `WithStateStore(s StateStore)`          | Custom durable state store.                        |
 | `WithHooks(h *Hooks)`                   | Advanced lifecycle hooks.                          |
@@ -251,6 +300,10 @@ breaks the pipeline. `WithOTLPExporter` is a convenience over `WithTracer`;
 when both are passed, the last option wins.
 
 ## Hook Events
+
+Create an advanced hook registry with `NewHooks() *Hooks`. Register lifecycle
+callbacks with `Hooks.Register(kind EventKind, hook Hook) error`, then install
+the registry with `WithHooks`.
 
 `EventKind` constants exposed for hooks include:
 
@@ -370,6 +423,8 @@ resume after an operator approves it.
 
 ## Stability
 
-This document is the current shipped public reference. Anything not listed here
-is considered internal and may change between patch releases. Spec gaps
-discovered by `api_parity_test.go` are logged at the top of that file.
+This document is the current tagged public-reference baseline plus the
+stabilization contract implemented on `main`. It is not, by itself, evidence
+that a new release is ready. Anything not listed here is considered internal
+and may change between patch releases. Spec gaps discovered by
+`api_parity_test.go` are logged at the top of that file.

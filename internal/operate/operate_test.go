@@ -1,8 +1,9 @@
 package operate
 
 import (
-	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestReviewWorkerUsesReadOnlyDriverAndParsesFindings(t *testing.T) {
 		t.Fatalf("DetectWorkspace() error = %v", err)
 	}
 	driver := &fakeDriver{
-		result: TurnResult{FinalMessage: `{"summary":"needs governance","findings":[{"severity":"high","file":"main.go","line":12,"title":"missing policy","body":"tool needs SideEffecting"}]}`},
+		result: TurnResult{FinalMessage: `{"passed":false,"summary":"needs governance","findings":[{"severity":"high","file":"main.go","line":12,"title":"missing policy","body":"tool needs SideEffecting"}]}`},
 	}
 
 	report, err := ReviewWorker(context.Background(), driver, ReviewRequest{Workspace: ws, Scope: ReviewGovernance}, nil)
@@ -154,17 +155,17 @@ func TestDetectWorkspaceIgnoresOperateSessionStateInGitStatus(t *testing.T) {
 
 func TestAuditRunnerRunsInjectedGatesAndSecretScan(t *testing.T) {
 	dir := writeWorkerFixture(t)
+	const secret = "audit-test-secret-material"
+	if err := os.WriteFile(filepath.Join(dir, "secret.go"), []byte("package main\n\nconst embedded = \""+secret+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runner := AuditRunner{
-		RunCommand: func(_ context.Context, _ string, name string, args []string) (string, string, error) {
-			if name == "git" && len(args) >= 2 && args[0] == "diff" {
-				return "+OPENAI_API_KEY=sk-test\n", "", nil
-			}
-			return "", "", nil
-		},
-		Build: func(context.Context, string, *bytes.Buffer, *bytes.Buffer) error {
+		RunCommand: func(context.Context, string, string, []string) (string, string, error) { return "", "", nil },
+		Build: func(context.Context, string, io.Writer, io.Writer) error {
 			return nil
 		},
-		Now: func() time.Time { return time.Date(2026, 6, 13, 11, 0, 0, 0, time.UTC) },
+		Now:      func() time.Time { return time.Date(2026, 6, 13, 11, 0, 0, 0, time.UTC) },
+		Redactor: NewRedactor(secret),
 	}
 
 	report, err := runner.Run(context.Background(), dir)
@@ -182,6 +183,26 @@ func TestAuditRunnerRunsInjectedGatesAndSecretScan(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("secret scan failure missing from %+v", report.Results)
+	}
+}
+
+func TestAuditGitDiffCheckSkipsWorkerOutsideGit(t *testing.T) {
+	runner := AuditRunner{RunCommand: func(context.Context, string, string, []string) (string, string, error) {
+		return "", "warning: Not a git repository. Use --no-index to compare two paths outside a working tree", fmt.Errorf("exit status 129")
+	}}
+	result := runner.gateGitDiffCheck(context.Background(), t.TempDir())
+	if result.Status != GateSkip || !strings.Contains(result.Output, "not a Git worktree") {
+		t.Fatalf("git diff gate = %+v, want an explicit non-repository skip", result)
+	}
+}
+
+func TestAuditGitDiffCheckDoesNotHideOtherFailures(t *testing.T) {
+	runner := AuditRunner{RunCommand: func(context.Context, string, string, []string) (string, string, error) {
+		return "", "fatal: unsafe repository ownership", fmt.Errorf("exit status 128")
+	}}
+	result := runner.gateGitDiffCheck(context.Background(), t.TempDir())
+	if result.Status != GateFail || !strings.Contains(result.Error, "exit status") {
+		t.Fatalf("git diff gate = %+v, want fail-closed for a real Git error", result)
 	}
 }
 

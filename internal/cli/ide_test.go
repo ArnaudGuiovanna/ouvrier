@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui/ide"
 )
 
@@ -36,6 +37,14 @@ func TestRunIDECommandOpensWorkspace(t *testing.T) {
 	}
 	if gotOpts.Executor == nil || gotOpts.Session == nil {
 		t.Fatal("standalone ide must receive a GovernedExecutor and session")
+	}
+	verifier, err := operate.NewAgentRuntime(operate.RuntimeOptions{Dir: dir, Driver: operate.ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifier.Close()
+	if _, err := verifier.OpenSessionWriter(context.Background(), operate.RuntimeStartRequest{SessionID: gotOpts.Session.ID}); err != nil {
+		t.Fatalf("IDE command leaked its session writer lock: %v", err)
 	}
 }
 

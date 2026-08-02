@@ -61,7 +61,7 @@ func seedInterruptedDurableRun(t *testing.T, store state.Store, plan runtimeplan
 	if err := store.SaveRunJournal(context.Background(), state.RunJournal{
 		ExecID:      execID,
 		PlanKey:     durablePlanKey(plan),
-		PlanHash:    durablePlanHash(plan.Steps),
+		PlanHash:    durablePlanHash(plan),
 		TriggerKind: string(plan.Trigger.Kind),
 		Input:       input,
 	}); err != nil {
@@ -194,6 +194,49 @@ func TestDurableRecoveryReplaysReadOnlyRunFromLastCheckpoint(t *testing.T) {
 	}
 	if step, _ := recovered[0].Payload["resumed_from_step"].(float64); int(step) != 1 {
 		t.Fatalf("run_recovered resumed_from_step = %v, want 1", recovered[0].Payload["resumed_from_step"])
+	}
+}
+
+func TestDurableRecoveryRefusesRedactedReplayInputFailClosed(t *testing.T) {
+	store := newDurableTestStore(t)
+	plan := compileDurableTestPlan(t, []Node{
+		From("POST /tickets"),
+		Pipe("classify", Model("durable/redacted")),
+		Reply(Accepted()),
+	})
+
+	const execID = "exec_recover_redacted"
+	seedInterruptedDurableRun(t, store, plan, execID, "trace_recover_redacted",
+		`{"ticket":"safe","password":"must-not-replay"}`)
+	journal, ok, err := store.RunJournal(context.Background(), execID)
+	if err != nil || !ok || !journal.ReplayUnsafe {
+		t.Fatalf("seeded journal = %+v ok=%v err=%v, want replay-unsafe", journal, ok, err)
+	}
+
+	providerCalls := 0
+	rt := httpRuntime{
+		provider: &durableTestProvider{complete: func(string, int) (provider.Response, error) {
+			providerCalls++
+			return endTurn(`{"unexpected":true}`)
+		}},
+		stateStore:  store,
+		eventStream: newDurableRecoveryEventStream(t),
+		durableRuns: newDurableRecoveryTestConfig(time.Minute),
+	}
+	runDurableRecoveryScanNow(t, rt, plan)
+
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want zero for unsafe replay input", providerCalls)
+	}
+	if status := durableExecutionStatus(t, store, execID); status != state.ExecutionFailed {
+		t.Fatalf("execution status = %q, want failed", status)
+	}
+	if _, ok, err := store.RunJournal(context.Background(), execID); err != nil || !ok {
+		t.Fatalf("unsafe journal retained ok=%v err=%v, want retained for inspection", ok, err)
+	}
+	events := recoveryEventsOfKind(t, store, execID, events.EventRunAbandoned)
+	if len(events) != 1 || events[0].Payload["reason"] != "replay_input_redacted" || events[0].Payload["source"] != "journal_input" {
+		t.Fatalf("run_abandoned events = %+v, want explicit redacted-input refusal", events)
 	}
 }
 
@@ -517,6 +560,108 @@ func TestDurableRecoveryAbandonsEditedPlan(t *testing.T) {
 	scripted := &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
 		t.Errorf("abandoned run called model %q, want no replay on plan_hash mismatch", model)
 		return endTurn(`{"status":"mixed"}`)
+	}}
+	rt := httpRuntime{
+		provider:    scripted,
+		stateStore:  store,
+		eventStream: newDurableRecoveryEventStream(t),
+		durableRuns: newDurableRecoveryTestConfig(time.Minute),
+	}
+	runDurableRecoveryScanNow(t, rt, plan)
+
+	abandoned := recoveryEventsOfKind(t, store, execID, events.EventRunAbandoned)
+	if len(abandoned) != 1 {
+		t.Fatalf("run_abandoned events = %+v, want exactly one", abandoned)
+	}
+	if reason, _ := abandoned[0].Payload["reason"].(string); reason != "plan_hash_mismatch" {
+		t.Fatalf("run_abandoned reason = %v, want plan_hash_mismatch", abandoned[0].Payload)
+	}
+	if status := durableExecutionStatus(t, store, execID); status != state.ExecutionFailed {
+		t.Fatalf("execution status = %q, want failed", status)
+	}
+	if _, ok, err := store.RunJournal(context.Background(), execID); err != nil || ok {
+		t.Fatalf("journal ok=%v err=%v, want pruned on abandonment", ok, err)
+	}
+}
+
+// TestDurableRecoveryAbandonsChangedTerminal proves that the recovery hash
+// binds the observable destination, not only the pipeline steps. Replaying an
+// old journal into a newly configured webhook would otherwise redirect a
+// side effect after a deployment.
+func TestDurableRecoveryAbandonsChangedTerminal(t *testing.T) {
+	store := newDurableTestStore(t)
+	original := compileDurableTestPlan(t, []Node{
+		From("POST /tickets"),
+		Pipe("only step", Model("durable/terminal-change")),
+		Push(Webhook("https://old.example.invalid/results")),
+	})
+	current := compileDurableTestPlan(t, []Node{
+		From("POST /tickets"),
+		Pipe("only step", Model("durable/terminal-change")),
+		Push(Webhook("https://new.example.invalid/results")),
+	})
+
+	const execID = "exec_changed_terminal"
+	seedInterruptedDurableRun(t, store, original, execID, "trace_changed_terminal", `{"title":"broken"}`)
+
+	scripted := &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
+		t.Errorf("terminal-mismatched run called model %q, want fail-closed abandonment", model)
+		return endTurn(`{"status":"misdirected"}`)
+	}}
+	rt := httpRuntime{
+		provider:    scripted,
+		stateStore:  store,
+		eventStream: newDurableRecoveryEventStream(t),
+		durableRuns: newDurableRecoveryTestConfig(time.Minute),
+	}
+	runDurableRecoveryScanNow(t, rt, current)
+
+	abandoned := recoveryEventsOfKind(t, store, execID, events.EventRunAbandoned)
+	if len(abandoned) != 1 {
+		t.Fatalf("run_abandoned events = %+v, want exactly one", abandoned)
+	}
+	if reason, _ := abandoned[0].Payload["reason"].(string); reason != "plan_hash_mismatch" {
+		t.Fatalf("run_abandoned reason = %v, want plan_hash_mismatch", abandoned[0].Payload)
+	}
+	if status := durableExecutionStatus(t, store, execID); status != state.ExecutionFailed {
+		t.Fatalf("execution status = %q, want failed", status)
+	}
+	if _, ok, err := store.RunJournal(context.Background(), execID); err != nil || ok {
+		t.Fatalf("journal ok=%v err=%v, want pruned on abandonment", ok, err)
+	}
+}
+
+// TestDurableRecoveryAbandonsJournalFromDifferentWorkerBuild proves that two
+// binaries compiling the same plan cannot mix handler or tool code during a
+// replay. The combined v3 hash needs no journal-schema migration: journals
+// written by v2 or by another executable fail the existing mismatch path.
+func TestDurableRecoveryAbandonsJournalFromDifferentWorkerBuild(t *testing.T) {
+	store := newDurableTestStore(t)
+	plan := compileDurableTestPlan(t, []Node{
+		From("POST /tickets"),
+		Pipe("unchanged plan", Model("durable/build-change")),
+		Reply(Accepted()),
+	})
+
+	const execID = "exec_changed_worker_build"
+	seedInterruptedDurableRun(t, store, plan, execID, "trace_changed_worker_build", `{"title":"broken"}`)
+	previousBuildHash := durablePlanHashWithBuildIdentity(plan, "sha256:previous-worker-build")
+	if previousBuildHash == durablePlanHash(plan) {
+		t.Fatal("test previous-build identity unexpectedly matches the running executable")
+	}
+	if err := store.SaveRunJournal(context.Background(), state.RunJournal{
+		ExecID:      execID,
+		PlanKey:     durablePlanKey(plan),
+		PlanHash:    previousBuildHash,
+		TriggerKind: string(plan.Trigger.Kind),
+		Input:       `{"title":"broken"}`,
+	}); err != nil {
+		t.Fatalf("SaveRunJournal returned error: %v", err)
+	}
+
+	scripted := &durableTestProvider{complete: func(model string, call int) (provider.Response, error) {
+		t.Errorf("build-mismatched run called model %q, want fail-closed abandonment", model)
+		return endTurn(`{"status":"mixed-code"}`)
 	}}
 	rt := httpRuntime{
 		provider:    scripted,
@@ -999,6 +1144,16 @@ func TestAdminRunsRecoverRefusesActiveParkedAndCompletedRuns(t *testing.T) {
 	}
 	if _, ok, err := store.RunJournal(context.Background(), parkedExecID); err != nil || !ok {
 		t.Fatalf("parked journal ok=%v err=%v, want kept", ok, err)
+	}
+
+	// Redaction made the only replay input semantically incomplete. Even an
+	// operator-forced replay cannot reconstruct it and is refused explicitly.
+	const redactedExecID = "exec_recover_redacted_refused"
+	seedInterruptedDurableRun(t, store, plan, redactedExecID, "trace_recover_redacted_refused",
+		`{"ticket":"safe","password":"must-not-replay"}`)
+	assertConflict(t, postRecover(t, redactedExecID), "replay_input_redacted")
+	if status := durableExecutionStatus(t, store, redactedExecID); status != state.ExecutionRunning {
+		t.Fatalf("redacted run status = %q, want untouched until recovery scan marks it failed", status)
 	}
 
 	// A journal row that survived a prune failure must never flip its

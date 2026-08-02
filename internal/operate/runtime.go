@@ -17,6 +17,11 @@ const defaultOperateModel = "anthropic/claude-sonnet-4-6"
 // turn continues and the model is told the tool was denied.
 var ErrToolDenied = errors.New("operate: tool denied by approval gate")
 
+// ErrRuntimeClosed marks an operation rejected after the cockpit runtime began
+// its terminal shutdown. Close cancels and joins every activity registered
+// before this boundary.
+var ErrRuntimeClosed = errors.New("operate: runtime is closed")
+
 // RuntimeOptions configures the terminal-native operate agent runtime.
 type RuntimeOptions struct {
 	Dir       string
@@ -34,6 +39,10 @@ type RuntimeOptions struct {
 	Redactor  Redactor
 	RepoRoot  string
 	Now       func() time.Time
+	// HeadlessPosture controls non-interactive Prompt/Steer/FollowUp/RPC turns.
+	// The zero value is manual/fail-closed. PostureAutoSafe must be selected
+	// explicitly by a frontend (for example CLI --auto-safe).
+	HeadlessPosture Posture
 
 	// Model, when set, enables the Ouvrier-owned model tool-calling loop instead
 	// of the deterministic keyword planner. ModelID is the provider/model id
@@ -51,10 +60,21 @@ type AgentRuntime struct {
 	Tools   *ToolRegistry
 	Options RuntimeOptions
 
-	repoRoot  string
-	workspace *Workspace
-	lockMu    sync.Mutex
-	locks     map[string]*os.File
+	repoRoot string
+	lockMu   sync.Mutex
+	locks    map[string]*os.File
+	turnMu   sync.Mutex
+	turns    map[string]*sessionTurnLane
+	appendMu sync.Mutex
+
+	lifecycleMu sync.Mutex
+	closed      bool
+	activitySeq uint64
+	activities  map[string]map[uint64]context.CancelFunc
+	activityWG  sync.WaitGroup
+	modelTurn   chan struct{}
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // RuntimeStartRequest creates or resumes one cockpit session.
@@ -73,10 +93,21 @@ type RuntimeSession struct {
 	Transcript []TranscriptEntry `json:"transcript,omitempty"`
 }
 
+// RuntimeOutcome records a terminal condition that callers must distinguish
+// from an ordinary successful assistant response.
+type RuntimeOutcome string
+
+const (
+	// RuntimeOutcomeExhausted means the bounded model loop used every step
+	// without reaching an evidence-backed completion.
+	RuntimeOutcomeExhausted RuntimeOutcome = "exhausted"
+)
+
 // RuntimeTurn is one completed operator turn.
 type RuntimeTurn struct {
 	SessionID string            `json:"session_id"`
 	Final     string            `json:"final"`
+	Outcome   RuntimeOutcome    `json:"outcome,omitempty"`
 	Entries   []TranscriptEntry `json:"entries"`
 	Workspace *Workspace        `json:"workspace,omitempty"`
 }
@@ -85,6 +116,11 @@ type plannedTool struct {
 	ID    string
 	Name  string
 	Input map[string]any
+
+	// persistedEntry is set only by the model loop after it has durably
+	// recorded every call from one assistant response. The governed executor
+	// then executes that already-recorded call without appending a duplicate.
+	persistedEntry *TranscriptEntry
 }
 
 type promptPlan struct {
@@ -98,10 +134,20 @@ func NewAgentRuntime(opts RuntimeOptions) (*AgentRuntime, error) {
 	if dir == "" {
 		dir = "."
 	}
+	opts.Dir = dir
 	if opts.Driver == nil {
 		opts.Driver = ManualDriver{}
 	}
 	h := opts.Harness
+	inheritedRedactor := Redactor{}
+	if h != nil {
+		inheritedRedactor = h.Redactor
+	}
+	redactor, err := productionRedactor(dir, opts.Env, opts.EnvFile, opts.Redactor, inheritedRedactor)
+	if err != nil {
+		return nil, err
+	}
+	opts.Redactor = redactor
 	if h == nil {
 		var err error
 		h, err = NewHarness(Options{
@@ -115,7 +161,13 @@ func NewAgentRuntime(opts RuntimeOptions) (*AgentRuntime, error) {
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		h.Redactor = redactor
 	}
+	// NewHarness also adds process defaults for direct callers. Preserve the
+	// normalized union as the one redactor used by every runtime surface.
+	opts.Redactor = MergeRedactors(redactor, h.Redactor)
+	h.Redactor = opts.Redactor
 	if opts.Store == nil {
 		opts.Store = h.Store
 	}
@@ -125,17 +177,30 @@ func NewAgentRuntime(opts RuntimeOptions) (*AgentRuntime, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.HeadlessPosture == "" {
+		opts.HeadlessPosture = PostureManual
+	}
+	switch opts.HeadlessPosture {
+	case PostureManual, PostureAutoSafe, PosturePlan:
+	default:
+		return nil, fmt.Errorf("operate: invalid headless posture %q", opts.HeadlessPosture)
+	}
 	repoRoot := strings.TrimSpace(opts.RepoRoot)
 	if repoRoot == "" {
 		repoRoot = detectOperateRepoRoot()
 	}
+	modelTurn := make(chan struct{}, 1)
+	modelTurn <- struct{}{}
 	return &AgentRuntime{
-		Harness:  h,
-		Store:    opts.Store,
-		Tools:    opts.Tools,
-		Options:  opts,
-		repoRoot: repoRoot,
-		locks:    make(map[string]*os.File),
+		Harness:    h,
+		Store:      opts.Store,
+		Tools:      opts.Tools,
+		Options:    opts,
+		repoRoot:   repoRoot,
+		locks:      make(map[string]*os.File),
+		turns:      make(map[string]*sessionTurnLane),
+		activities: make(map[string]map[uint64]context.CancelFunc),
+		modelTurn:  modelTurn,
 	}, nil
 }
 
@@ -149,6 +214,12 @@ func (r *AgentRuntime) OpenSessionWriter(ctx context.Context, req RuntimeStartRe
 	if r == nil || r.Store == nil {
 		return RuntimeSession{}, errors.New("operate: nil runtime")
 	}
+	activityCtx, finishActivity, err := r.beginRuntimeActivity(ctx, "@open-session")
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	defer finishActivity()
+	ctx = activityCtx
 	dir := strings.TrimSpace(req.Dir)
 	if dir == "" {
 		dir = r.Options.Dir
@@ -170,7 +241,6 @@ func (r *AgentRuntime) OpenSessionWriter(ctx context.Context, req RuntimeStartRe
 
 	var session *Session
 	created := false
-	var err error
 	if strings.TrimSpace(req.SessionID) != "" {
 		session, err = r.Store.Load(req.SessionID)
 		if err != nil {
@@ -199,21 +269,19 @@ func (r *AgentRuntime) OpenSessionWriter(ctx context.Context, req RuntimeStartRe
 		}()
 	}
 	if created && strings.TrimSpace(req.InitialPrompt) != "" {
-		if err := writeAtomic(session.GoalPath, []byte(strings.TrimSpace(req.InitialPrompt)+"\n"), 0o600); err != nil {
+		goal := r.Options.Redactor.Redact(strings.TrimSpace(req.InitialPrompt))
+		if err := writeAtomic(session.GoalPath, []byte(goal+"\n"), 0o600); err != nil {
 			return RuntimeSession{}, err
 		}
 	}
 
-	ws, _ := DetectWorkspace(session.Dir)
-	if ws.Dir != "" {
-		r.workspace = &ws
+	workspace := workspaceForSession(session)
+	if workspace != nil {
 		if session.Status == StatusNew {
 			if err := r.Store.Transition(session, StatusSelected, "workspace selected"); err != nil {
 				return RuntimeSession{}, err
 			}
 		}
-	} else {
-		r.workspace = nil
 	}
 
 	repairedTail, err := repairTrailingTranscript(session.TranscriptPath)
@@ -222,6 +290,17 @@ func (r *AgentRuntime) OpenSessionWriter(ctx context.Context, req RuntimeStartRe
 	}
 	repairedAuditTail, err := repairTrailingToolCallAudit(session.ToolCallsPath)
 	if err != nil {
+		return RuntimeSession{}, err
+	}
+	repairedEventTail, err := repairTrailingEvents(session.EventsPath)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	// Validate the complete event journal while the writer lock is held. This
+	// prevents Resume from accepting a repaired tail while silently retaining a
+	// corrupt middle or an unreadable oversized record. Subscribe remains a
+	// strictly read-only API and propagates the same errors.
+	if _, err := readEvents(session.EventsPath); err != nil {
 		return RuntimeSession{}, err
 	}
 	transcript, err := ReadTranscript(session.TranscriptPath)
@@ -252,11 +331,23 @@ func (r *AgentRuntime) OpenSessionWriter(ctx context.Context, req RuntimeStartRe
 		}
 		transcript = append(transcript, entry)
 	}
+	if repairedEventTail {
+		entry, err := r.appendTranscript(session, TranscriptEntry{
+			SessionID: session.ID,
+			Kind:      TranscriptStatus,
+			Text:      "recovery discarded an invalid, unterminated final event-journal line after an interrupted write",
+			Metadata:  map[string]any{"recovery": "torn_event_tail_discarded"},
+		})
+		if err != nil {
+			return RuntimeSession{}, err
+		}
+		transcript = append(transcript, entry)
+	}
 	transcript, err = r.recoverInterruptedCalls(session, transcript)
 	if err != nil {
 		return RuntimeSession{}, err
 	}
-	return RuntimeSession{Session: session, Workspace: r.workspace, Transcript: transcript}, ctx.Err()
+	return RuntimeSession{Session: session, Workspace: workspace, Transcript: transcript}, ctx.Err()
 }
 
 // Start creates or resumes a session. Unlike Harness.Start, this works from a
@@ -265,6 +356,12 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	activityCtx, finishActivity, err := r.beginRuntimeActivity(ctx, "@start-session")
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	defer finishActivity()
+	ctx = activityCtx
 	started, err := r.OpenSessionWriter(ctx, req)
 	if err != nil {
 		return RuntimeSession{}, err
@@ -284,41 +381,64 @@ func (r *AgentRuntime) Start(ctx context.Context, req RuntimeStartRequest) (Runt
 	return started, ctx.Err()
 }
 
-// Close releases session writer locks held by this runtime.
+// Close cancels and joins active operations before releasing session writer
+// locks and the model transport. It is idempotent and safe to call while a
+// model or governed tool turn is blocked.
 func (r *AgentRuntime) Close() error {
 	if r == nil {
 		return nil
 	}
-	r.lockMu.Lock()
-	defer r.lockMu.Unlock()
-	var errs []error
-	for id, lock := range r.locks {
-		if err := releaseSessionLock(lock); err != nil {
-			errs = append(errs, fmt.Errorf("operate: release session %s lock: %w", id, err))
-		}
-		delete(r.locks, id)
-	}
-	return errors.Join(errs...)
+	r.closeOnce.Do(func() { r.closeErr = r.closeRuntime() })
+	return r.closeErr
 }
 
 // Prompt executes one free-form operator prompt.
 func (r *AgentRuntime) Prompt(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "prompt", nil, &turnControl{posture: PostureAutoSafe})
+	turn, err := r.runPrompt(ctx, sessionID, text, "prompt", nil, r.headlessControl())
+	return r.redactTurn(turn), redactError(r.Options.Redactor, err)
 }
 
 // Steer records an operator steering instruction and executes it as a turn.
 func (r *AgentRuntime) Steer(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "steer", nil, &turnControl{posture: PostureAutoSafe})
+	turn, err := r.runPrompt(ctx, sessionID, text, "steer", nil, r.headlessControl())
+	return r.redactTurn(turn), redactError(r.Options.Redactor, err)
 }
 
 // FollowUp executes a follow-up prompt inside the same session.
 func (r *AgentRuntime) FollowUp(ctx context.Context, sessionID, text string) (RuntimeTurn, error) {
-	return r.runPrompt(ctx, sessionID, text, "follow_up", nil, &turnControl{posture: PostureAutoSafe})
+	turn, err := r.runPrompt(ctx, sessionID, text, "follow_up", nil, r.headlessControl())
+	return r.redactTurn(turn), redactError(r.Options.Redactor, err)
 }
 
-// Interrupt records an interrupt request. Long-lived transports can later map
-// this to a process/session cancellation primitive.
-func (r *AgentRuntime) Interrupt(_ context.Context, sessionID, reason string) (RuntimeTurn, error) {
+// Interrupt cancels the active turn for a session, waits for its mutation lane
+// to settle, then durably records the operator interrupt boundary.
+func (r *AgentRuntime) Interrupt(ctx context.Context, sessionID, reason string) (RuntimeTurn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	activityCtx, finishActivity, err := r.beginRuntimeActivity(ctx, "@interrupt:"+sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	defer finishActivity()
+	ctx = activityCtx
+	cancelled, err := r.cancelSessionActivities(sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	_, release, err := r.acquireSessionTurn(ctx, sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	defer release()
+	// A turn may have registered while the first cancellation snapshot was
+	// being taken. Once this lane is held none can be executing, so a second
+	// pass deterministically cancels any queued same-session work.
+	queued, err := r.cancelSessionActivities(sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	cancelled = cancelled || queued
 	session, err := r.writableSession(sessionID)
 	if err != nil {
 		return RuntimeTurn{}, err
@@ -327,25 +447,73 @@ func (r *AgentRuntime) Interrupt(_ context.Context, sessionID, reason string) (R
 	if msg == "" {
 		msg = "operator interrupt requested"
 	}
-	entry, err := r.appendTranscript(session, TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "interrupt"}})
+	entry, err := r.appendTranscript(session, TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "interrupt", "cancelled_active_turn": cancelled}})
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
-	return RuntimeTurn{SessionID: session.ID, Final: msg, Entries: []TranscriptEntry{entry}, Workspace: r.workspace}, nil
+	return r.redactTurn(RuntimeTurn{SessionID: session.ID, Final: msg, Entries: []TranscriptEntry{entry}, Workspace: workspaceForSession(session)}), nil
 }
 
-// Compact records a compaction checkpoint request.
-func (r *AgentRuntime) Compact(_ context.Context, sessionID string) (RuntimeTurn, error) {
+// Compact persists a bounded deterministic summary and makes it the model's
+// new context boundary. The full append-only transcript remains available for
+// audit/export; only subsequent provider requests use the compacted window.
+func (r *AgentRuntime) Compact(ctx context.Context, sessionID string) (RuntimeTurn, error) {
+	activityCtx, finishActivity, err := r.beginRuntimeActivity(ctx, "@compact:"+sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	defer finishActivity()
+	_, release, err := r.acquireSessionTurn(activityCtx, sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	defer release()
 	session, err := r.writableSession(sessionID)
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
-	msg := "session compaction checkpoint recorded"
-	entry, err := r.appendTranscript(session, TranscriptEntry{SessionID: session.ID, Kind: TranscriptStatus, Text: msg, Metadata: map[string]any{"runtime_event": "compact"}})
+	turn, err := r.compactSession(session)
+	return r.redactTurn(turn), err
+}
+
+// compactSession persists the context boundary while the caller holds the
+// session mutation lane. Keeping the operation lock-free internally lets the
+// same durable primitive back both Compact/RPC and the interactive /compact
+// command without recursively acquiring the lane.
+func (r *AgentRuntime) compactSession(session *Session) (RuntimeTurn, error) {
+	entries, err := ReadTranscript(session.TranscriptPath)
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
-	return RuntimeTurn{SessionID: session.ID, Final: msg, Entries: []TranscriptEntry{entry}, Workspace: r.workspace}, nil
+	if pending, err := pendingTranscriptToolCalls(entries); err != nil {
+		return RuntimeTurn{}, err
+	} else if len(pending) != 0 {
+		return RuntimeTurn{}, fmt.Errorf("operate: cannot compact while %d durable tool call(s) lack results", len(pending))
+	}
+	summary, digest, err := buildContextCompaction(entries)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	through := ""
+	if len(entries) != 0 {
+		through = entries[len(entries)-1].ID
+	}
+	msg := fmt.Sprintf("session context compacted: %d durable entries summarized", len(entries))
+	entry, err := r.appendTranscript(session, TranscriptEntry{
+		SessionID: session.ID, Kind: TranscriptStatus, Text: msg,
+		Metadata: map[string]any{
+			"runtime_event":              "compact",
+			"context_compaction":         true,
+			"context_summary":            summary,
+			"context_summary_sha256":     digest,
+			"compacted_entries":          len(entries),
+			"compacted_through_entry_id": through,
+		},
+	})
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	return RuntimeTurn{SessionID: session.ID, Final: msg, Entries: []TranscriptEntry{entry}, Workspace: workspaceForSession(session)}, nil
 }
 
 // Resume loads a persisted session.
@@ -356,6 +524,12 @@ func (r *AgentRuntime) Resume(ctx context.Context, sessionID string) (RuntimeSes
 // Fork creates a new session with the same workspace and an audit trail pointing
 // to the parent. It does not copy edits; worker code stays normal Git state.
 func (r *AgentRuntime) Fork(ctx context.Context, sessionID string) (RuntimeSession, error) {
+	activityCtx, finishActivity, err := r.beginRuntimeActivity(ctx, "@fork:"+sessionID)
+	if err != nil {
+		return RuntimeSession{}, err
+	}
+	defer finishActivity()
+	ctx = activityCtx
 	parent, err := r.Store.Load(sessionID)
 	if err != nil {
 		return RuntimeSession{}, err
@@ -376,11 +550,7 @@ func (r *AgentRuntime) Fork(ctx context.Context, sessionID string) (RuntimeSessi
 	if err != nil {
 		return RuntimeSession{}, err
 	}
-	ws, _ := DetectWorkspace(child.Dir)
-	if ws.Dir != "" {
-		r.workspace = &ws
-	}
-	return RuntimeSession{Session: child, Workspace: r.workspace, Transcript: []TranscriptEntry{entry}}, ctx.Err()
+	return RuntimeSession{Session: child, Workspace: workspaceForSession(child), Transcript: []TranscriptEntry{entry}}, ctx.Err()
 }
 
 // Subscribe replays the current event stream. The channel closes after the
@@ -390,10 +560,13 @@ func (r *AgentRuntime) Subscribe(ctx context.Context, sessionID string) (<-chan 
 	if err != nil {
 		return nil, err
 	}
+	events, err := readEvents(session.EventsPath)
+	if err != nil {
+		return nil, fmt.Errorf("operate: replay session events: %w", err)
+	}
 	ch := make(chan Event)
 	go func() {
 		defer close(ch)
-		events, _ := readEvents(session.EventsPath)
 		for _, event := range events {
 			select {
 			case <-ctx.Done():
@@ -419,14 +592,38 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	if text == "" {
 		return RuntimeTurn{}, fmt.Errorf("operate: prompt is empty")
 	}
+	activityCtx, finishActivity, err := r.beginRuntimeActivity(ctx, sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	defer finishActivity()
+	ctx = activityCtx
+	turnCtx, release, err := r.acquireSessionTurn(ctx, sessionID)
+	if err != nil {
+		return RuntimeTurn{}, err
+	}
+	defer release()
+	ctx = turnCtx
 	session, err := r.writableSession(sessionID)
 	if err != nil {
 		return RuntimeTurn{}, err
 	}
-	if ws, err := DetectWorkspace(session.Dir); err == nil {
-		r.workspace = &ws
+	if strings.EqualFold(text, "/compact") {
+		turn, compactErr := r.compactSession(session)
+		turn = r.redactTurn(turn)
+		if compactErr != nil {
+			redactedErr := redactError(r.Options.Redactor, compactErr)
+			emit(StreamEvent{Kind: StreamError, Err: redactedErr})
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: turn.Workspace, Err: redactedErr})
+			return turn, redactedErr
+		}
+		if len(turn.Entries) != 0 {
+			entry := turn.Entries[0]
+			emit(StreamEvent{Kind: StreamStatus, Entry: &entry, Final: turn.Final})
+		}
+		emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: turn.Workspace})
+		return turn, nil
 	}
-
 	var turn RuntimeTurn
 	turn.SessionID = session.ID
 	appendEntry := func(entry TranscriptEntry) (TranscriptEntry, error) {
@@ -450,20 +647,26 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	// model tool-calling loop.
 	isSlash := strings.HasPrefix(strings.TrimSpace(text), "/")
 	if r.Options.Model != nil && !isSlash {
+		modelCtx, releaseModel, err := r.acquireModelTurn(ctx)
+		if err != nil {
+			return RuntimeTurn{}, err
+		}
+		defer releaseModel()
+		ctx = modelCtx
 		return r.runAgentLoop(ctx, session, &turn, emit, ctrl)
 	}
 
-	plan := r.planPrompt(text)
+	plan := r.planPrompt(text, workspaceForSession(session))
 	if plan.Assistant != "" && len(plan.Tools) == 0 {
-		emitAssistantDeltas(emit, plan.Assistant)
+		emitAssistantDeltas(emit, r.Redact(plan.Assistant))
 		saved, err := appendEntry(TranscriptEntry{Kind: TranscriptAssistant, Role: "assistant", Text: plan.Assistant})
 		if err != nil {
 			return RuntimeTurn{}, err
 		}
 		emit(StreamEvent{Kind: StreamAssistant, Entry: &saved})
 		turn.Final = plan.Assistant
-		turn.Workspace = r.workspace
-		emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
+		turn.Workspace = workspaceForSession(session)
+		emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: turn.Workspace})
 		return turn, nil
 	}
 
@@ -472,22 +675,29 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 	}
 
 	var summaries []string
+	var deniedErr error
 	for _, call := range plan.Tools {
 		if err := ctx.Err(); err != nil {
 			emit(StreamEvent{Kind: StreamStatus, Final: "interrupted"})
 			turn.Final = "interrupted"
-			turn.Workspace = r.workspace
-			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
+			turn.Workspace = workspaceForSession(session)
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: turn.Workspace})
 			return turn, err
 		}
 		result, err := r.callTool(ctx, session, call, &turn, emit, ctrl)
+		if errors.Is(err, ErrToolDenied) {
+			deniedErr = errors.Join(deniedErr, err)
+		}
 		if err != nil && !errors.Is(err, ErrToolDenied) {
 			msg := call.Name + ": " + err.Error()
-			errEntry, _ := appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
+			errEntry, appendErr := appendEntry(TranscriptEntry{Kind: TranscriptError, Role: "assistant", Text: msg, ToolName: call.Name})
+			if appendErr != nil {
+				return r.redactTurn(turn), errors.Join(redactError(r.Options.Redactor, err), appendErr)
+			}
 			emit(StreamEvent{Kind: StreamError, Entry: &errEntry, Err: err})
 			turn.Final = msg
-			turn.Workspace = r.workspace
-			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace, Err: err})
+			turn.Workspace = workspaceForSession(session)
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: turn.Workspace, Err: err})
 			return turn, err
 		}
 		if strings.TrimSpace(result.Summary) != "" {
@@ -513,9 +723,17 @@ func (r *AgentRuntime) runPrompt(ctx context.Context, sessionID, text, kind stri
 		emit(StreamEvent{Kind: StreamAssistant, Entry: &saved})
 	}
 	turn.Final = final
-	turn.Workspace = r.workspace
-	emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: r.workspace})
-	return turn, ctx.Err()
+	turn.Workspace = workspaceForSession(session)
+	emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Workspace: turn.Workspace, Err: deniedErr})
+	return turn, errors.Join(ctx.Err(), deniedErr)
+}
+
+func (r *AgentRuntime) headlessControl() *turnControl {
+	posture := PostureManual
+	if r != nil && r.Options.HeadlessPosture != "" {
+		posture = r.Options.HeadlessPosture
+	}
+	return &turnControl{posture: posture, interactive: false}
 }
 
 // callTool routes one planned tool call through the GovernedExecutor, which
@@ -539,6 +757,7 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 		OnEntry: func(entry TranscriptEntry) {
 			turn.Entries = append(turn.Entries, entry)
 		},
+		persistedEntry: call.persistedEntry,
 	})
 	if err != nil {
 		return result, err
@@ -552,7 +771,7 @@ func (r *AgentRuntime) callTool(ctx context.Context, session *Session, call plan
 	return result, nil
 }
 
-func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *ApprovalRequest {
+func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace, session *Session) *ApprovalRequest {
 	id, _ := randomID()
 	if id == "" {
 		id = call.ID
@@ -563,9 +782,13 @@ func approvalRequestFor(call plannedTool, gov Governance, ws *Workspace) *Approv
 	}
 	switch call.Name {
 	case "transfer_worker":
-		env := strings.ToLower(stringValue(call.Input, "env"))
+		env := strings.ToLower(strings.TrimSpace(stringValue(call.Input, "env")))
+		req.Details["env"] = env
 		req.Prod = env == "prod" || env == "production"
-		req.Summary = "deploy worker to " + stringValue(call.Input, "env")
+		req.Summary = "deploy worker to " + env
+		if session != nil && strings.TrimSpace(session.AcceptedRiskReason) != "" {
+			req.Details["accepted_risk_override"] = session.AcceptedRiskReason
+		}
 	case "build_worker":
 		req.Summary = "build worker binary"
 	case "run_shell":
@@ -585,6 +808,8 @@ func (r *AgentRuntime) appendTranscript(session *Session, entry TranscriptEntry)
 	if err := r.requireSessionWriter(session); err != nil {
 		return TranscriptEntry{}, err
 	}
+	r.appendMu.Lock()
+	defer r.appendMu.Unlock()
 	return r.transcript(session).Append(entry)
 }
 
@@ -593,14 +818,29 @@ func (r *AgentRuntime) transcript(session *Session) *TranscriptStore {
 }
 
 func (r *AgentRuntime) startMessage(session *Session) string {
-	if r.workspace != nil {
-		return fmt.Sprintf("Ouvrier Agent Cockpit ready for worker %s.", r.workspace.Name)
+	if workspace := workspaceForSession(session); workspace != nil {
+		return fmt.Sprintf("Ouvrier Agent Cockpit ready for worker %s.", workspace.Name)
 	}
 	candidates := detectOperateCandidates(session.Dir)
 	if len(candidates) > 0 {
 		return fmt.Sprintf("Ouvrier Agent Cockpit ready. %d worker(s) detected; select one or create a new worker from a prompt.", len(candidates))
 	}
 	return "Ouvrier Agent Cockpit ready. Describe the worker you want to build, or use /new worker."
+}
+
+// workspaceForSession derives worker selection from the durable session for
+// every operation. It deliberately returns a fresh value instead of caching
+// selection on AgentRuntime: one runtime may serve several sessions at once,
+// and scaffold_worker can move only its own session into a new worker.
+func workspaceForSession(session *Session) *Workspace {
+	if session == nil || strings.TrimSpace(session.Dir) == "" {
+		return nil
+	}
+	workspace, err := DetectWorkspace(session.Dir)
+	if err != nil {
+		return nil
+	}
+	return &workspace
 }
 
 func reviewDataFromResult(data map[string]any) *ReviewData {

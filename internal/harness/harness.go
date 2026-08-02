@@ -39,6 +39,7 @@ type Harness struct {
 	providerResolver func(model string) (provider.Provider, error)
 	providerGate     *ProviderGate
 	memoryScope      string
+	idempotencyScope string
 }
 
 func New(p provider.Provider, opts ...Option) (*Harness, error) {
@@ -90,6 +91,7 @@ func New(p provider.Provider, opts ...Option) (*Harness, error) {
 		providerResolver: cfg.providerResolver,
 		providerGate:     cfg.providerGate,
 		memoryScope:      cfg.memoryScope,
+		idempotencyScope: cfg.idempotencyScope,
 	}, nil
 }
 
@@ -400,16 +402,25 @@ func (h *Harness) complete(ctx context.Context, session runtimecore.Session, p p
 	if h.streamDeltas {
 		if streamer, ok := p.(provider.StreamingProvider); ok {
 			index := 0
-			return streamer.CompleteStream(ctx, req, func(delta provider.Delta) {
-				if delta.Text == "" {
+			redactor := events.NewTextStreamRedactor()
+			emitDelta := func(text string) {
+				if text == "" {
 					return
 				}
 				_ = h.emit(ctx, session, events.EventLLMTokenDelta, map[string]any{
 					"index": index,
-					"text":  delta.Text,
+					"text":  text,
 				})
 				index++
+			}
+			resp, streamErr := streamer.CompleteStream(ctx, req, func(delta provider.Delta) {
+				emitDelta(redactor.Push(delta.Text))
 			})
+			// Flush even on provider failure: buffered ordinary text is still an
+			// observable delta, while any incomplete credential state collapses
+			// to a redaction marker.
+			emitDelta(redactor.Flush())
+			return resp, streamErr
 		}
 	}
 	return p.Complete(ctx, req)
@@ -903,12 +914,17 @@ func (h *Harness) appendEvent(ctx context.Context, event events.Event) error {
 		_, err := h.stateStore.AddEvent(ctx, event)
 		return err
 	}
+	if h.stateStore == nil {
+		_, err := h.eventStream.Append(ctx, event)
+		return err
+	}
+	if _, globallyAllocated := h.stateStore.(state.GloballyAllocatedEventIDStore); globallyAllocated {
+		_, err := h.eventStream.AppendPersisted(ctx, event, h.stateStore.AddEvent)
+		return err
+	}
 	appended, err := h.eventStream.Append(ctx, event)
 	if err != nil {
 		return err
-	}
-	if h.stateStore == nil {
-		return nil
 	}
 	_, err = h.stateStore.AddEvent(ctx, appended)
 	return err

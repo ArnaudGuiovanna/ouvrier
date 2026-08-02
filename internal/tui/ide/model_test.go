@@ -2,10 +2,13 @@ package ide
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/lsp"
@@ -210,6 +213,64 @@ func TestIDEAuditAndBuildRouteThroughExecutor(t *testing.T) {
 	}
 	if fake.calls[0].Tool != "audit_worker" || fake.calls[1].Tool != "build_worker" {
 		t.Fatalf("executor tools = %q, %q; want audit_worker, build_worker", fake.calls[0].Tool, fake.calls[1].Tool)
+	}
+}
+
+func TestIDEAuditErrorIsVisibleInStatusAndProblems(t *testing.T) {
+	dir := writeIDEWorker(t)
+	ws := makeIDEWorkspace(t, dir)
+	m := newIDEModel(context.Background(), IDEOptions{Workspace: ws, GoplsPath: ""})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	result, _ := m.Update(auditMsg{err: errors.New("sandbox unavailable")})
+	m = result.(*ideModel)
+	if m.statusKind != "fail" || !strings.Contains(m.status, "sandbox unavailable") {
+		t.Fatalf("audit error status = %q/%q, want visible failure", m.statusKind, m.status)
+	}
+	if len(m.auditProbs) != 1 || !strings.Contains(m.auditProbs[0].Message, "sandbox unavailable") {
+		t.Fatalf("audit error missing from Problems panel: %+v", m.auditProbs)
+	}
+}
+
+func TestIDEHintsOnlyAdvertiseAvailableActions(t *testing.T) {
+	dir := writeIDEWorker(t)
+	ws := makeIDEWorkspace(t, dir)
+
+	readOnly := newIDEModel(context.Background(), IDEOptions{Workspace: ws, GoplsPath: "", Embedded: true})
+	hints := readOnly.renderHints(240)
+	if !strings.Contains(hints, "read only") || strings.Contains(hints, "ctrl+s save") || strings.Contains(hints, "ctrl+b build") {
+		t.Fatalf("read-only IDE advertises side effects: %q", hints)
+	}
+	if !strings.Contains(hints, "ctrl+q back") || strings.Contains(hints, "]d/[d") {
+		t.Fatalf("embedded IDE footer advertises a non-real binding: %q", hints)
+	}
+
+	governed := newIDEModel(context.Background(), IDEOptions{
+		Workspace: ws,
+		GoplsPath: "",
+		Executor:  &fakeExecutor{},
+		Session:   &operate.Session{ID: "s1"},
+	})
+	hints = governed.renderHints(240)
+	if !strings.Contains(hints, "ctrl+s save&audit") || !strings.Contains(hints, "ctrl+b build") || !strings.Contains(hints, "ctrl+q quit") {
+		t.Fatalf("governed IDE footer omitted available actions: %q", hints)
+	}
+}
+
+func TestRunIDEHonorsContextCancellation(t *testing.T) {
+	dir := writeIDEWorker(t)
+	ws := makeIDEWorkspace(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunIDE(ctx, strings.NewReader(""), io.Discard, IDEOptions{Workspace: ws, GoplsPath: ""})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunIDE ignored context cancellation")
 	}
 }
 

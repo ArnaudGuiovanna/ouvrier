@@ -2,6 +2,8 @@ package operate
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,14 +12,41 @@ import (
 
 func TestAgentRuntimeCreatesWorkerFromNaturalPrompt(t *testing.T) {
 	parent := t.TempDir()
+	// The hardened Git subprocess intentionally ignores ambient Git discovery
+	// overrides such as GIT_CEILING_DIRECTORIES. Establish a real nested
+	// repository boundary so this test stays isolated even when TMPDIR itself
+	// lives under the Ouvrier checkout. Generated workers are ignored because
+	// this factory test validates filesystem artifacts, not candidate diffs.
+	if err := os.WriteFile(filepath.Join(parent, ".gitignore"), []byte("*\n!.gitignore\n"), 0o644); err != nil {
+		t.Fatalf("write factory .gitignore: %v", err)
+	}
+	gitInitAndCommit(t, parent)
+	buildCalls := 0
+	harness, err := NewHarness(Options{
+		Dir:    parent,
+		Driver: ManualDriver{},
+		Audit:  passingAuditRunner(),
+		Builder: BuildCoordinator{GoRun: func(_ context.Context, _ string, _ []string, args []string, _, _ io.Writer) error {
+			buildCalls++
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-o" {
+					return os.WriteFile(args[i+1], []byte("worker binary"), 0o755)
+				}
+			}
+			return errors.New("test build command omitted -o")
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHarness() error = %v", err)
+	}
 	runtime, err := NewAgentRuntime(RuntimeOptions{
-		Dir:      parent,
-		Driver:   ManualDriver{},
-		DriverID: "manual",
+		Dir: parent, Driver: ManualDriver{}, DriverID: "manual",
+		HeadlessPosture: PostureAutoSafe, Harness: harness,
 	})
 	if err != nil {
 		t.Fatalf("NewAgentRuntime() error = %v", err)
 	}
+	t.Cleanup(func() { _ = runtime.Close() })
 	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: parent, DriverID: "manual"})
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -52,6 +81,9 @@ func TestAgentRuntimeCreatesWorkerFromNaturalPrompt(t *testing.T) {
 	if !strings.HasSuffix(loaded.Dir, filepath.Join("ticket-triage")) {
 		t.Fatalf("session dir = %q, want generated worker", loaded.Dir)
 	}
+	if buildCalls != 1 {
+		t.Fatalf("build calls = %d, want one evidence-producing build", buildCalls)
+	}
 
 	readTurn, err := runtime.Prompt(context.Background(), started.Session.ID, "/read main.go")
 	if err != nil {
@@ -72,15 +104,35 @@ func TestAgentRuntimeCreatesWorkerFromNaturalPrompt(t *testing.T) {
 	}
 }
 
+func TestHeadlessRuntimeFailsClosedOnWorkerMutationByDefault(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", parent)
+	runtime, err := NewAgentRuntime(RuntimeOptions{Dir: parent, Driver: ManualDriver{}, DriverID: "manual"})
+	if err != nil {
+		t.Fatalf("NewAgentRuntime() error = %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: parent})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	_, err = runtime.Prompt(context.Background(), started.Session.ID, "Create a worker that receives POST /tickets")
+	if !errors.Is(err, ErrToolDenied) {
+		t.Fatalf("Prompt() error = %v, want fail-closed ErrToolDenied", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(parent, "ticket-triage")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("headless mutation created worker despite manual posture: %v", statErr)
+	}
+}
+
 func TestAgentRuntimeReviewUsesTranscriptAndReviewArtifact(t *testing.T) {
 	dir := writeWorkerFixture(t)
 	driver := &fakeDriver{
-		result: TurnResult{FinalMessage: `{"summary":"ok","findings":[]}`},
+		result: TurnResult{FinalMessage: `{"passed":true,"summary":"ok","findings":[]}`},
 	}
 	runtime, err := NewAgentRuntime(RuntimeOptions{
-		Dir:      dir,
-		Driver:   driver,
-		DriverID: "fake",
+		Dir: dir, Driver: driver, DriverID: "fake",
+		HeadlessPosture: PostureAutoSafe,
 	})
 	if err != nil {
 		t.Fatalf("NewAgentRuntime() error = %v", err)

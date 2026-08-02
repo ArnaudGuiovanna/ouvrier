@@ -1,13 +1,14 @@
 package operate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 )
@@ -92,37 +93,53 @@ func DetectWorkspace(dir string) (Workspace, error) {
 		}
 	}
 
-	ws.Git = detectGit(abs)
+	gitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ws.Git, err = detectGitStrict(gitCtx, abs)
+	if err != nil {
+		return Workspace{}, err
+	}
 	return ws, nil
 }
 
 // RequireCleanGit rejects dirty Git worktrees before agent edits.
 func RequireCleanGit(ws Workspace) error {
-	if !ws.Git.Present {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	git, err := detectGitStrict(ctx, ws.Dir)
+	if err != nil {
+		return err
+	}
+	if !git.Present {
 		return nil
 	}
-	if ws.Git.Dirty {
+	if git.Dirty {
 		return fmt.Errorf("operate requires a clean Git worktree before agent edits; commit, stash, or run manual mode")
 	}
 	return nil
 }
 
-func detectGit(dir string) GitInfo {
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		// Worktrees store .git as a file. Ask git as a fallback.
-		if err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Run(); err != nil {
-			return GitInfo{}
+func detectGitStrict(ctx context.Context, dir string) (GitInfo, error) {
+	inside, stderr, err := runHardenedGit(ctx, dir, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		if gitNotRepository(inside, stderr) {
+			return GitInfo{}, nil
 		}
+		return GitInfo{}, fmt.Errorf("operate: inspect Git worktree: %s: %w", strings.TrimSpace(stderr), err)
 	}
-	info := GitInfo{Present: true}
-	if out, err := exec.Command("git", "-C", dir, "branch", "--show-current").Output(); err == nil {
-		info.Branch = strings.TrimSpace(string(out))
+	if strings.TrimSpace(inside) != "true" {
+		return GitInfo{}, nil
 	}
-	if out, err := exec.Command("git", "-C", dir, "status", "--short").Output(); err == nil {
-		info.Status = filterOperateGitStatus(string(out))
-		info.Dirty = info.Status != ""
+	branch, branchErr, err := runHardenedGit(ctx, dir, "branch", "--show-current")
+	if err != nil {
+		return GitInfo{}, fmt.Errorf("operate: inspect Git branch: %s: %w", strings.TrimSpace(branchErr), err)
 	}
-	return info
+	status, statusErr, err := runHardenedGit(ctx, dir, "status", "--short", "--untracked-files=all")
+	if err != nil {
+		return GitInfo{}, fmt.Errorf("operate: inspect Git status: %s: %w", strings.TrimSpace(statusErr), err)
+	}
+	status = filterOperateGitStatus(status)
+	return GitInfo{Present: true, Branch: strings.TrimSpace(branch), Dirty: status != "", Status: status}, nil
 }
 
 func cleanStrings(in []string) []string {

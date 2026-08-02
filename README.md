@@ -69,6 +69,12 @@ in Ouvrier workers. Deployment PaaS and web-console development are paused
 pending redesign. See [the current project direction](docs/project-direction.md)
 for the binding scope and dependency boundaries.
 
+Current `main` is an active stabilization line, not a declaration of a new
+stable release after `v0.5.5`. The stabilization behavior described below is
+implemented and under repository-wide verification; it becomes release
+evidence only when all required format, vet, static-analysis, test, race, and
+golden-worker gates pass.
+
 The public Go module path is:
 
 ```txt
@@ -103,7 +109,8 @@ What ships in the current codebase:
 - Native provider token streaming through `EventStream` and `Reply(SSE())`,
   human-in-the-loop suspend/resume approvals, scoped persistent memory, model
   fallback chains, provider budgets, and cost accounting from pricing tables.
-- Stream DLQ routing, replay tooling, broker backpressure/ack policy controls,
+- Stream DLQ routing, replay tooling, broker backpressure, runtime-managed
+  automatic acknowledgements,
   and queue push terminals for Kafka, Redis, NATS, SQS, and HTTP(S).
 - Protected admin endpoints (`/admin/health`, `/admin/status`,
   `/admin/plans`, `/admin/capabilities`, `/admin/events`, `/admin/traces`,
@@ -255,6 +262,17 @@ receivers support NATS, Redis Streams, and Kafka boundaries, reserve message
 IDs in the state store when available, and emit stream dead-letter events for
 failed delivery handling.
 
+Opt-in durable execution (`OUVRIER_DURABLE_RUNS=1`) binds recovery to the full
+compiled replay contract **and the exact worker executable image**. It abandons
+stale journals after any material plan change or binary replacement, even when
+the public plan shape is unchanged, so changed Go handlers/tools cannot be
+mixed into an older execution. Existing journals are therefore deliberately
+not resumed across a worker rebuild; replicas that must recover one another
+must run byte-identical artifacts. In this mode HTTP and Webhook plans must
+contain at least one `Pipe`; startup rejects a direct zero-step terminal rather
+than claiming durability it cannot provide. Zero-step Cron and Stream plans
+remain journaled and supported.
+
 Stream production hardening:
 
 - `StreamDLQ(target, maxAttempts)` retries a poisoned message up to
@@ -263,9 +281,12 @@ Stream production hardening:
   `redis://`) through the same producer machinery as the `Queue` push terminal.
 - `StreamMaxInFlight(limit)` bounds concurrently processed deliveries so a slow
   handler applies backpressure to the broker.
-- `StreamAckPolicy(StreamAckAuto | StreamAckManual)` selects the per-broker
-  acknowledgement mode. `StreamAckManual` leaves acking to the handler; brokers
-  whose receiver exposes no ack closure treat it as a no-op.
+- `StreamAckPolicy(StreamAckAuto)` makes the supported runtime-managed
+  acknowledgement mode explicit; it is also the default. `StreamAckManual`
+  remains defined for source compatibility, but validation rejects it with
+  `ErrInvalidNode` because worker handlers do not yet receive an acknowledgement
+  capability. This prevents a manual policy from silently leaving successful
+  deliveries unacknowledged.
 - Replay a dead-letter queue with `ReplayStreamDLQ` in-process, or via the
   admin endpoint `POST /admin/streams/replay` (same admin auth as other
   `/admin/*` routes), which drains and reprocesses the runtime-retained copy
@@ -546,7 +567,7 @@ ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]
 ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
-ouvrier operate [--dir .] [--agent codex|manual]
+ouvrier operate [--dir .] [--agent codex|manual] [--codex-mode auto|exec|app-server] [--auto-safe]
 ouvrier operate --print "create a worker that receives POST /tickets"
 ouvrier operate --mode json --prompt "review this worker"
 ouvrier operate --mode rpc
@@ -572,19 +593,98 @@ ouvrier console [--addr 127.0.0.1:7333] [--fleet PATH] [--token TOKEN] [--no-ope
 workers. Run it from a worker or from a parent factory directory, then type the
 worker you want: the cockpit can infer a plan, scaffold a normal Go worker,
 load Ouvrier API context, ask the configured Codex/manual driver to patch code,
-review findings, run audit gates, build the binary, and transfer through the
-existing deploy engine. The same runtime powers the Bubble Tea UI, one-shot
-`--print` and `--mode json`, and JSONL `--mode rpc`.
+review findings, run audit gates, and build a verified local binary. The same
+runtime powers the Bubble Tea UI, one-shot `--print` and `--mode json`, and
+JSONL `--mode rpc`. Transfer remains available for compatibility, but deploy
+is not part of the active cockpit acceptance journey while that workstream is
+paused.
+
+Headless turns (`--print`, `--mode json`, `--mode rpc`, or a prompt supplied on
+the command line) default to the `manual` posture and fail closed when a tool
+needs approval but no operator is attached. Read-only and idempotent tools can
+run; side-effecting and `requires_approval` tools are denied and the denial is
+recorded. `--auto-safe` is the explicit opt-in that allows side-effecting tools
+in headless mode; it never bypasses a `requires_approval` floor, so a transfer
+still cannot auto-approve itself.
 
 Codex auth follows the Pi-style ownership boundary: `/login codex` probes or
 delegates to the local Codex CLI flow, while Ouvrier stores only profile
-metadata, never Codex subscription tokens. Sessions and artifacts live under
-`.ouvrier/operate/sessions/<id>/` (`transcript.jsonl`, `events.jsonl`,
-`tool-calls.jsonl`, `auth_profile.json`, `goal.md`, `patch.json`,
-`diff.patch`, `review.json`, `audit.json`, `build.json`, and
-`transfer.json`) so a developer-operator can audit every step. The web console
-remains the remote observation and approval surface for workers and fleets;
-`operate` is the local construction harness.
+metadata, never Codex subscription tokens. `--codex-mode auto` (the default)
+and `--codex-mode exec` use the legacy Codex CLI exec driver behind Ouvrier's
+deterministic governed planner. That text-only transport is never installed in
+the structured model/tool loop. The structured
+`--codex-mode app-server` transport is an explicit experimental opt-in; it is
+not the production default while confinement and event-parity release gates
+remain open.
+
+The model-visible file tools stay inside the selected worker and refuse
+`.git`, `.ouvrier`, `.env*` (except `.env.example`), private-key material,
+credential stores, external symlinks, and symlinks that resolve to sensitive
+targets. `read_worker_file` returns at most 64 KiB; `write_worker_file` accepts
+at most 1 MiB of UTF-8; list and literal search are paginated and cap tree,
+file, byte, query, and result counts; removal is limited to one regular file or
+one internal symlink.
+
+`/compact` is a real durable model-context boundary, not a UI-only clear. It
+persists a deterministic summary of at most the latest 64 durable entries
+(64 KiB maximum) while retaining the complete append-only transcript for audit
+and export. Preparing the next provider request fails with an instruction to
+run `/compact` when the post-checkpoint model window exceeds 2,048 entries or
+8 MiB. The transcript writer caps one record at 8 MiB and the file at 64 MiB;
+readers and export also refuse more than 100,000 entries, and Markdown export
+is atomically capped at 128 MiB. Event records are capped at 4 MiB, while
+resume/replay refuses an event journal over 64 MiB or 100,000 entries. Resume
+may add a missing final newline or discard only an invalid unterminated final
+JSONL fragment and record that recovery; corruption in the middle remains an
+error.
+
+One Ouvrier-owned model turn is also bounded to 16 model steps, 16 tool calls
+per step and 64 total, 1 MiB of assistant text or tool arguments, and 8 KiB per
+tool result returned to the model. The provider boundary independently caps
+JSON responses at 8 MiB and SSE at 64 MiB total / 1 MiB per frame. Codex exec
+caps stdout at 8 MiB and 100,000 lines, assistant text at 1 MiB, and stderr at
+64 KiB; app-server caps one protocol message at 8 MiB and accumulated text at
+1 MiB. Exceeding any of these limits cancels or fails the turn; loop exhaustion
+is never reported as a successful outcome.
+
+Interactive `!` and silent-display `!!` commands both use the model-hidden
+`run_shell` tool and require an explicit approval every time. On Linux the
+command runs for at most two minutes in Bubblewrap with a fixed non-secret
+environment, no host network, only the selected worker exposed as a writable
+host path, a private writable `/tmp`, and combined output capped at 64 KiB. A
+non-Linux host or missing Bubblewrap fails closed; `!!` hides the UI card only,
+not the transcript or tool-call audit.
+
+Cockpit Git inspection disables hooks, external diff, textconv, fsmonitor, and
+interactive filters. It additionally refuses every non-empty `filter=`
+attribute, including Git LFS (`filter=lfs`), rather than executing repository
+content filters. Workspace `.gitattributes` inspection is bounded to 128 files,
+64 KiB each and 1 MiB total; the effective `.git/info/attributes` must also be
+a stable regular file no larger than 64 KiB. The full sanitized-source secret
+scan fails closed above 10,000 files, 4 MiB per file or 64 MiB total; driver
+review context fails closed above 32 files, 64 KiB per file or 256 KiB total.
+Patch and audit execution or evidence-persistence errors are saved as
+`patch_failed` / `audit_failed` with a redacted `last_error` instead of leaving
+an in-progress success-looking state.
+
+Production `operate audit` fails closed on non-Linux systems, when Bubblewrap
+is unavailable, or when its namespace guarantees cannot be enforced. The Go
+gates that can execute candidate code (`go test`, `go vet`, and the static
+Linux/amd64 build) run in a disposable Bubblewrap stage with no network,
+`GOPROXY=off`, `GOWORK=off`, an empty credential environment, vendored
+dependencies, and read-only candidate source after dependency preparation.
+There is no host-execution fallback for those gates.
+
+Sessions and artifacts live under `.ouvrier/operate/sessions/<id>/`
+(`transcript.jsonl`, `events.jsonl`, `tool-calls.jsonl`, `auth_profile.json`,
+`goal.md`, `patch.json`, `diff.patch`, `review.json`, `audit.json`,
+`build.json`, and `transfer.json`) so a developer-operator can audit every
+step. Audit and structured review evidence are tied to an immutable source
+snapshot; its digest includes the worker tree, local `go.mod` replacement
+inputs, the Go toolchain identity, and `GOWORK=off`. A trusted build must match
+that source digest, bind the exact persisted audit digest, and record the
+compiled binary's SHA-256. Any source, dependency, toolchain, or evidence-file
+change makes the prior proof stale.
 
 Known limitation: the single-writer session lock is enforced on Unix systems.
 The current Windows implementation is a no-op, so concurrent `operate`
@@ -597,6 +697,10 @@ compiles the worker; `--static` implies `CGO_ENABLED=0` with
 `-ldflags="-s -w"` and supports `--target os/arch` for cross-compilation
 (`modernc.org/sqlite` is pure Go, so static cross-builds work without a C
 toolchain).
+
+Deployment PaaS and web-console development are paused. The following shipped
+commands are retained for compatibility, maintenance, and security fixes; they
+are not an active product-development or cockpit-completion track.
 
 `ouvrier deploy <env>` (and its `deploy ssh --host` alias) is the agentless
 SSH deploy: it cross-compiles a static binary, ships it into an immutable

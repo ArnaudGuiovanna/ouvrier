@@ -1,6 +1,7 @@
 package ovr
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,10 +22,12 @@ type ssePipelineResult struct {
 func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, input string, reservedSession *runtimeplan.Session, eventStartID uint64) {
 	pipelineSession, err := pipelineSessionForPlan(r.plan, reservedSession)
 	if err != nil {
+		_ = r.runtime.resolveReservedTriggerFailure(req.Context(), reservedSession)
 		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 		return
 	}
 	if !r.tryAcquireWorker() {
+		_ = r.runtime.resolveReservedTriggerFailure(req.Context(), reservedSession)
 		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
 		return
 	}
@@ -34,10 +37,9 @@ func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, in
 	done := make(chan ssePipelineResult, 1)
 	go func() {
 		defer r.releaseWorker()
-		result, runErr := streamingRuntime.runPlanResultWithSession(req.Context(), r.plan, input, &pipelineSession)
-		if runErr == nil {
-			runErr = r.runtime.validateObservedTerminalReplyOutput(req.Context(), r.plan, result)
-		}
+		result, runErr := streamingRuntime.runPlanResultWithSessionAndTerminal(req.Context(), r.plan, input, &pipelineSession, func(ctx context.Context, result planRunResult) error {
+			return r.runtime.validateObservedTerminalReplyOutput(ctx, r.plan, result)
+		})
 		done <- ssePipelineResult{result: result, err: runErr}
 	}()
 
@@ -48,7 +50,13 @@ func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, in
 	for {
 		select {
 		case outcome := <-done:
-			r.runtime.writeSSEEventsSince(w, pipelineSession.ExecID, lastEventID)
+			var streamErr error
+			_, streamErr = r.runtime.writeSSEEventsSince(req.Context(), w, pipelineSession.ExecID, lastEventID)
+			if streamErr != nil {
+				writeSSEEventDeliveryError(w, streamErr)
+				flushSSE(w)
+				return
+			}
 			if outcome.err != nil {
 				writeSSEPipelineError(w, outcome.err)
 				flushSSE(w)
@@ -59,7 +67,13 @@ func (r httpRoute) servePipelineSSE(w http.ResponseWriter, req *http.Request, in
 			flushSSE(w)
 			return
 		case <-ticker.C:
-			lastEventID = r.runtime.writeSSEEventsSince(w, pipelineSession.ExecID, lastEventID)
+			var streamErr error
+			lastEventID, streamErr = r.runtime.writeSSEEventsSince(req.Context(), w, pipelineSession.ExecID, lastEventID)
+			if streamErr != nil {
+				writeSSEEventDeliveryError(w, streamErr)
+				flushSSE(w)
+				return
+			}
 			flushSSE(w)
 		case <-req.Context().Done():
 			return
@@ -109,20 +123,47 @@ func (rt httpRuntime) lastEventID() uint64 {
 	return recorded[len(recorded)-1].ID
 }
 
-func (rt httpRuntime) writeSSEEventsSince(w io.Writer, execID string, afterID uint64) uint64 {
-	if rt.eventStream == nil {
-		return afterID
+func (rt httpRuntime) writeSSEEventsSince(ctx context.Context, w io.Writer, execID string, afterID uint64) (uint64, error) {
+	recorded, err := rt.sseEventsSince(ctx, execID, afterID)
+	if err != nil {
+		return afterID, err
 	}
-	for _, event := range rt.eventStream.Since(afterID) {
-		if event.ID > afterID {
-			afterID = event.ID
-		}
-		if event.ExecID != execID {
+	for _, event := range recorded {
+		if event.ExecID != execID || event.ID <= afterID {
 			continue
 		}
-		writeSSERuntimeEvent(w, event)
+		if err := writeSSERuntimeEvent(w, event); err != nil {
+			return afterID, fmt.Errorf("write SSE event %d: %w", event.ID, err)
+		}
+		afterID = event.ID
 	}
-	return afterID
+	return afterID, nil
+}
+
+func (rt httpRuntime) sseEventsSince(ctx context.Context, execID string, afterID uint64) ([]events.Event, error) {
+	if rt.eventStream != nil {
+		recorded, err := rt.eventStream.SinceChecked(afterID)
+		if err == nil {
+			return recorded, nil
+		}
+		if !errors.Is(err, events.ErrEventHistoryGap) {
+			return nil, fmt.Errorf("read in-memory SSE events: %w", err)
+		}
+		if rt.stateStore == nil {
+			return nil, fmt.Errorf("SSE event delivery: %w", err)
+		}
+	}
+	if rt.stateStore != nil {
+		// The cursor fell behind local retention (or no local stream exists).
+		// Durable history includes every persisted event independently of the
+		// bounded in-process window.
+		recorded, err := rt.stateStore.EventsSince(ctx, execID, afterID)
+		if err != nil {
+			return nil, fmt.Errorf("read durable SSE events: %w", err)
+		}
+		return recorded, nil
+	}
+	return nil, nil
 }
 
 func writeSSEOutput(w http.ResponseWriter, code int, eventName, output string) {
@@ -140,14 +181,7 @@ func startSSE(w http.ResponseWriter, code int) {
 }
 
 func writeSSEOutputEvent(w io.Writer, eventName, output string) {
-	output = events.RedactJSONText(output)
-	if strings.TrimSpace(eventName) != "" {
-		_, _ = fmt.Fprintf(w, "event: %s\n", eventName)
-	}
-	for _, line := range strings.Split(output, "\n") {
-		_, _ = fmt.Fprintf(w, "data: %s\n", line)
-	}
-	_, _ = io.WriteString(w, "\n")
+	_ = writeSSEOutputEventChecked(w, eventName, output)
 }
 
 func writeSSEStatus(w io.Writer, eventName, status string) {
@@ -169,6 +203,14 @@ func writeSSEPipelineError(w io.Writer, err error) {
 	writeSSEOutputEvent(w, "error", string(payload))
 }
 
+func writeSSEEventDeliveryError(w io.Writer, err error) {
+	status := "event_stream_error"
+	if errors.Is(err, events.ErrEventHistoryGap) {
+		status = "event_history_gap"
+	}
+	writeSSEStatus(w, "error", status)
+}
+
 type sseRuntimeEvent struct {
 	ID        uint64           `json:"id"`
 	At        time.Time        `json:"at"`
@@ -179,7 +221,7 @@ type sseRuntimeEvent struct {
 	Payload   map[string]any   `json:"payload,omitempty"`
 }
 
-func writeSSERuntimeEvent(w io.Writer, event events.Event) {
+func writeSSERuntimeEvent(w io.Writer, event events.Event) error {
 	event = events.SanitizeEvent(event)
 	payload, err := json.Marshal(sseRuntimeEvent{
 		ID:        event.ID,
@@ -191,9 +233,25 @@ func writeSSERuntimeEvent(w io.Writer, event events.Event) {
 		Payload:   event.Payload,
 	})
 	if err != nil {
-		return
+		return err
 	}
-	writeSSEOutputEvent(w, string(event.Kind), string(payload))
+	return writeSSEOutputEventChecked(w, string(event.Kind), string(payload))
+}
+
+func writeSSEOutputEventChecked(w io.Writer, eventName, output string) error {
+	output = events.RedactJSONText(output)
+	if strings.TrimSpace(eventName) != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", eventName); err != nil {
+			return err
+		}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "\n")
+	return err
 }
 
 func flushSSE(w io.Writer) {

@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
@@ -82,11 +83,11 @@ func TestRunStreamsDeltasToEventStream(t *testing.T) {
 		text, _ := ev.Payload["text"].(string)
 		got = append(got, text)
 	}
-	if len(got) != 3 {
-		t.Fatalf("delta events = %v, want 3", got)
-	}
-	if got[0] != "Hel" || got[1] != "lo" || got[2] != " world" {
-		t.Fatalf("delta texts = %v, want [Hel lo  world]", got)
+	// Stateful redaction may move a small suspicious suffix to the next event,
+	// so security-safe event boundaries need not equal provider chunk
+	// boundaries. The visible stream must still reconstruct exactly.
+	if strings.Join(got, "") != "Hello world" {
+		t.Fatalf("delta texts = %v, want concatenated Hello world", got)
 	}
 }
 

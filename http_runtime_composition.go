@@ -12,8 +12,9 @@ import (
 )
 
 type compositionRun struct {
-	pipeline runtimeplan.Pipeline
-	input    string
+	pipeline  runtimeplan.Pipeline
+	input     string
+	namespace string
 }
 
 type compositionOutcome struct {
@@ -28,8 +29,12 @@ func (rt httpRuntime) runParallelStepResult(ctx context.Context, step runtimepla
 	// index.
 	scope.durable = nil
 	runs := make([]compositionRun, 0, len(step.Branches))
-	for _, branch := range step.Branches {
-		runs = append(runs, compositionRun{pipeline: branch, input: input})
+	for index, branch := range step.Branches {
+		runs = append(runs, compositionRun{
+			pipeline:  branch,
+			input:     input,
+			namespace: toolIdempotencyChildNamespace(scope.idempotencyNamespace, "parallel", index),
+		})
 	}
 	outcomes := rt.runComposition(ctx, runs, defaultCompositionConcurrency(len(runs)), step.PartialOK, scope)
 	output, err := encodeCompositionOutput(outcomes, step.PartialOK)
@@ -54,7 +59,11 @@ func (rt httpRuntime) runMapStepResult(ctx context.Context, step runtimeplan.Ste
 	}
 	runs := make([]compositionRun, 0, len(items))
 	for _, item := range items {
-		runs = append(runs, compositionRun{pipeline: step.MapPipeline, input: string(item)})
+		runs = append(runs, compositionRun{
+			pipeline:  step.MapPipeline,
+			input:     string(item),
+			namespace: toolIdempotencyChildNamespace(scope.idempotencyNamespace, "map", 0),
+		})
 	}
 	outcomes := rt.runComposition(ctx, runs, step.Concurrency, step.PartialOK, scope)
 	output, err := encodeCompositionOutput(outcomes, step.PartialOK)
@@ -102,7 +111,10 @@ func (rt httpRuntime) runComposition(ctx context.Context, runs []compositionRun,
 				outcomes[i].err = runCtx.Err()
 				return
 			}
-			result, err := rt.runStepsResult(runCtx, run.pipeline.Steps, run.input, scope)
+			childScope := scope
+			childScope.idempotencyNamespace = run.namespace
+			childScope.idempotencyBase = 0
+			result, err := rt.runStepsResult(runCtx, run.pipeline.Steps, run.input, childScope)
 			outcomes[i] = compositionOutcome{result: result, err: err}
 			if err != nil && !partialOK {
 				cancel()

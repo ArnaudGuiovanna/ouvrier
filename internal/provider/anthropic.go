@@ -94,7 +94,7 @@ func (a *Anthropic) Complete(ctx context.Context, req Request) (Response, error)
 	}
 
 	var decoded anthropicResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
+	if err := decodeBoundedProviderJSON(httpResp.Body, &decoded); err != nil {
 		return Response{}, fmt.Errorf("decode anthropic response: %w", err)
 	}
 	resp, err := decoded.toProviderResponse()

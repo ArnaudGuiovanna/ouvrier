@@ -1,7 +1,6 @@
-// Package ovr_test contains a compile-time parity test that references every
-// documented public symbol from docs/api.md so that any rename, removal,
-// or signature drift breaks `go build ./...` and public API drift is
-// observable from CI.
+// Package ovr_test keeps docs/api.md and the contractual public Go surface in
+// bidirectional parity. Compile-time references catch docs -> code drift; the
+// AST-backed test catches exported callable code -> docs drift.
 //
 // The test does not exercise behavior — it only forces type-checking against
 // the public API surface. Behavioural coverage lives in dedicated tests.
@@ -10,12 +9,21 @@
 // against the package as of the time of writing. When the spec describes a
 // public surface that is intentionally not implemented yet, the offending
 // reference should be replaced with a `t.Logf("api gap: ...")` line and noted
-// in this header block. As of 2026-06 every documented primitive listed
+// in this header block. As of 2026-08 every documented primitive listed
 // in docs/api.md has a public counterpart.
 package ovr_test
 
 import (
 	"context"
+	"go/ast"
+	"go/build"
+	"go/parser"
+	"go/token"
+	"net/http"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
 
 	ovr "github.com/ArnaudGuiovanna/ouvrier"
@@ -106,6 +114,10 @@ func TestPublicAPIParityCompiles(t *testing.T) {
 	_ = ovr.MCP("moodle-mcp")
 
 	// Runner and advanced configuration.
+	var parityProvider ovr.Provider
+	_ = parityProvider
+	var _ func(ovr.Provider) ovr.RunnerOption = ovr.WithProvider
+	var _ func(...ovr.Node) (http.Handler, error) = ovr.Handler
 	_ = ovr.NewRunner
 	_ = ovr.Run
 	_ = ovr.Validate
@@ -188,13 +200,207 @@ func TestPublicAPIParityCompiles(t *testing.T) {
 	// Exercise the runner constructor without starting any runtime so the
 	// option types — RunnerOption, PermissionPolicy, StateStore, Hooks,
 	// SandboxConfig, Tracer — remain reachable in this test.
+	hooks := ovr.NewHooks()
+	var _ func(ovr.EventKind, ovr.Hook) error = hooks.Register
 	runner := ovr.NewRunner(
 		ovr.WithPermissionPolicy(ovr.AllowSideEffects("email")),
 		ovr.WithPermissionPolicy(ovr.AllowSideEffectTargets("webhook", "https://example.com/result")),
-		ovr.WithSandbox(ovr.Sandbox(t.TempDir(), ovr.AllowEnv("PATH"))),
+		ovr.WithSandbox(ovr.Sandbox("/tmp/ouvrier-parity-workspace", ovr.AllowEnv("PATH"))),
 		ovr.WithSchemaRepairAttempts(1),
 		ovr.WithTracer(ovr.NopTracer()),
-		ovr.WithHooks(ovr.NewHooks()),
+		ovr.WithHooks(hooks),
 	)
-	_ = runner
+	var _ func(string, ...ovr.Node) error = runner.Run
+	var _ func(...ovr.Node) (http.Handler, error) = runner.Handler
+}
+
+// TestPublicAPIReferenceCoversCallableSurface makes parity bidirectional. The
+// compile-time references above prove docs -> code; this test proves code ->
+// docs for the public callable surface and every exported Ouvrier type exposed
+// directly by that surface's signatures.
+func TestPublicAPIReferenceCoversCallableSurface(t *testing.T) {
+	docs := readDoc(t, "docs/api.md")
+	functions, signatureTypes := exportedCallableSurface(t)
+
+	var missing []string
+	for _, function := range functions {
+		if function.receiver == "" {
+			if !documentsFunction(docs, function.name) {
+				missing = append(missing, "function "+function.name)
+			}
+			continue
+		}
+		qualified := function.receiver + "." + function.name
+		if !strings.Contains(docs, qualified) {
+			missing = append(missing, "method "+qualified)
+		}
+	}
+	for _, typeName := range signatureTypes {
+		if !documentsType(docs, typeName) {
+			missing = append(missing, "type "+typeName)
+		}
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Fatalf("docs/api.md is missing public contract entries:\n- %s", strings.Join(missing, "\n- "))
+	}
+}
+
+func TestActiveDocumentationHeadersUseLatestRelease(t *testing.T) {
+	for _, path := range []string{
+		"docs/api.md",
+		"docs/handbook.md",
+		"docs/ouvrier-syntax-handbook.md",
+	} {
+		t.Run(path, func(t *testing.T) {
+			lines := strings.Split(readDoc(t, path), "\n")
+			if len(lines) > 24 {
+				lines = lines[:24]
+			}
+			header := strings.Join(lines, "\n")
+			if !strings.Contains(header, "v0.5.5") {
+				t.Fatalf("active documentation header does not identify latest release v0.5.5:\n%s", header)
+			}
+		})
+	}
+}
+
+type exportedFunction struct {
+	name     string
+	receiver string
+}
+
+func exportedCallableSurface(t *testing.T) ([]exportedFunction, []string) {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("list public package: %v", err)
+	}
+	fset := token.NewFileSet()
+	files := make(map[string]*ast.File)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		matches, matchErr := build.Default.MatchFile(".", name)
+		if matchErr != nil {
+			t.Fatalf("evaluate build constraints for %s: %v", name, matchErr)
+		}
+		if !matches {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, name, nil, 0)
+		if parseErr != nil {
+			t.Fatalf("parse public package file %s: %v", name, parseErr)
+		}
+		if file.Name.Name == "ovr" {
+			files[name] = file
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("public package ovr not found")
+	}
+
+	exportedTypes := make(map[string]struct{})
+	for _, file := range files {
+		for _, declaration := range file.Decls {
+			generic, ok := declaration.(*ast.GenDecl)
+			if !ok || generic.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range generic.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if ok && typeSpec.Name.IsExported() {
+					exportedTypes[typeSpec.Name.Name] = struct{}{}
+				}
+			}
+		}
+	}
+
+	var functions []exportedFunction
+	signatureTypes := make(map[string]struct{})
+	for _, file := range files {
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || !function.Name.IsExported() {
+				continue
+			}
+			exported := exportedFunction{name: function.Name.Name}
+			if function.Recv != nil && len(function.Recv.List) > 0 {
+				exported.receiver = receiverTypeName(function.Recv.List[0].Type)
+				if !ast.IsExported(exported.receiver) {
+					continue
+				}
+			}
+			functions = append(functions, exported)
+			ast.Inspect(function.Type, func(node ast.Node) bool {
+				identifier, ok := node.(*ast.Ident)
+				if ok {
+					if _, exported := exportedTypes[identifier.Name]; exported {
+						signatureTypes[identifier.Name] = struct{}{}
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	types := make([]string, 0, len(signatureTypes))
+	for typeName := range signatureTypes {
+		types = append(types, typeName)
+	}
+	sort.Strings(types)
+	return functions, types
+}
+
+func receiverTypeName(expression ast.Expr) string {
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		return expression.Name
+	case *ast.StarExpr:
+		return receiverTypeName(expression.X)
+	default:
+		return ""
+	}
+}
+
+func documentsFunction(docs, name string) bool {
+	pattern := `\b` + regexp.QuoteMeta(name) + `(?:\[[^]\n]+\])?\s*\(`
+	return regexp.MustCompile(pattern).MatchString(docs)
+}
+
+func documentsType(docs, name string) bool {
+	identifier := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	inFence := false
+	for _, line := range strings.Split(docs, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence && identifier.MatchString(line) {
+			return true
+		}
+		if strings.HasPrefix(trimmed, "#") && identifier.MatchString(trimmed) {
+			return true
+		}
+		parts := strings.Split(line, "`")
+		for index := 1; index < len(parts); index += 2 {
+			if identifier.MatchString(parts[index]) {
+				return true
+			}
+		}
+	}
+	return strings.Contains(docs, "ovr."+name)
+}
+
+func readDoc(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(content)
 }

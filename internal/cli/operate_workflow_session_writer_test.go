@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
@@ -60,8 +61,8 @@ func TestOperateWorkflowCommandsRejectActiveSessionWriterWithoutEffects(t *testi
 	app := New("dev", WithStreams(nil, &out, &errOut), WithSignedIn(func() bool { return false }))
 	if err := app.run(context.Background(), []string{
 		"operate", "review-worker", "--agent", "manual", "--dir", dir, "--session", started.Session.ID,
-	}); err != nil {
-		t.Fatalf("available review-worker run() error = %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "review failed") {
+		t.Fatalf("available review-worker run() error = %v, want failed-review exit", err)
 	}
 	if _, err := os.Stat(started.Session.ReviewPath); err != nil {
 		t.Fatalf("review artifact missing after available nominal command: %v", err)

@@ -172,6 +172,47 @@ func TestMigrateFromEnvSQLiteAppliesOnceThenNoops(t *testing.T) {
 	}
 }
 
+func TestSQLiteV8MigrationPreservesLegacyIdempotencyAsSucceeded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite database: %v", err)
+	}
+	createdAt := formatSQLiteTime(time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC))
+	if _, err := db.Exec(`CREATE TABLE ouvrier_idempotency_keys (
+		key TEXT PRIMARY KEY,
+		exec_id TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy idempotency table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO ouvrier_idempotency_keys (key, exec_id, created_at) VALUES (?, ?, ?)`, "legacy-key", "exec-1", createdAt); err != nil {
+		t.Fatalf("insert legacy idempotency row: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 7`); err != nil {
+		t.Fatalf("set legacy user version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore migration returned error: %v", err)
+	}
+	defer store.Close()
+	record, ok, err := store.Idempotency(context.Background(), "legacy-key")
+	if err != nil || !ok {
+		t.Fatalf("Idempotency record=%+v ok=%v err=%v", record, ok, err)
+	}
+	if record.Outcome != IdempotencySucceeded || record.ExecID != "exec-1" {
+		t.Fatalf("migrated record = %+v, want conservative succeeded outcome", record)
+	}
+	if !record.UpdatedAt.Equal(record.CreatedAt) {
+		t.Fatalf("migrated timestamps = %+v, want updated_at backfilled", record)
+	}
+}
+
 func TestMigrateFromEnvRejectsMemoryBackend(t *testing.T) {
 	t.Setenv(EnvStateBackend, BackendMemory)
 

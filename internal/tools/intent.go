@@ -87,7 +87,7 @@ func beginToolIntent(ctx context.Context, tool registeredTool, call provider.Too
 		StepIndex:  value.stepIndex,
 		ToolName:   tool.name,
 		Effect:     string(effect),
-		IdemKey:    toolIntentIdemKey(tool, call),
+		IdemKey:    toolIntentIdemKey(ctx, tool, call),
 	}
 	if err := value.recorder.BeginToolIntent(ctx, intent); err != nil {
 		return nil, fmt.Errorf("record tool intent: %w", err)
@@ -104,10 +104,11 @@ func beginToolIntent(ctx context.Context, tool registeredTool, call provider.Too
 // side effect can be reconciled: for idempotent tools with a declared key
 // expression it is the exact ReserveIdempotency key, otherwise a hash of the
 // tool name and raw arguments.
-func toolIntentIdemKey(tool registeredTool, call provider.ToolCall) string {
+func toolIntentIdemKey(ctx context.Context, tool registeredTool, call provider.ToolCall) string {
 	if normalizeEffect(tool.metadata.Effect) == policy.EffectIdempotent {
 		if expression := strings.TrimSpace(tool.metadata.IdempotencyKey); expression != "" {
-			if key, err := idempotencyReservationKey(tool.name, expression, call.Arguments); err == nil {
+			namespace := IdempotencyNamespaceFromContext(ctx)
+			if key, err := idempotencyReservationKeyInNamespace(namespace, tool.name, expression, call.Arguments); err == nil {
 				return key
 			}
 		}

@@ -45,6 +45,11 @@ type GovernedCall struct {
 	Emit func(StreamEvent)
 	// OnEntry optionally observes each persisted transcript entry.
 	OnEntry func(TranscriptEntry)
+
+	// persistedEntry is an internal hand-off used by the model loop after it
+	// durably records a complete assistant tool-call group. It is deliberately
+	// unexported: callers cannot claim that an action was already recorded.
+	persistedEntry *TranscriptEntry
 }
 
 // governedExecutor is the production GovernedExecutor bound to one runtime.
@@ -60,6 +65,23 @@ func (r *AgentRuntime) Executor() GovernedExecutor {
 // Execute runs one governed call. It returns ErrToolDenied when the approval
 // gate blocks the tool; every outcome writes exactly one audit record.
 func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolResult, error) {
+	if e.runtime == nil || call.Session == nil {
+		return e.executeHeld(ctx, call)
+	}
+	activityCtx, finishActivity, err := e.runtime.beginRuntimeActivity(ctx, call.Session.ID)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	defer finishActivity()
+	heldCtx, release, err := e.runtime.acquireSessionTurn(activityCtx, call.Session.ID)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	defer release()
+	return e.executeHeld(heldCtx, call)
+}
+
+func (e governedExecutor) executeHeld(ctx context.Context, call GovernedCall) (ToolResult, error) {
 	r := e.runtime
 	if r == nil || r.Tools == nil {
 		return ToolResult{}, errors.New("operate: nil runtime")
@@ -79,9 +101,15 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	if call.Posture == "" {
 		call.Posture = PostureManual
 	}
+	call.Input = normalizeGovernedToolInput(call.Tool, call.Input, r.Options)
 	emit := call.Emit
 	if emit == nil {
 		emit = func(StreamEvent) {}
+	} else {
+		unredactedEmit := emit
+		emit = func(event StreamEvent) {
+			unredactedEmit(r.redactStreamEvent(event))
+		}
 	}
 	observe := call.OnEntry
 	if observe == nil {
@@ -97,18 +125,30 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	session := call.Session
 	planned := plannedTool{ID: call.ID, Name: call.Tool, Input: call.Input}
 
-	// Persist the tool_call before anything can run.
-	callEntry, err := r.appendTranscript(session, TranscriptEntry{
-		SessionID: session.ID,
-		Kind:      TranscriptToolCall,
-		ToolName:  call.Tool,
-		Input:     call.Input,
-		Metadata:  map[string]any{"tool_call_id": call.ID},
-	})
-	if err != nil {
-		return ToolResult{}, err
+	// Persist the tool_call before anything can run. The model loop may have
+	// pre-persisted it together with sibling calls from the same assistant
+	// response; validate that hand-off and never append it twice.
+	var callEntry TranscriptEntry
+	if call.persistedEntry != nil {
+		callEntry = *call.persistedEntry
+		if callEntry.Kind != TranscriptToolCall || callEntry.SessionID != session.ID ||
+			callEntry.ToolName != call.Tool || metaString(callEntry.Metadata, "tool_call_id") != call.ID {
+			return ToolResult{}, errors.New("operate: invalid pre-persisted tool call")
+		}
+	} else {
+		var err error
+		callEntry, err = r.appendTranscript(session, TranscriptEntry{
+			SessionID: session.ID,
+			Kind:      TranscriptToolCall,
+			ToolName:  call.Tool,
+			Input:     call.Input,
+			Metadata:  map[string]any{"tool_call_id": call.ID},
+		})
+		if err != nil {
+			return ToolResult{}, err
+		}
+		observe(callEntry)
 	}
-	observe(callEntry)
 	emit(StreamEvent{Kind: StreamToolStart, Entry: &callEntry})
 
 	// Approval gate. RequiresApproval always prompts; headless fails closed.
@@ -139,7 +179,9 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		}
 		observe(resultEntry)
 		emit(StreamEvent{Kind: StreamToolEnd, Entry: &resultEntry, Err: denyErr})
-		return result, errors.Join(ErrToolDenied, auditErr)
+		// Preserve the concrete fail-closed reason for callers and operators;
+		// ErrToolDenied remains in the chain for stable programmatic matching.
+		return result, errors.Join(ErrToolDenied, denyErr, auditErr)
 	}
 
 	// Execute through the registry; each tool applies its own path sandbox.
@@ -147,7 +189,7 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 		Harness:   r.Harness,
 		Runtime:   r,
 		Session:   session,
-		Workspace: r.workspace,
+		Workspace: workspaceForSession(session),
 		Options:   r.Options,
 	}, call.Tool, call.Input)
 
@@ -184,6 +226,39 @@ func (e governedExecutor) Execute(ctx context.Context, call GovernedCall) (ToolR
 	return result, resultErr
 }
 
+// normalizeGovernedToolInput resolves security-relevant defaults before the
+// call is persisted, displayed for approval, and executed. The approval gate
+// and the tool must never interpret two different effective requests.
+func normalizeGovernedToolInput(tool string, input map[string]any, options RuntimeOptions) map[string]any {
+	normalized := make(map[string]any, len(input)+3)
+	for key, value := range input {
+		normalized[key] = value
+	}
+	if tool != "transfer_worker" {
+		return normalized
+	}
+	env := strings.TrimSpace(stringValue(normalized, "env"))
+	if env == "" {
+		env = strings.TrimSpace(options.Env)
+	}
+	target := strings.TrimSpace(stringValue(normalized, "target"))
+	if target == "" {
+		target = strings.TrimSpace(options.Target)
+	}
+	envFile := strings.TrimSpace(stringValue(normalized, "env_file"))
+	if envFile == "" {
+		envFile = strings.TrimSpace(options.EnvFile)
+	}
+	normalized["env"] = env
+	if target != "" {
+		normalized["target"] = target
+	}
+	if envFile != "" {
+		normalized["env_file"] = envFile
+	}
+	return normalized
+}
+
 // gate blocks until the operator answers the approval request, or fails closed
 // when the call is headless. Unknown tools pass through so the registry can
 // report them as execution errors.
@@ -199,14 +274,17 @@ func (e governedExecutor) gate(ctx context.Context, call GovernedCall, emit func
 	if !call.Interactive || call.Decisions == nil {
 		return false, fmt.Errorf("approval required for %s but no operator is attached (headless)", call.Tool)
 	}
-	req := approvalRequestFor(plannedTool{ID: call.ID, Name: call.Tool, Input: call.Input}, tool.Governance, r.workspace)
+	req := approvalRequestFor(plannedTool{ID: call.ID, Name: call.Tool, Input: call.Input}, tool.Governance, workspaceForSession(call.Session), call.Session)
 	emit(StreamEvent{Kind: StreamApproval, Approval: req})
 	for {
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()
-		case d := <-call.Decisions:
-			if d.ID != "" && d.ID != req.ID {
+		case d, ok := <-call.Decisions:
+			if !ok {
+				return false, fmt.Errorf("approval required for %s but the operator decision channel closed", call.Tool)
+			}
+			if d.ID != req.ID {
 				continue // ignore a stale/mismatched decision
 			}
 			return d.Approved, nil

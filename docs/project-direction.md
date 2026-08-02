@@ -2,6 +2,8 @@
 
 **Decision date:** 2026-07-26
 
+**Implementation status update:** 2026-08-02
+
 **Status:** active project memory
 
 **Scope:** priority order and product boundaries for work after `v0.5.5`
@@ -37,11 +39,74 @@ The first implementation slices started on 2026-07-26:
   tests. Passing mechanics authorize only the next read-only cockpit slice;
   they do not authorize production adoption.
 
-The next runtime slice should expand provider stop-reason conformance and
-failure-injection coverage. The next cockpit slice should extract a real
-Ouvrier-owned governed executor, expose only read-only worker inspection and
-audit tools, and prove durable session resume. The shared generated-worker lane
-comes after those independent foundations.
+Those initial slices have expanded into the stabilization baseline below. The
+remaining acceptance work is to keep closing defects and pass the full runtime,
+cockpit, race, static-analysis, and generated-worker gates; implementation on
+`main` is not itself a release declaration.
+
+## Current Stabilization Baseline (Gates Pending)
+
+As of 2026-08-02, the following contracts are implemented on `main` and are the
+baseline under verification. They describe required behavior, not a claim that
+a post-`v0.5.5` stable release has already passed every gate.
+
+- **Headless governance is fail-closed.** Prompt, print, JSON, and RPC turns
+  start in the `manual` posture. Without an attached operator, read-only and
+  idempotent tools may run, while side-effecting and `requires_approval` tools
+  are denied and audited. `--auto-safe` is the explicit opt-in for
+  side-effecting headless tools and never overrides `requires_approval`.
+- **Codex App Server is not the default.** `--codex-mode auto` and `exec` use
+  the legacy text-only Codex CLI driver behind Ouvrier's deterministic governed
+  planner; the text transport is never misrepresented as a tool-calling model.
+  Structured
+  `--codex-mode app-server` remains an explicit experimental opt-in until its
+  confinement, event mapping, resume, and tool-schema parity gates are proven.
+- **Candidate-executing audit gates require real isolation.** Production audit
+  runs `go test`, `go vet`, and the static Linux/amd64 build in a disposable
+  Linux Bubblewrap sandbox. Network, ambient workspaces, proxies, inherited
+  credentials, and writable candidate source are removed after offline
+  dependency preparation. Missing Linux/Bubblewrap/namespace guarantees fail
+  closed; there is no host fallback for these gates.
+- **Completion evidence is source-bound.** The source fingerprint covers the
+  worker tree, relevant local `go.mod` replacement inputs, the Go toolchain,
+  and `GOWORK=off`. Audit and strict structured-review evidence must match the
+  current fingerprint. A trusted build must match it, bind the exact persisted
+  passing audit by SHA-256, and record the compiled binary's SHA-256. Mutation
+  or evidence tampering makes earlier proof stale.
+- **Worker file tools have a bounded, sensitive-data-denying surface.** Model
+  reads and writes have output/input caps; listing and literal search are
+  paginated with traversal, byte, file, query, and result limits; removal is
+  one file or one internal symlink. `.git`, `.ouvrier`, secret dotenv files,
+  private keys, credential stores, external symlinks, and sensitive symlink
+  targets are refused. `.env.example` remains readable as documentation.
+- **Durable context is append-only and bounded.** `/compact` persists a real
+  model-context checkpoint while preserving the full transcript for audit and
+  export. Post-checkpoint model history, transcript records/files, event
+  records/replay, exports, model steps, tool-call batches, and tool-result
+  transport all have explicit fail-closed ceilings. Torn-tail recovery may
+  repair only the final interrupted JSONL record; middle corruption is never
+  rewritten.
+- **Provider and Codex output is resource-bounded.** HTTP JSON bodies, SSE
+  streams/frames/text/tool calls, Codex exec stdout/lines/text/stderr, and
+  app-server messages/text/stderr have tested byte/count ceilings. Overflow
+  cancels or fails the operation, and bounded-loop exhaustion cannot become a
+  successful completion.
+- **Operator shell and repository inspection stay governed.** The model cannot
+  call the shell. Each interactive `!`/`!!` command requires approval and runs
+  only in a Linux Bubblewrap workspace with fixed environment, no network, a
+  two-minute deadline, and bounded output. Read-only Git disables executable
+  extension points and rejects all `filter=` attributes, including Git LFS;
+  secret scans and complete review transports fail rather than silently
+  truncating their bounded coverage.
+- **Failure state is durable.** Patch and audit execution/evidence failures
+  transition sessions to `patch_failed` or `audit_failed` and persist a
+  redacted `last_error`, so interrupted evidence work is not represented by an
+  in-progress or successful status.
+
+The shared generated-worker lane remains the narrow integration proof: a
+cockpit-created worker must compile against the current public `ovr` contract,
+pass runtime checks, pass the isolated deterministic audit, and yield a local
+artifact whose evidence can be independently recomputed.
 
 ## Priority 0A: Runtime Stabilization
 

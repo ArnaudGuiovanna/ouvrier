@@ -2,18 +2,24 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRunner struct {
 	statusOut string
 	deviceOut string
+	block     bool
 }
 
 func (f fakeRunner) LookPath(string) (string, error) { return "/usr/bin/codex", nil }
 func (f fakeRunner) CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if f.block {
+		return exec.CommandContext(ctx, "sh", "-c", "sleep 30")
+	}
 	out := ""
 	joined := strings.Join(args, " ")
 	switch {
@@ -57,5 +63,67 @@ func TestDeviceLoginParsesURLAndCode(t *testing.T) {
 	}
 	if ev.Raw == "" {
 		t.Fatal("raw output must always be captured")
+	}
+}
+
+func TestProbeRejectsTruncatedOutput(t *testing.T) {
+	out := "Logged in using ChatGPT\n" + strings.Repeat("x", maxCodexAuthOutputBytes+1)
+	b := &Codex{Runner: fakeRunner{statusOut: out}}
+	if st, account := b.Probe(context.Background()); st != StateUnauthed || account != "" {
+		t.Fatalf("truncated probe = %v, %q; want fail-closed unauthenticated state", st, account)
+	}
+}
+
+func TestProbeHonorsCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	b := &Codex{Runner: fakeRunner{block: true}}
+	if st, _ := b.Probe(ctx); st != StateUnauthed {
+		t.Fatalf("timed-out probe state = %v", st)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("probe exceeded caller deadline: %s", elapsed)
+	}
+}
+
+func TestDeviceLoginBoundsRawOutput(t *testing.T) {
+	prefix := "Open https://auth.openai.com/codex/device and enter ABCD-EFGH\n"
+	b := &Codex{Runner: fakeRunner{deviceOut: prefix + strings.Repeat("x", maxCodexAuthOutputBytes+1)}}
+	ev, err := b.DeviceLogin(context.Background())
+	if !errors.Is(err, ErrCodexAuthOutputLimit) {
+		t.Fatalf("DeviceLogin() error = %v, want output-limit error", err)
+	}
+	if len(ev.Raw) != maxCodexAuthOutputBytes {
+		t.Fatalf("bounded raw output = %d bytes, want %d", len(ev.Raw), maxCodexAuthOutputBytes)
+	}
+	if ev.URL == "" || ev.Code != "ABCD-EFGH" {
+		t.Fatalf("bounded device event lost parsed prefix: %+v", ev)
+	}
+}
+
+func TestDeviceLoginHonorsCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	b := &Codex{Runner: fakeRunner{block: true}}
+	_, err := b.DeviceLogin(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("DeviceLogin() error = %v, want deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("device login exceeded caller deadline: %s", elapsed)
+	}
+}
+
+func TestBoundedAuthCaptureReportsFullWritesWithoutGrowing(t *testing.T) {
+	capture := newBoundedAuthCapture(8)
+	data := []byte("0123456789abcdef")
+	written, err := capture.Write(data)
+	if err != nil || written != len(data) {
+		t.Fatalf("Write() = %d, %v", written, err)
+	}
+	if got := capture.String(); got != "01234567" || !capture.Truncated() {
+		t.Fatalf("bounded capture = %q, truncated=%v", got, capture.Truncated())
 	}
 }

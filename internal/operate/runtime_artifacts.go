@@ -25,8 +25,8 @@ func appendToolCall(path string, redactor Redactor, call plannedTool, result Too
 	}
 	record := map[string]any{
 		"at":           time.Now().UTC(),
-		"tool_call_id": call.ID,
-		"tool":         call.Name,
+		"tool_call_id": redactor.Redact(call.ID),
+		"tool":         redactor.Redact(call.Name),
 		"input":        redactMap(redactor, call.Input),
 		"summary":      redactor.Redact(result.Summary),
 		"data":         redactMap(redactor, result.Data),
@@ -38,26 +38,30 @@ func appendToolCall(path string, redactor Redactor, call plannedTool, result Too
 }
 
 func appendJSONLine(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	if _, err = fmt.Fprintln(f, string(data)); err != nil {
+	if err := validateJSONLLineSize(data, "JSONL record"); err != nil {
 		return err
 	}
-	return f.Sync()
+	f, err := openSessionArtifact(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600, true)
+	if err != nil {
+		return err
+	}
+	if _, err = fmt.Fprintln(f, string(data)); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func readEvents(path string) ([]Event, error) {
-	f, err := os.Open(path)
+	f, err := openSessionArtifact(path, os.O_RDONLY, 0, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -65,16 +69,37 @@ func readEvents(path string) ([]Event, error) {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("operate: inspect events %s: %w", path, err)
+	}
+	if info.Size() > maxEventReplayFileBytes {
+		return nil, fmt.Errorf("operate: events %s exceeds %d bytes", path, maxEventReplayFileBytes)
+	}
 	var events []Event
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxEventJSONLLineBytes+1)
+	line := 0
 	for scanner.Scan() {
+		line++
+		if line > maxEventReplayEntries {
+			return nil, fmt.Errorf("operate: events %s exceeds %d entries", path, maxEventReplayEntries)
+		}
 		var event Event
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("operate: parse events %s at line %d: %w", path, line, err)
 		}
 		events = append(events, event)
 	}
-	return events, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("operate: read events %s at line %d: %w", path, line+1, err)
+	}
+	return events, nil
+}
+
+func repairTrailingEvents(path string) (bool, error) {
+	repair, err := repairJSONLTail(path, "event journal")
+	return repair == jsonlTailDiscarded, err
 }
 
 func detectOperateRepoRoot() string {

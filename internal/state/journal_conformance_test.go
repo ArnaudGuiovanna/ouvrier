@@ -1,8 +1,11 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +132,9 @@ func assertJournalConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		if got.Input != want {
 			t.Fatalf("journal input = %q, want redacted %q", got.Input, want)
 		}
+		if !got.ReplayUnsafe {
+			t.Fatal("redacted journal input is replay-safe, want explicit fail-closed marker")
+		}
 	})
 
 	t.Run("CheckpointRoundTripOrderedAndUpsert", func(t *testing.T) {
@@ -197,6 +203,9 @@ func assertJournalConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		want := "result token=[REDACTED] api_key=[REDACTED] Authorization: [REDACTED]"
 		if checkpoints[0].Output != want {
 			t.Fatalf("checkpoint output = %q, want redacted %q", checkpoints[0].Output, want)
+		}
+		if !checkpoints[0].ReplayUnsafe {
+			t.Fatal("redacted checkpoint output is replay-safe, want explicit fail-closed marker")
 		}
 	})
 
@@ -371,6 +380,49 @@ func assertJournalConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
+	t.Run("PruneNeverRemovesNonTerminalOrPendingApprovalRuns", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+		cutoff := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
+		old := cutoff.Add(-time.Hour)
+
+		seedJournalFixture(t, store, "exec_terminal", old)
+		seedJournalFixture(t, store, "exec_running", old)
+		if err := store.SaveExecution(ctx, Execution{
+			ExecID: "exec_running", Status: ExecutionRunning, StartedAt: old,
+		}); err != nil {
+			t.Fatalf("SaveExecution(running) returned error: %v", err)
+		}
+		seedJournalFixture(t, store, "exec_pending", old)
+		if err := store.SaveApproval(ctx, PendingApproval{
+			ID: "approval_pending", ExecID: "exec_pending", ToolName: "deploy", Status: ApprovalPending,
+		}); err != nil {
+			t.Fatalf("SaveApproval(pending) returned error: %v", err)
+		}
+		if err := store.SaveRunJournal(ctx, RunJournal{ExecID: "exec_unknown", CreatedAt: old}); err != nil {
+			t.Fatalf("SaveRunJournal(unknown) returned error: %v", err)
+		}
+
+		pruned, err := store.PruneRunJournalsBefore(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("PruneRunJournalsBefore returned error: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0] != "exec_terminal" {
+			t.Fatalf("pruned = %v, want only exec_terminal", pruned)
+		}
+		for _, execID := range []string{"exec_running", "exec_pending", "exec_unknown"} {
+			if _, ok, err := store.RunJournal(ctx, execID); err != nil || !ok {
+				t.Fatalf("RunJournal(%s) after retention ok=%v err=%v, want retained", execID, ok, err)
+			}
+			if err := store.PruneRunJournal(ctx, execID); err != nil {
+				t.Fatalf("PruneRunJournal(%s) returned error: %v", execID, err)
+			}
+			if _, ok, err := store.RunJournal(ctx, execID); err != nil || !ok {
+				t.Fatalf("RunJournal(%s) after explicit prune ok=%v err=%v, want retained", execID, ok, err)
+			}
+		}
+	})
+
 	t.Run("ValidationErrors", func(t *testing.T) {
 		store := newStore(t)
 		ctx := context.Background()
@@ -439,6 +491,11 @@ func assertJournalConformance(t *testing.T, newStore func(t *testing.T) Store) {
 func seedJournalFixture(t *testing.T, store Store, execID string, createdAt time.Time) {
 	t.Helper()
 	ctx := context.Background()
+	if err := store.SaveExecution(ctx, Execution{
+		ExecID: execID, Status: ExecutionFailed, StartedAt: createdAt, CompletedAt: createdAt,
+	}); err != nil {
+		t.Fatalf("seed SaveExecution(%s) returned error: %v", execID, err)
+	}
 	if err := store.SaveRunJournal(ctx, RunJournal{
 		ExecID:      execID,
 		PlanKey:     "http:POST /tickets",
@@ -546,12 +603,18 @@ func TestSQLiteStoreJournalRedactsRawRowsOnRead(t *testing.T) {
 	if journal.Input != want {
 		t.Fatalf("raw journal input read back = %q, want %q", journal.Input, want)
 	}
+	if !journal.ReplayUnsafe {
+		t.Fatal("legacy raw journal row is replay-safe, want fail-closed read marker")
+	}
 	checkpoints, err := store.RunCheckpoints(context.Background(), "exec_raw")
 	if err != nil || len(checkpoints) != 1 {
 		t.Fatalf("RunCheckpoints = %v, %v", checkpoints, err)
 	}
 	if checkpoints[0].Output != want {
 		t.Fatalf("raw checkpoint output read back = %q, want %q", checkpoints[0].Output, want)
+	}
+	if !checkpoints[0].ReplayUnsafe {
+		t.Fatal("legacy raw checkpoint row is replay-safe, want fail-closed read marker")
 	}
 }
 
@@ -564,7 +627,7 @@ func TestSQLiteJournalNoRawSecretBytesAtRest(t *testing.T) {
 	ctx := context.Background()
 	if err := store.SaveRunJournal(ctx, RunJournal{
 		ExecID: "exec_secret",
-		Input:  "payload api_key=super-secret-credential-value",
+		Input:  `{"safe":"business","password":"super-secret-credential-value"}`,
 	}); err != nil {
 		t.Fatalf("SaveRunJournal returned error: %v", err)
 	}
@@ -588,8 +651,39 @@ func TestSQLiteJournalNoRawSecretBytesAtRest(t *testing.T) {
 	if journalHits != 0 || checkpointHits != 0 {
 		t.Fatalf("raw secret found at rest: journal rows = %d, checkpoint rows = %d, want 0", journalHits, checkpointHits)
 	}
-	if !strings.Contains(redactedJournalInput(t, store), "[REDACTED]") {
+	storedInput := redactedJournalInput(t, store)
+	if !strings.Contains(storedInput, "[REDACTED]") {
 		t.Fatal("stored journal input does not carry the redaction marker")
+	}
+	if !strings.Contains(storedInput, `"replay_unsafe":true`) {
+		t.Fatalf("stored journal input lacks explicit replay-safety marker: %s", storedInput)
+	}
+
+	journal, ok, err := store.RunJournal(ctx, "exec_secret")
+	if err != nil || !ok || !journal.ReplayUnsafe {
+		t.Fatalf("RunJournal replay safety = %+v ok=%v err=%v, want unsafe", journal, ok, err)
+	}
+	checkpoints, err := store.RunCheckpoints(ctx, "exec_secret")
+	if err != nil || len(checkpoints) != 1 || !checkpoints[0].ReplayUnsafe {
+		t.Fatalf("RunCheckpoints replay safety = %+v err=%v, want unsafe", checkpoints, err)
+	}
+
+	// Inspect every current SQLite artifact, not only decoded SQL rows. This
+	// catches accidental raw writes to the main database or WAL bytes.
+	artifacts, err := filepath.Glob(path + "*")
+	if err != nil {
+		t.Fatalf("glob SQLite artifacts: %v", err)
+	}
+	for _, artifact := range artifacts {
+		data, readErr := os.ReadFile(artifact)
+		if readErr != nil {
+			// The shared-memory sidecar may not be a regular readable file on
+			// every platform; database and WAL artifacts remain checked.
+			continue
+		}
+		if bytes.Contains(data, []byte("super-secret-credential-value")) {
+			t.Fatalf("raw secret bytes found at rest in %s", filepath.Base(artifact))
+		}
 	}
 }
 

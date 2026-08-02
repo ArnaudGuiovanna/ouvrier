@@ -87,7 +87,7 @@ func (p *Gemini) Complete(ctx context.Context, req Request) (Response, error) {
 	}
 
 	var decoded geminiResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
+	if err := decodeBoundedProviderJSON(httpResp.Body, &decoded); err != nil {
 		return Response{}, fmt.Errorf("decode gemini response: %w", err)
 	}
 	resp, err := decoded.toProviderResponse()

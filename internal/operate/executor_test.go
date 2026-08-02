@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func startExecutorRuntime(t *testing.T, opts RuntimeOptions) (*AgentRuntime, *Session) {
@@ -143,6 +144,28 @@ func TestExecutorHeadlessApprovalFailsClosed(t *testing.T) {
 	}
 }
 
+func TestExecutorClosedApprovalChannelFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+	rt, session := startExecutorRuntime(t, RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	t.Cleanup(func() { _ = rt.Close() })
+	decisions := make(chan ApprovalDecision)
+	close(decisions)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := rt.Executor().Execute(ctx, GovernedCall{
+		Session: session, Tool: "run_shell", Input: map[string]any{"command": "touch must-not-run"},
+		Posture: PostureManual, Interactive: true, Decisions: decisions,
+	})
+	if !errors.Is(err, ErrToolDenied) || !strings.Contains(err.Error(), "channel closed") {
+		t.Fatalf("Execute() error = %v, want fail-closed channel error", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "must-not-run")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("tool executed after decision channel closed: %v", statErr)
+	}
+}
+
 // A successful governed call persists tool_call, tool_result, and one audit
 // record; write_worker_file actually lands inside the sandbox.
 func TestExecutorSuccessWritesTranscriptAndAudit(t *testing.T) {
@@ -161,6 +184,12 @@ func TestExecutorSuccessWritesTranscriptAndAudit(t *testing.T) {
 	}
 	if !strings.Contains(result.Summary, "notes.txt") {
 		t.Fatalf("summary = %q", result.Summary)
+	}
+	if changed, _ := result.Data["changed"].(bool); !changed {
+		t.Fatalf("write result = %+v, want observed mutation", result.Data)
+	}
+	if sourceSHA, _ := result.Data["source_sha256"].(string); len(sourceSHA) != 64 {
+		t.Fatalf("write source_sha256 = %q, want bound source fingerprint", sourceSHA)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "notes.txt"))
 	if err != nil || !strings.Contains(string(data), "hello governed world") {
@@ -279,12 +308,16 @@ func TestExecutorRunShellRunsInWorkspace(t *testing.T) {
 	dir := t.TempDir()
 	writeMinimalWorker(t, dir)
 	rt, session := startExecutorRuntime(t, RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	decisions := make(chan ApprovalDecision, 1)
 
 	result, err := rt.Executor().Execute(context.Background(), GovernedCall{
-		Session: session,
-		Tool:    "run_shell",
-		Input:   map[string]any{"command": "cat pip.yaml"},
-		Posture: PostureAutoSafe,
+		Session: session, Tool: "run_shell", Input: map[string]any{"command": "cat pip.yaml"},
+		Posture: PostureManual, Interactive: true, Decisions: decisions,
+		Emit: func(event StreamEvent) {
+			if event.Kind == StreamApproval && event.Approval != nil {
+				decisions <- ApprovalDecision{ID: event.Approval.ID, Approved: true}
+			}
+		},
 	})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -315,14 +348,22 @@ func TestExecutorUnknownToolIsAudited(t *testing.T) {
 	}
 }
 
-// Operator-only tools must not be exposed to the model tool-calling loop.
-func TestOperatorOnlyToolsHiddenFromModel(t *testing.T) {
+// Direct file writes are the model's governed construction path. Nested coding
+// drivers and the operator shell must stay hidden from the model tool loop.
+func TestModelConstructionToolsUseGovernedFileWrites(t *testing.T) {
 	dir := t.TempDir()
 	writeMinimalWorker(t, dir)
 	rt, _ := startExecutorRuntime(t, RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	exposed := map[string]bool{}
 	for _, spec := range rt.toolSpecs() {
-		if spec.Name == "run_shell" || spec.Name == "write_worker_file" {
-			t.Fatalf("operator-only tool %q leaked into the model tool specs", spec.Name)
+		exposed[spec.Name] = true
+	}
+	if !exposed["write_worker_file"] {
+		t.Fatal("governed write_worker_file is not exposed to the model")
+	}
+	for _, hidden := range []string{"run_shell", "patch_worker", "fix_worker"} {
+		if exposed[hidden] {
+			t.Fatalf("operator-only tool %q leaked into model tool specs", hidden)
 		}
 	}
 	// They remain registered for the governed executor.

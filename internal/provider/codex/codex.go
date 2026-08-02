@@ -1,15 +1,16 @@
-// Package codex implements provider.Provider over the official `codex exec`
-// transport, billed to the user's ChatGPT subscription. It is a TEXT model:
-// codex runs its own tools, so structured Ouvrier tool-calls are not surfaced
-// here (use an API-key provider for native tool-use). We never read tokens.
+// Package codex implements provider.Provider over official Codex transports,
+// billed to the user's ChatGPT subscription. Provider uses `codex exec` as a
+// legacy text-only transport. AppServerProvider uses `codex app-server` and
+// surfaces structured dynamic tool calls for execution by Ouvrier. Neither
+// transport reads or handles ChatGPT tokens directly.
 package codex
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -64,6 +65,11 @@ func (p *Provider) CompleteStream(ctx context.Context, req provider.Request, onD
 }
 
 func (p *Provider) run(ctx context.Context, req provider.Request, onDelta func(provider.Delta)) (provider.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	r := p.runner()
 	bin := p.bin()
 	if _, err := r.LookPath(bin); err != nil {
@@ -77,35 +83,47 @@ func (p *Provider) run(ctx context.Context, req provider.Request, onDelta func(p
 	if model != "" {
 		args = append(args, "-m", model)
 	}
-	cmd := r.CommandContext(ctx, bin, args...)
+	cmd := r.CommandContext(runCtx, bin, args...)
 	cmd.Stdin = strings.NewReader(renderPrompt(req))
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return provider.Response{}, err
+	// A worker .env may already be loaded into the parent process. The Codex
+	// transport receives only the small process/auth/runtime allowlist shared
+	// with app-server, never arbitrary worker or provider credentials.
+	cmd.Env = sanitizedCodexEnvironment(os.Environ())
+	output := newCodexExecOutput(cancel, onDelta)
+	stderr := newBoundedBuffer(maxCodexExecStderrBytes)
+	cmd.Stdout = output
+	cmd.Stderr = stderr
+	if err := configureCodexExecProcess(cmd); err != nil {
+		return provider.Response{}, fmt.Errorf("codex provider: configure process containment: %w", err)
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return provider.Response{}, err
+		return provider.Response{}, fmt.Errorf("codex provider: start: %w", err)
 	}
-	var text strings.Builder
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		if chunk := agentTextFromJSONL(sc.Text()); chunk != "" {
-			if text.Len() > 0 {
-				text.WriteByte('\n')
-			}
-			text.WriteString(chunk)
-			if onDelta != nil {
-				onDelta(provider.Delta{Text: chunk})
-			}
+	waitErr := cmd.Wait()
+	flushErr := output.Flush()
+	cleanupErr := terminateCodexExecProcess(cmd)
+	response := provider.Response{Text: output.Text()}
+	outputErr := output.Err()
+	if outputErr == nil {
+		outputErr = flushErr
+	}
+	if outputErr != nil {
+		return response, errors.Join(fmt.Errorf("codex provider: stream output: %w", outputErr), cleanupErr)
+	}
+	if waitErr != nil {
+		diagnostic := strings.TrimSpace(stderr.String())
+		if diagnostic != "" {
+			waitErr = fmt.Errorf("codex provider: %w: %s", waitErr, diagnostic)
+		} else {
+			waitErr = fmt.Errorf("codex provider: %w", waitErr)
 		}
+		return response, errors.Join(waitErr, cleanupErr)
 	}
-	if err := cmd.Wait(); err != nil {
-		return provider.Response{Text: strings.TrimSpace(text.String())}, fmt.Errorf("codex provider: %w: %s", err, strings.TrimSpace(stderr.String()))
+	if cleanupErr != nil {
+		return response, fmt.Errorf("codex provider: terminate process tree: %w", cleanupErr)
 	}
-	return provider.Response{Text: strings.TrimSpace(text.String()), StopReason: provider.StopEndTurn}, nil
+	response.StopReason = provider.StopEndTurn
+	return response, nil
 }
 
 func renderPrompt(req provider.Request) string {
@@ -143,15 +161,22 @@ func modelName(reqModel, fallback string) string {
 	return m
 }
 
-func agentTextFromJSONL(line string) string {
-	var msg map[string]any
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
-		return ""
+func agentTextFromJSONL(line string) (string, error) {
+	if strings.TrimSpace(line) == "" {
+		return "", nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(line), &value); err != nil {
+		return "", fmt.Errorf("invalid JSONL: %w", err)
+	}
+	msg, ok := value.(map[string]any)
+	if !ok {
+		return "", nil
 	}
 	if item, ok := msg["item"].(map[string]any); ok {
 		if t, ok := item["text"].(string); ok {
-			return strings.TrimSpace(t)
+			return strings.TrimSpace(t), nil
 		}
 	}
-	return ""
+	return "", nil
 }

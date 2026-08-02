@@ -611,7 +611,10 @@ func TestDeployEnvTargetPassthrough(t *testing.T) {
 	if _, _, err := runDeployEnv(t, opts); err != nil {
 		t.Fatalf("DeployEnvironment() error = %v", err)
 	}
-	want := map[string]bool{"CGO_ENABLED=0": false, "GOOS=linux": false, "GOARCH=arm64": false}
+	want := map[string]bool{
+		"CGO_ENABLED=0": false, "GOOS=linux": false, "GOARCH=arm64": false,
+		"GOWORK=off": false, "GOENV=off": false, "GOTOOLCHAIN=local": false, "GOFLAGS=": false,
+	}
 	for _, kv := range capturedEnv {
 		if _, ok := want[kv]; ok {
 			want[kv] = true

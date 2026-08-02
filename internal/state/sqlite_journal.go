@@ -6,8 +6,6 @@ import (
 	"errors"
 	"strings"
 	"time"
-
-	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 )
 
 func (s *SQLiteStore) SaveRunJournal(ctx context.Context, journal RunJournal) error {
@@ -30,7 +28,7 @@ func (s *SQLiteStore) SaveRunJournal(ctx context.Context, journal RunJournal) er
 		input = excluded.input,
 		created_at = excluded.created_at`,
 		journal.ExecID, journal.PlanKey, journal.PlanHash, journal.TriggerKind,
-		journal.Input, formatSQLiteTime(journal.CreatedAt),
+		encodeStoredReplayValue(journal.Input, journal.ReplayUnsafe), formatSQLiteTime(journal.CreatedAt),
 	)
 	return err
 }
@@ -92,7 +90,7 @@ func (s *SQLiteStore) SaveRunCheckpoint(ctx context.Context, checkpoint RunCheck
 	ON CONFLICT(exec_id, step_index) DO UPDATE SET
 		output = excluded.output,
 		completed_at = excluded.completed_at`,
-		checkpoint.ExecID, checkpoint.StepIndex, checkpoint.Output,
+		checkpoint.ExecID, checkpoint.StepIndex, encodeStoredReplayValue(checkpoint.Output, checkpoint.ReplayUnsafe),
 		formatSQLiteTime(checkpoint.CompletedAt),
 	)
 	return err
@@ -118,8 +116,7 @@ func (s *SQLiteStore) RunCheckpoints(ctx context.Context, execID string) ([]RunC
 		if err := rows.Scan(&checkpoint.ExecID, &checkpoint.StepIndex, &checkpoint.Output, &completedAt); err != nil {
 			return nil, err
 		}
-		// Read-side redaction backstop, matching the schema-violation reader.
-		checkpoint.Output = events.RedactText(checkpoint.Output)
+		checkpoint.Output, checkpoint.ReplayUnsafe = decodeStoredReplayValue(checkpoint.Output)
 		if checkpoint.CompletedAt, err = parseSQLiteTime(completedAt); err != nil {
 			return nil, err
 		}
@@ -225,7 +222,8 @@ func (s *SQLiteStore) PruneRunJournal(ctx context.Context, execID string) error 
 	if execID == "" {
 		return errors.New("run journal execution id is required")
 	}
-	return s.pruneRunJournalRows(ctx, execID)
+	_, err = s.pruneRunJournalRows(ctx, execID)
+	return err
 }
 
 func (s *SQLiteStore) PruneRunJournalsBefore(ctx context.Context, cutoff time.Time) ([]string, error) {
@@ -253,35 +251,61 @@ func (s *SQLiteStore) PruneRunJournalsBefore(ctx context.Context, cutoff time.Ti
 		return nil, err
 	}
 
+	pruned := make([]string, 0, len(expired))
 	for _, execID := range expired {
-		if err := s.pruneRunJournalRows(ctx, execID); err != nil {
+		deleted, err := s.pruneRunJournalRows(ctx, execID)
+		if err != nil {
 			return nil, err
 		}
+		if deleted {
+			pruned = append(pruned, execID)
+		}
 	}
-	return expired, nil
+	return pruned, nil
 }
 
 // pruneRunJournalRows deletes one execution's journal rows inside a single
 // transaction, children first, so a concurrent reader never sees checkpoints
 // or intents without their journal row.
-func (s *SQLiteStore) pruneRunJournalRows(ctx context.Context, execID string) error {
+func (s *SQLiteStore) pruneRunJournalRows(ctx context.Context, execID string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() {
 		_ = tx.Rollback()
 	}()
+	var eligible bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM ouvrier_run_journal AS journal
+		JOIN ouvrier_executions AS execution ON execution.exec_id = journal.exec_id
+		WHERE journal.exec_id = ?
+		  AND execution.status IN (?, ?, ?)
+		  AND NOT EXISTS (
+			SELECT 1 FROM ouvrier_approvals AS approval
+			WHERE approval.exec_id = journal.exec_id AND approval.status = ?
+		  )
+	)`, execID, string(ExecutionCompleted), string(ExecutionFailed), string(ExecutionTruncated), string(ApprovalPending)).Scan(&eligible); err != nil {
+		return false, err
+	}
+	if !eligible {
+		return false, nil
+	}
+
 	for _, stmt := range []string{
 		`DELETE FROM ouvrier_tool_intents WHERE exec_id = ?`,
 		`DELETE FROM ouvrier_run_checkpoints WHERE exec_id = ?`,
 		`DELETE FROM ouvrier_run_journal WHERE exec_id = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt, execID); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 const sqliteRunJournalSelectColumns = `SELECT exec_id, plan_key, plan_hash, trigger_kind, input, created_at`
@@ -293,8 +317,7 @@ func scanSQLiteRunJournal(row sqlRowScanner) (RunJournal, error) {
 		&journal.TriggerKind, &journal.Input, &createdAt); err != nil {
 		return RunJournal{}, err
 	}
-	// Read-side redaction backstop, matching the schema-violation reader.
-	journal.Input = events.RedactText(journal.Input)
+	journal.Input, journal.ReplayUnsafe = decodeStoredReplayValue(journal.Input)
 	var err error
 	if journal.CreatedAt, err = parseSQLiteTime(createdAt); err != nil {
 		return RunJournal{}, err

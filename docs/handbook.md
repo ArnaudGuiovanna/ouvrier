@@ -13,9 +13,11 @@ commands.
 
 ## Version And Requirements
 
-- Ouvrier version: current `main` includes v0.1, v0.2, v0.3, and v0.4
-  milestone work plus the v0.5 Ouvrier Agent Cockpit foundation; the latest
-  tagged release is `v0.5.0`.
+- Ouvrier version: current `main` includes the v0.1-v0.5 shipped work; the
+  latest tagged release is `v0.5.5`.
+- Release status: post-`v0.5.5` changes on `main` are an active stabilization
+  line. They are not a new stable release until the complete repository gates
+  have passed.
 - Go version: Go 1.25 or newer.
 - Public module path: `github.com/ArnaudGuiovanna/ouvrier`.
 - Runtime package name: `ovr`.
@@ -583,6 +585,20 @@ OUVRIER_ADMIN_ADDR=127.0.0.1:9090 # optional: move /admin/*, /metrics, /dev to a
 OUVRIER_METRICS_PUBLIC=1      # optional: when split, keep /metrics also on the public port
 ```
 
+Durable mode fingerprints the complete compiled replay contract (trigger,
+steps, tools, budgets, schemas, retries, and terminal destination) together
+with the SHA-256 identity of the exact worker executable. A journal created by
+a different contract or binary is abandoned with an observable plan-hash
+mismatch instead of being replayed under new Go handler/tool code. This is an
+intentional fail-closed migration rule: deploying a rebuilt binary abandons
+older journals even if its plan looks identical, while byte-identical replicas
+can recover each other's work. No database migration is required. Startup also
+refuses durable mode if it cannot read and fingerprint its executable. HTTP and
+Webhook plans must contain at least one `Pipe` while durable mode is enabled;
+startup rejects a direct zero-step terminal because that path cannot yet
+guarantee crash-safe terminal intent. Zero-step Cron and Stream plans do use
+the durable runner and remain supported.
+
 ### Schema Migrations And DML-Only Roles
 
 With the default `OUVRIER_STATE_MIGRATE=auto`, the worker applies pending
@@ -610,9 +626,10 @@ migrated schema keeps serving the previous binary during a rolling deploy.
 ## Testing Workers
 
 Test a worker end to end in a Go test without a real model or a network
-listener. `ovr.WithProvider` injects an LLM provider, `Runner.Handler` (or the
+listener. `ovr.Provider` is the injectable LLM boundary, `ovr.WithProvider`
+installs one implementation. `Runner.Handler` (or the
 package-level `ovr.Handler`) compiles your nodes into an `http.Handler` for
-`httptest`, and the `ovrtest` package supplies a scripted provider that returns
+`httptest`, while the `ovrtest` package supplies a scripted provider that returns
 canned turns. The handler defaults to an in-memory state store, so tests touch
 neither disk nor environment.
 
@@ -780,7 +797,7 @@ ouvrier add skill --name ticket-triage [--description TEXT]
 ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
-ouvrier operate [--dir .] [--agent codex|manual]
+ouvrier operate [--dir .] [--agent codex|manual] [--codex-mode auto|exec|app-server] [--auto-safe]
 ouvrier operate --print "create a worker that receives POST /tickets"
 ouvrier operate --mode json --prompt "review this worker"
 ouvrier operate --mode rpc
@@ -814,8 +831,9 @@ files.
 It is a Bubble Tea interface, visually aligned with the terminal-first Pi
 workflow, but the workflow owner is Ouvrier: type a goal, let the cockpit
 scaffold or select a worker, load Ouvrier API context, prompt Codex/manual
-driver turns, review code, repair findings, run audit gates, build, and
-transfer.
+driver turns, review code, repair findings, run audit gates, and produce a
+verified local artifact. Transfer remains as a compatibility command, but is
+outside the active cockpit acceptance path while deployment work is paused.
 
 The main path is conversational:
 
@@ -848,21 +866,145 @@ ouvrier operate transfer --session <id> --env staging
 Codex is accessed through the local Codex CLI driver (`--agent codex`), so
 authentication stays owned by Codex (`/login codex` in the cockpit, or
 `codex login` directly). Ouvrier stores only auth profile metadata, never Codex
-subscription tokens. `--agent manual` keeps the same sessions and gates without
-asking an agent to edit files. Build refuses to run without a passing audit,
-and transfer refuses without both passing audit and review unless
-`--allow-failed` is supplied intentionally.
+subscription tokens. `--codex-mode auto` (the default) and
+`--codex-mode exec` select the legacy Codex CLI exec driver behind Ouvrier's
+deterministic governed planner. Because that transport is text-only, Ouvrier
+never installs it as a structured model/tool loop. The structured
+`--codex-mode app-server` transport is experimental and must be selected
+explicitly; it is not a production default while its confinement and event
+parity are still being proven. `--agent manual` keeps the same sessions and
+gates without asking an agent to edit files.
+
+Headless prompt, print, JSON, and RPC turns use the `manual` posture by default.
+Read-only and idempotent tools may run, but a side-effecting or
+`requires_approval` call is recorded as denied when no operator is attached.
+Pass `--auto-safe` only when the caller intentionally authorizes
+side-effecting cockpit tools. It does not weaken `requires_approval`, so a
+headless transfer still fails closed. Interactive posture changes are explicit
+operator actions and apply only to that UI session.
+
+The model-visible file surface is deliberately narrow:
+
+- `read_worker_file` returns at most 64 KiB and `write_worker_file` accepts at
+  most 1 MiB of valid UTF-8;
+- `list_worker_files` and case-sensitive literal `search_worker_files` are
+  paginated, and cap traversal, metadata, per-file bytes, total bytes, queries,
+  and result counts;
+- `remove_worker_file` removes one regular file or one worker-internal symlink,
+  never a directory or an external target;
+- all four operations refuse `.git`, `.ouvrier`, `.env*` other than
+  `.env.example`, PEM/key files, credential stores, external symlinks, and
+  symlinks whose resolved target is sensitive.
+
+#### Context, transport, and journal bounds
+
+`/compact` persists a deterministic context checkpoint; it does not delete or
+rewrite earlier transcript entries. The checkpoint summary is at most 64 KiB,
+uses at most the latest 64 entries since the prior checkpoint, and becomes the
+boundary for later model requests. A request that would include more than
+2,048 post-checkpoint entries or 8 MiB fails with
+`operate: model context requires compaction` and asks the operator to run
+`/compact`. Compaction itself fails while a durable tool call lacks its matching
+result, so it cannot erase an unresolved capability decision.
+
+| Surface | Enforced bound |
+| --- | --- |
+| Ouvrier model loop | 16 model steps per operator turn; 16 tool calls per step and 64 total; 1 MiB assistant text; 1 MiB arguments per call; 256-byte call IDs/names; 8 KiB result returned to the model. |
+| Transcript | 8 MiB per JSONL record and 64 MiB per file; readers/export refuse more than 100,000 entries; atomic Markdown export is capped at 128 MiB. |
+| Cockpit event journal | 4 MiB per JSONL event; resume/replay accepts at most 64 MiB and 100,000 events. |
+| HTTP providers | 8 MiB non-streaming JSON response; SSE is capped at 64 MiB total and 1 MiB per frame, with at most 8 MiB assembled text. Tool-capable SSE parsers cap arguments at 1 MiB, identities at 256 bytes, and a response at 128 tool calls. |
+| Codex exec | 8 MiB / 100,000-line stdout, 1 MiB per line, 1 MiB accumulated assistant text, and 64 KiB stderr. |
+| Codex app-server | 8 MiB per protocol message, 1 MiB / 4,096 items of accumulated response text, and 64 KiB stderr. |
+
+An over-limit model stream is cancelled and the turn fails. An exhausted
+16-step loop returns an explicit error rather than accepting the last partial
+text. Resume may finish a valid final JSONL record that only lacks its newline,
+or discard an invalid unterminated final fragment and record that recovery in
+the durable transcript. It never repairs a corrupt middle record. Event
+subscription is read-only and returns the journal error without a partial
+replay. The automatic Codex signed-in check used for model selection has a
+two-second CLI deadline; other auth operations remain bounded by their caller
+context. Status/device-auth output capture is limited to 64 KiB and inherited
+output pipes have a 250 ms wait bound.
+
+#### Operator shell and repository inspection
+
+The TUI's `!command` and silent-display `!!command` accelerators both call the
+same `run_shell` tool. It is hidden from the model and classified
+`requires_approval`, so every invocation prompts even in `auto-safe` posture.
+On Linux the approved command runs for at most two minutes inside Bubblewrap:
+all namespaces are unshared, capabilities are dropped, the ambient environment
+is cleared and replaced with a fixed non-secret Go/shell environment, the host
+network is absent, system tool directories are read-only, the selected worker
+is the only writable host path, and `/tmp` is a private writable tmpfs.
+Combined stdout/stderr is retained up to 64 KiB. There is no non-Linux or
+no-Bubblewrap fallback. `!!` suppresses ordinary UI cards only; approval,
+transcript, result, and tool-call audit records remain durable.
+
+Git reads allow only `branch`, `diff`, `ls-files`, `rev-parse`, and `status`.
+Hooks, fsmonitor, global attributes, external diff, textconv, pagers, and
+interactive diff filters are disabled. Before diff/status, Ouvrier inspects up
+to 128 `.gitattributes` files (64 KiB each, 1 MiB aggregate), plus the effective
+`.git/info/attributes`, and refuses every non-empty `filter=` attribute. This
+deliberately includes Git LFS (`filter=lfs`): remove the content-filter
+attribute and provide ordinary materialized source before cockpit diff, patch,
+or audit. No repository filter is executed as a fallback.
+
+The source/evidence checks are bounded and fail closed rather than silently
+claiming complete coverage:
+
+- a source fingerprint accepts at most 100,000 files and 2 GiB;
+- the sanitized-source secret scan accepts at most 10,000 files, 4 MiB per
+  file, and 64 MiB in aggregate, independently of Git tracked/untracked state;
+- one driver review context accepts at most 32 safe regular files, 64 KiB per
+  file, and 256 KiB total. Whole-worker, governance, and deploy-readiness
+  reviews fail if the complete requested scope cannot fit or contains a source
+  symlink.
+
+Patch driver, diff, and evidence-persistence failures transition to
+`patch_failed`; audit execution, evidence, and failed-gate outcomes transition
+to `audit_failed`. The durable session also stores a redacted `last_error` for
+execution/persistence errors and a redacted transition reason, so a failed
+operation does not remain in a success-looking `patching` or `auditing` state.
+If writing that failure state itself fails, the persistence error is joined to
+the original error and returned rather than hidden.
+
+The production audit path does not execute candidate Go code directly on the
+host. On Linux it requires a working Bubblewrap namespace sandbox; another OS,
+a missing `bwrap`, or an unenforceable namespace fails the audit instead of
+falling back to host execution. Dependency preparation runs offline in a
+disposable stage. Then `go test`, `go vet`, and the static Linux/amd64 audit
+build see read-only staged source, vendored dependencies, private cache/temp
+directories, no network, `GOPROXY=off`, `GOWORK=off`, and no inherited
+credential environment. Read-only metadata gates such as `gofmt -l`, manifest
+coherence, and diff/secret inspection do not execute the candidate.
+
+Audit and structured review results are valid only for the exact source
+snapshot observed before and after their gates. The source digest includes the
+worker tree, build/test/embed inputs from local `go.mod` replacements, the Go
+toolchain identity, and the enforced `GOWORK=off` setting. Build recomputes the
+same snapshot, binds the SHA-256 of the exact passing `audit.json`, and records
+the binary SHA-256. A source, local dependency, toolchain, `audit.json`, or
+binary change invalidates the chain; callers cannot make it pass by supplying
+boolean fields. By default build requires current passing audit evidence and
+transfer requires matching current audit and structured-review evidence;
+`--allow-failed` is an explicit compatibility override, not proof.
 
 Every operate session persists human-auditable artifacts under
 `.ouvrier/operate/sessions/<id>/`: `transcript.jsonl`, `events.jsonl`,
 `tool-calls.jsonl`, `auth_profile.json`, `goal.md`, `patch.json`,
 `diff.patch`, `review.json`, `audit.json`, `build.json`, and `transfer.json`.
 This keeps the worker runtime unchanged while giving the developer-operator
-one local interface for operate, build, and transfer. The web console remains
-the remote surface for observing workers and fleets, approving suspended
-runtime actions, triggering workers, and streaming deploy progress.
+one local interface for construction and local verification. Existing transfer
+and web-console surfaces are retained for compatibility and maintenance; they
+are not active cockpit-development requirements.
 
 ## Build And Deploy
+
+Deployment PaaS and web-console development are paused pending an explicit
+redesign. The deployment material below documents already shipped compatibility
+commands for operators who still use them; it is not an active product roadmap
+or a completion requirement for the cockpit.
 
 Build locally:
 

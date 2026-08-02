@@ -44,6 +44,17 @@ func parseOperateFlags(args []string) (operateConfig, error) {
 				cfg.AllowFail = true
 			}
 			i++
+		case "--auto-safe":
+			if hasInline {
+				value, err := strconv.ParseBool(strings.TrimSpace(inline))
+				if err != nil {
+					return operateConfig{}, fmt.Errorf("%w: --auto-safe must be true or false", ErrUsage)
+				}
+				cfg.AutoSafe = value
+			} else {
+				cfg.AutoSafe = true
+			}
+			i++
 		case "--dir", "--agent", "--codex-mode", "--session", "--goal", "--scope", "--subject", "--env", "--env-file", "--target", "--mode", "--prompt", "--model", "--keep":
 			value := inline
 			if !hasInline {
@@ -173,10 +184,11 @@ func operateDriver(cfg operateConfig) (operate.Driver, string, string, error) {
 	case "manual":
 		return operate.ManualDriver{}, "manual", "", nil
 	case "codex":
-		if cfg.CodexMode == "app-server" {
-			return nil, "", "", fmt.Errorf("%w: --codex-mode=app-server is designed but not implemented yet; use auto or exec", ErrUsage)
-		}
-		return operatecodex.New(), "codex", "exec", nil
+		// Patch/review/fix remain explicit operator-only compatibility actions
+		// implemented by the legacy coding driver. The normal model loop uses
+		// resolveAgentModel. Structured app-server is an explicit experimental
+		// mode until its production confinement gates are complete.
+		return operatecodex.New(), "codex", "exec-operator", nil
 	default:
 		return nil, "", "", fmt.Errorf("%w: --agent must be codex or manual", ErrUsage)
 	}

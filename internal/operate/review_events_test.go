@@ -19,7 +19,10 @@ func TestRunTurnEmitsReviewAndDiff(t *testing.T) {
 			}},
 		{Text: "done", StopReason: provider.StopEndTurn},
 	}}
-	rt, _ := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}, Model: model, ModelID: "test/model"})
+	rt, _ := NewAgentRuntime(RuntimeOptions{
+		Dir: dir, Driver: &fakeDriver{result: TurnResult{FinalMessage: `{"passed":true,"summary":"ready","findings":[]}`}}, Model: model, ModelID: "test/model",
+		HeadlessPosture: PostureAutoSafe,
+	})
 	started, _ := rt.Start(context.Background(), RuntimeStartRequest{Dir: dir})
 	ch, err := rt.RunTurn(context.Background(), started.Session.ID, "review and diff", "prompt")
 	if err != nil {

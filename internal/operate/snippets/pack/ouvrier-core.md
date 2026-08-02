@@ -24,7 +24,7 @@ An Ouvrier worker has four layers:
 - `ovr.Tool(name, fn, opts...)` — register a Go function as an agent tool for a Pipe.
 - `ovr.ReadOnly()` — mark a tool as side-effect free; eligible for safe retry and parallel execution.
 - `ovr.SideEffecting(label)` — mark a tool that mutates external state (label required).
-- `ovr.Idempotent(keyExpr)` — mark a side-effecting tool as replay-safe under a stable idempotency key expression.
+- `ovr.Idempotent(keyExpr)` — mark a side-effecting tool as replay-safe under a stable dot-separated JSON argument path.
 - `ovr.RequiresApproval()` — require explicit human approval before the tool runs.
 - `ovr.Describe("what it does")` — set the LLM-facing description for a Tool.
 - `ovr.Reply(format)` — terminate a synchronous pipeline by answering the HTTP caller.
@@ -51,7 +51,7 @@ ovr.Tool("search", searchFn, ovr.ReadOnly(), ovr.Describe("search the index"))
 ovr.Tool("send-email", sendFn, ovr.SideEffecting("email"), ovr.Describe("send an email"))
 
 // Idempotent — safe to replay under a stable key
-ovr.Tool("charge", chargeFn, ovr.Idempotent("{{.OrderID}}"), ovr.Describe("charge the card"))
+ovr.Tool("charge", chargeFn, ovr.Idempotent("order.id"), ovr.Describe("charge the card"))
 
 // Risky — blocked until a human approves
 ovr.Tool("delete-db", deleteFn, ovr.RequiresApproval(), ovr.Describe("drop the database"))

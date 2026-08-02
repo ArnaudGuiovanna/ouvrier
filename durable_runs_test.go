@@ -549,6 +549,14 @@ func TestDurableRunsFlagOffWritesNothing(t *testing.T) {
 // when an unrelated run finishes.
 func TestDurableRunsRetentionPrunesExpiredFailedJournals(t *testing.T) {
 	store := newDurableTestStore(t)
+	for _, execution := range []state.Execution{
+		{ExecID: "exec_expired", Status: state.ExecutionFailed, StartedAt: time.Now().UTC().Add(-100 * time.Hour), CompletedAt: time.Now().UTC().Add(-99 * time.Hour)},
+		{ExecID: "exec_recent_failure", Status: state.ExecutionFailed, StartedAt: time.Now().UTC().Add(-time.Hour), CompletedAt: time.Now().UTC()},
+	} {
+		if err := store.SaveExecution(context.Background(), execution); err != nil {
+			t.Fatalf("seed SaveExecution(%s) returned error: %v", execution.ExecID, err)
+		}
+	}
 	if err := store.SaveRunJournal(context.Background(), state.RunJournal{
 		ExecID:    "exec_expired",
 		PlanKey:   "http:POST /tickets",
@@ -760,11 +768,11 @@ func TestDurablePlanHashIsDeterministicAndStructureSensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compilePlans returned error: %v", err)
 	}
-	first := durablePlanHash(plans[0].Steps)
+	first := durablePlanHash(plans[0])
 	if first == "" {
 		t.Fatal("plan hash is empty")
 	}
-	if again := durablePlanHash(plans[0].Steps); again != first {
+	if again := durablePlanHash(plans[0]); again != first {
 		t.Fatalf("plan hash not deterministic: %q vs %q", first, again)
 	}
 
@@ -777,7 +785,32 @@ func TestDurablePlanHashIsDeterministicAndStructureSensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compilePlans returned error: %v", err)
 	}
-	if durablePlanHash(edited[0].Steps) == first {
+	if durablePlanHash(edited[0]) == first {
 		t.Fatal("plan hash unchanged after editing a step goal, want mismatch for #40 abandonment")
+	}
+
+	changedTerminal := plans[0]
+	changedTerminal.Terminal.PushWebhookURL = "https://new.example.invalid/result"
+	if durablePlanHash(changedTerminal) == first {
+		t.Fatal("plan hash unchanged after editing the terminal destination, want fail-closed recovery")
+	}
+}
+
+func TestDurablePlanHashBindsWorkerBuildIdentity(t *testing.T) {
+	plans, err := compilePlans([]Node{
+		From("POST /tickets"),
+		Pipe("same compiled plan", Model("durable/build-binding")),
+		Reply(Accepted()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+
+	releaseA := durablePlanHashWithBuildIdentity(plans[0], "sha256:release-a")
+	if again := durablePlanHashWithBuildIdentity(plans[0], "sha256:release-a"); again != releaseA {
+		t.Fatalf("same plan and build identity produced %q then %q", releaseA, again)
+	}
+	if releaseB := durablePlanHashWithBuildIdentity(plans[0], "sha256:release-b"); releaseB == releaseA {
+		t.Fatal("plan hash did not change with the worker build identity")
 	}
 }

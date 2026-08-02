@@ -110,7 +110,7 @@ func (h *Harness) executeSingleToolCall(ctx context.Context, session runtimecore
 func (h *Harness) callTool(ctx context.Context, session runtimecore.Session, call provider.ToolCall) toolCallOutcome {
 	toolCtx := contextWithExecution(ctx, session, h.budgetLedger)
 	if h.stateStore != nil {
-		toolCtx = tools.ContextWithIdempotencyStore(toolCtx, h.stateStore, session.ExecID)
+		toolCtx = tools.ContextWithIdempotencyStoreNamespace(toolCtx, h.stateStore, session.ExecID, h.idempotencyScope)
 		toolCtx = tools.ContextWithMemoryStore(toolCtx, memoryStoreAdapter{store: h.stateStore}, h.memoryScopeFor(session))
 		toolCtx = tools.ContextWithApprovalGate(toolCtx, approvalGateAdapter{store: h.stateStore}, tools.ApprovalContext{
 			ExecID:    session.ExecID,

@@ -184,3 +184,36 @@ func TestExecutorSkipsDuplicateIdempotentHandlerCall(t *testing.T) {
 		t.Fatalf("called = %d, want exactly one handler execution", called)
 	}
 }
+
+func TestExecutorRetriesIdempotentHandlerAfterErrorResult(t *testing.T) {
+	store := state.NewMemoryStore()
+	ctx := ContextWithIdempotencyStore(context.Background(), store, "exec_1")
+	calls := 0
+	executor := NewExecutor()
+	if err := executor.RegisterHandler("publish", handlerFunc(func(_ context.Context, call provider.ToolCall) (provider.ToolResult, error) {
+		calls++
+		if calls == 1 {
+			return provider.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: []byte(`"rejected"`), IsError: true}, nil
+		}
+		return provider.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: []byte(`"ok"`)}, nil
+	}), WithMetadata(Metadata{
+		Effect:         policy.EffectIdempotent,
+		IdempotencyKey: "ticket.id",
+		InputSchema:    []byte(`{"type":"object","properties":{"ticket":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},"required":["ticket"]}`),
+	})); err != nil {
+		t.Fatalf("RegisterHandler returned error: %v", err)
+	}
+	call := provider.ToolCall{ID: "call_1", Name: "publish", Arguments: []byte(`{"ticket":{"id":"T-1"}}`)}
+
+	first, err := executor.Execute(ctx, call)
+	if err != nil || !first.IsError {
+		t.Fatalf("first result=%+v err=%v, want error result", first, err)
+	}
+	second, err := executor.Execute(ctx, call)
+	if err != nil || second.IsError {
+		t.Fatalf("second result=%+v err=%v, want retry success", second, err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}

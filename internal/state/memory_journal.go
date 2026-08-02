@@ -181,21 +181,37 @@ func (s *MemoryStore) PruneRunJournalsBefore(ctx context.Context, cutoff time.Ti
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pruned := []string{}
+	candidates := []string{}
 	for execID, journal := range s.runJournals {
 		if journal.CreatedAt.Before(cutoff) {
-			pruned = append(pruned, execID)
+			candidates = append(candidates, execID)
 		}
 	}
-	sort.Strings(pruned)
-	for _, execID := range pruned {
-		s.pruneRunJournalLocked(execID)
+	sort.Strings(candidates)
+	pruned := make([]string, 0, len(candidates))
+	for _, execID := range candidates {
+		if s.pruneRunJournalLocked(execID) {
+			pruned = append(pruned, execID)
+		}
 	}
 	return pruned, nil
 }
 
-func (s *MemoryStore) pruneRunJournalLocked(execID string) {
+func (s *MemoryStore) pruneRunJournalLocked(execID string) bool {
+	if _, ok := s.runJournals[execID]; !ok {
+		return false
+	}
+	execution, ok := s.executions[execID]
+	if !ok || !terminalExecutionStatus(execution.Status) {
+		return false
+	}
+	for _, approval := range s.approvals {
+		if approval.ExecID == execID && approval.Status == ApprovalPending {
+			return false
+		}
+	}
 	delete(s.runJournals, execID)
 	delete(s.runCheckpoints, execID)
 	delete(s.toolIntents, execID)
+	return true
 }

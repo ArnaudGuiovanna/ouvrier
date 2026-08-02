@@ -23,19 +23,24 @@ type Event struct {
 }
 
 type EventStream struct {
+	appendMu    sync.Mutex
 	mu          sync.RWMutex
 	nextID      uint64
 	now         func() time.Time
-	events      []Event
+	events      eventBuffer
+	appended    uint64
+	kindCounts  map[EventKind]uint64
+	metricStats streamMetricState
 	subscribers []Subscriber
 }
 
 // Subscriber is called for every Event appended to the stream, after
 // sanitization and ID assignment. Subscribers must not mutate the supplied
 // Event and must return quickly; long-running observers should hand the event
-// off to their own goroutine. Subscribers run synchronously under the stream
-// lock; panics are recovered to keep the runtime from crashing on a broken
-// observer.
+// off to their own goroutine. Subscribers run synchronously, outside the state
+// lock, and concurrent appends deliver them in ascending event-ID order. Each
+// subscriber receives its own defensive copy. Panics are recovered to keep the
+// runtime from crashing on a broken observer.
 type Subscriber func(context.Context, Event)
 
 const redactedPayloadValue = "[REDACTED]"
@@ -44,46 +49,15 @@ var (
 	authorizationPattern       = regexp.MustCompile(`(?i)\bauthorization(\s*[:=]\s*)(?:bearer\s+)?[^,\s"'}]+`)
 	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)\b((?:access|refresh|session)?[-_]?token|api[-_]?key|password|secret(?:[-_]?key)?|client[-_]?secret|private[-_]?key|cookie)(\s*[:=]\s*)([^,\s"'}]+)`)
 	bearerTokenPattern         = regexp.MustCompile(`(?i)\bBearer\s+[^,\s"'}]+`)
+	knownCredentialPattern     = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[A-Z0-9]{16}|gh[pousr]_[A-Za-z0-9_]{20,})\b`)
+	privateKeyPattern          = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 )
 
-type Option func(*config) error
-
-type config struct {
-	now       func() time.Time
-	initialID uint64
-}
-
-func NewEventStream(opts ...Option) (*EventStream, error) {
-	cfg := config{now: time.Now}
-	for _, opt := range opts {
-		if opt == nil {
-			return nil, errors.New("nil event stream option")
-		}
-		if err := opt(&cfg); err != nil {
-			return nil, err
-		}
-	}
-	return &EventStream{now: cfg.now, nextID: cfg.initialID}, nil
-}
-
-func WithClock(now func() time.Time) Option {
-	return func(cfg *config) error {
-		if now == nil {
-			return errors.New("event stream clock is required")
-		}
-		cfg.now = now
-		return nil
-	}
-}
-
-func WithInitialID(id uint64) Option {
-	return func(cfg *config) error {
-		cfg.initialID = id
-		return nil
-	}
-}
-
 func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
+	return s.append(ctx, event, nil)
+}
+
+func (s *EventStream) append(ctx context.Context, event Event, persist func(context.Context, Event) (Event, error)) (Event, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -91,15 +65,52 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 		return Event{}, err
 	}
 
-	s.mu.Lock()
-	s.nextID++
-	event.ID = s.nextID
+	// Serialize the full append/notification sequence. ID allocation alone is
+	// not enough: without this gate, a later concurrent append can notify a
+	// subscriber before the append that owns the preceding ID.
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Event{}, err
+	}
+
 	event.Kind = CanonicalKind(event.Kind)
 	if event.At.IsZero() {
 		event.At = s.now().UTC()
 	}
 	event.Payload = sanitizePayload(event.Payload)
-	s.events = append(s.events, event)
+	if persist != nil {
+		persisted, err := persist(ctx, event)
+		if err != nil {
+			return Event{}, err
+		}
+		event = SanitizeEvent(persisted)
+		if event.ID == 0 {
+			return Event{}, errors.New("durable persistence returned an empty event ID")
+		}
+	}
+
+	s.mu.Lock()
+	if persist == nil {
+		if s.nextID == ^uint64(0) {
+			s.mu.Unlock()
+			return Event{}, ErrEventIDExhausted
+		}
+		s.nextID++
+		event.ID = s.nextID
+	} else {
+		if event.ID <= s.nextID {
+			s.mu.Unlock()
+			return Event{}, errors.New("durable event ID did not advance the local stream")
+		}
+		s.nextID = event.ID
+	}
+	s.events.append(event)
+	s.appended++
+	if isLifetimeCounterKind(event.Kind) {
+		s.kindCounts[event.Kind]++
+	}
+	s.metricStats.observe(event)
 	subscribers := append([]Subscriber(nil), s.subscribers...)
 	stored := cloneEvent(event)
 	s.mu.Unlock()
@@ -108,7 +119,7 @@ func (s *EventStream) Append(ctx context.Context, event Event) (Event, error) {
 		if sub == nil {
 			continue
 		}
-		notifySubscriber(ctx, sub, stored)
+		notifySubscriber(ctx, sub, cloneEvent(stored))
 	}
 	return stored, nil
 }
@@ -119,6 +130,8 @@ func (s *EventStream) EnsureNextIDAtLeast(id uint64) {
 	if s == nil || id == 0 {
 		return
 	}
+	s.appendMu.Lock()
+	defer s.appendMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.nextID < id {
@@ -153,10 +166,11 @@ func (s *EventStream) List() []Event {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	events := make([]Event, len(s.events))
-	for i, event := range s.events {
+	events := make([]Event, s.events.len())
+	s.events.each(func(i int, event Event) bool {
 		events[i] = cloneEvent(event)
-	}
+		return true
+	})
 	return events
 }
 
@@ -164,12 +178,13 @@ func (s *EventStream) Since(id uint64) []Event {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	events := make([]Event, 0, len(s.events))
-	for _, event := range s.events {
+	events := make([]Event, 0, s.events.len())
+	s.events.each(func(_ int, event Event) bool {
 		if event.ID > id {
 			events = append(events, cloneEvent(event))
 		}
-	}
+		return true
+	})
 	return events
 }
 
@@ -326,7 +341,9 @@ func sanitizeReflectSlicePayloadValue(rv reflect.Value) []any {
 func isSensitivePayloadKey(key string) bool {
 	normalized := normalizeSensitivePayloadKey(key)
 	switch normalized {
-	case "authorization", "token", "api_key", "password", "secret", "cookie", "private_key", "secret_key", "client_secret":
+	case "authorization", "token", "api_key", "password", "passwd", "secret", "cookie",
+		"private_key", "secret_key", "client_secret", "access_key", "auth_token", "bearer_token",
+		"credential", "credentials", "database_url", "database_dsn", "connection_string", "dsn":
 		return true
 	}
 	return strings.HasSuffix(normalized, "_token") ||
@@ -334,7 +351,11 @@ func isSensitivePayloadKey(key string) bool {
 		strings.HasSuffix(normalized, "_password") ||
 		strings.HasSuffix(normalized, "_key") ||
 		strings.Contains(normalized, "api_key") ||
-		strings.HasSuffix(normalized, "_cookie")
+		strings.HasSuffix(normalized, "_cookie") ||
+		strings.HasSuffix(normalized, "_credential") ||
+		strings.HasSuffix(normalized, "_credentials") ||
+		strings.HasSuffix(normalized, "_dsn") ||
+		strings.HasSuffix(normalized, "_connection_string")
 }
 
 func normalizeSensitivePayloadKey(key string) string {
@@ -389,6 +410,8 @@ func redactSensitiveString(value string) string {
 	redacted := authorizationPattern.ReplaceAllString(value, "Authorization${1}"+redactedPayloadValue)
 	redacted = bearerTokenPattern.ReplaceAllString(redacted, "Bearer "+redactedPayloadValue)
 	redacted = sensitiveAssignmentPattern.ReplaceAllString(redacted, "${1}${2}"+redactedPayloadValue)
+	redacted = knownCredentialPattern.ReplaceAllString(redacted, redactedPayloadValue)
+	redacted = privateKeyPattern.ReplaceAllString(redacted, redactedPayloadValue)
 	for _, secret := range sensitiveEnvironmentValues() {
 		redacted = strings.ReplaceAll(redacted, secret, redactedPayloadValue)
 	}

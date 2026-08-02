@@ -120,8 +120,8 @@ var snippetData = []Snippet{
 		Prefix: "ovr-idempotent",
 		Title:  "ovr.Idempotent",
 		Group:  "governance",
-		Body:   "ovr.Idempotent(\"${1:keyExpr}\")",
-		Doc:    "Mark a tool safe to retry under an idempotency key.",
+		Body:   "ovr.Idempotent(\"${1:request.id}\")",
+		Doc:    "Mark a tool safe to retry using a dot-separated JSON argument path.",
 	},
 	{
 		Prefix: "ovr-approval",
@@ -165,7 +165,7 @@ var snippetData = []Snippet{
 		Title:  "ovr.Push",
 		Group:  "reply",
 		// Push takes a PushTarget; Webhook and Queue are the concrete types.
-		Body: "ovr.Push(${1:ovr.Webhook(\"https://...\"})",
+		Body: "ovr.Push(${1:ovr.Webhook(\"https://example.com/results\")})",
 		Doc:  "Push the outcome to a webhook/queue.",
 	},
 }

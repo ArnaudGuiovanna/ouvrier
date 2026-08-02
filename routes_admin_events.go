@@ -3,10 +3,13 @@ package ovr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 )
 
 func (rt httpRuntime) serveAdminEvents(w http.ResponseWriter, req *http.Request) {
@@ -37,6 +40,7 @@ func (rt httpRuntime) serveAdminEvents(w http.ResponseWriter, req *http.Request)
 	w.WriteHeader(http.StatusOK)
 
 	if err := rt.writeAdminEventStreamBatch(req.Context(), w, format, &afterID); err != nil {
+		writeAdminEventStreamError(w, format, err)
 		return
 	}
 	if !follow {
@@ -56,10 +60,27 @@ func (rt httpRuntime) serveAdminEvents(w http.ResponseWriter, req *http.Request)
 		case <-ticker.C:
 		}
 		if err := rt.writeAdminEventStreamBatch(req.Context(), w, format, &afterID); err != nil {
+			writeAdminEventStreamError(w, format, err)
 			return
 		}
 		flusher.Flush()
 	}
+}
+
+func writeAdminEventStreamError(w ioWriter, format string, err error) {
+	if format == "sse" {
+		writeSSEEventDeliveryError(w, err)
+		return
+	}
+	status := "event_stream_error"
+	if errors.Is(err, events.ErrEventHistoryGap) {
+		status = "event_history_gap"
+	}
+	encoded, marshalErr := json.Marshal(httpStatusResponse{Status: status})
+	if marshalErr != nil {
+		return
+	}
+	_, _ = w.Write(append(encoded, '\n'))
 }
 
 func adminEventStreamFormat(req *http.Request) string {
@@ -76,11 +97,11 @@ func (rt httpRuntime) writeAdminEventStreamBatch(ctx context.Context, w ioWriter
 		return err
 	}
 	for _, event := range recorded {
-		if event.ID > *afterID {
-			*afterID = event.ID
-		}
 		if err := writeAdminEventStreamRecord(w, format, adminEventResponseFromEvent(event)); err != nil {
 			return err
+		}
+		if event.ID > *afterID {
+			*afterID = event.ID
 		}
 	}
 	return nil

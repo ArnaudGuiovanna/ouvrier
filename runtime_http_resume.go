@@ -136,7 +136,9 @@ func (rt httpRuntime) startApprovedResume(approvalID string) bool {
 }
 
 func (rt httpRuntime) runApprovedResume(ctx context.Context, approvalID string, resume approvalResume) {
-	if rt.durableRuns != nil {
+	executionCtx := ctx
+	var runLease *durableRunLeaseHeartbeat
+	if rt.durableRuns != nil && rt.stateStore != nil {
 		// Re-acquire the run lease for the resumed leg so durable-run
 		// recovery never replays this execution while the in-memory resume is
 		// live. The brief retry covers the suspend path's deferred release
@@ -144,19 +146,24 @@ func (rt httpRuntime) runApprovedResume(ctx context.Context, approvalID string, 
 		// recovery claim) owns the lease unexpired — then that holder replays
 		// the run with the approval fallback and resuming here would
 		// double-execute.
-		runLease, err := rt.acquireDurableRunLeaseWithRetry(ctx, resume.session.ExecID)
+		var err error
+		runLease, err = rt.acquireDurableRunLeaseWithRetry(ctx, resume.session.ExecID)
 		if err != nil {
 			return
 		}
-		defer runLease.release()
+		if runLease != nil {
+			defer runLease.release()
+			executionCtx = runLease.context()
+		}
 	}
-	_ = rt.syncEventStreamWithStore(ctx)
-	rt.emitApprovalResumeEvent(ctx, approvalID, resume, events.EventExecutionResumed, map[string]any{
+	_ = rt.syncEventStreamWithStore(executionCtx)
+	rt.emitApprovalResumeEvent(executionCtx, approvalID, resume, events.EventExecutionResumed, map[string]any{
 		"approval_id": approvalID,
 	})
-	result, err := resume.resume(ctx)
+	result, err := resume.resume(executionCtx)
 	if err != nil {
-		if rt.rememberSuspendedPlan(err, resume.plan, resume.session) {
+		err = runLease.executionError(err)
+		if !errors.Is(err, errDurableRunLeaseLost) && rt.rememberSuspendedPlan(err, resume.plan, resume.session) {
 			return
 		}
 		payload := map[string]any{
@@ -167,20 +174,54 @@ func (rt httpRuntime) runApprovedResume(ctx context.Context, approvalID string, 
 		if budget := httpPipelineBudget(err); budget != "" {
 			payload["budget"] = budget
 		}
-		rt.emitApprovalResumeEvent(context.WithoutCancel(ctx), approvalID, resume, events.EventPipelineFailed, payload)
-		_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), resume.session, resume.plan, "failed", err)
+		rt.emitApprovalResumeEvent(context.WithoutCancel(executionCtx), approvalID, resume, events.EventPipelineFailed, payload)
+		_ = rt.finishPipelineExecution(context.WithoutCancel(executionCtx), resume.session, resume.plan, "failed", err)
 		return
 	}
-	if err := rt.applyResumedTerminal(ctx, resume.plan, result); err != nil {
-		rt.emitApprovalResumeEvent(context.WithoutCancel(ctx), approvalID, resume, events.EventPipelineFailed, map[string]any{
+	if err := runLease.confirm(executionCtx); err != nil {
+		err = runLease.executionError(err)
+		rt.emitApprovalResumeEvent(context.WithoutCancel(executionCtx), approvalID, resume, events.EventPipelineFailed, map[string]any{
 			"approval_id": approvalID,
 			"error":       err.Error(),
 			"resumed":     true,
 		})
-		_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), resume.session, resume.plan, "failed", err)
+		_ = rt.finishPipelineExecution(context.WithoutCancel(executionCtx), resume.session, resume.plan, "failed", err)
 		return
 	}
-	_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), resume.session, resume.plan, "completed", nil)
+	terminalCtx := executionCtx
+	if rt.durableRuns != nil && rt.stateStore != nil {
+		terminalJournal := &durableStepJournal{store: rt.stateStore, execID: resume.session.ExecID}
+		terminalCtx = terminalJournal.intentContext(executionCtx, len(resume.plan.Steps))
+	}
+	if err := rt.applyResumedTerminal(terminalCtx, resume.plan, result); err != nil {
+		err = runLease.executionError(err)
+		rt.emitApprovalResumeEvent(context.WithoutCancel(executionCtx), approvalID, resume, events.EventPipelineFailed, map[string]any{
+			"approval_id": approvalID,
+			"error":       err.Error(),
+			"resumed":     true,
+		})
+		_ = rt.finishPipelineExecution(context.WithoutCancel(executionCtx), resume.session, resume.plan, "failed", err)
+		return
+	}
+	settleCtx, settleCancel := newHTTPFinalizationContext(executionCtx)
+	_ = rt.resolveTriggerIdempotency(settleCtx, resume.session.ExecID, "completed")
+	settleCancel()
+	if runLease != nil {
+		confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(executionCtx), cronLeaseReleaseTimeout)
+		err := runLease.stopAndConfirm(confirmCtx)
+		cancel()
+		if err != nil {
+			err = runLease.executionError(err)
+			rt.emitApprovalResumeEvent(context.WithoutCancel(executionCtx), approvalID, resume, events.EventPipelineFailed, map[string]any{
+				"approval_id": approvalID,
+				"error":       err.Error(),
+				"resumed":     true,
+			})
+			_ = rt.finishPipelineExecutionWithTriggerOutcome(context.WithoutCancel(executionCtx), resume.session, resume.plan, "failed", "completed", err)
+			return
+		}
+	}
+	_ = rt.finishPipelineExecution(context.WithoutCancel(executionCtx), resume.session, resume.plan, "completed", nil)
 }
 
 func (rt httpRuntime) syncEventStreamWithStore(ctx context.Context) error {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -18,7 +19,7 @@ func defaultRunIDE(ctx context.Context, in io.Reader, out io.Writer, opts ide.ID
 	return ide.RunIDE(ctx, in, out, opts)
 }
 
-func (app *App) runIDECommand(ctx context.Context, args []string) error {
+func (app *App) runIDECommand(ctx context.Context, args []string) (retErr error) {
 	if hasHelpFlag(args) {
 		printIDEHelp(app.out)
 		return nil
@@ -46,6 +47,7 @@ func (app *App) runIDECommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { retErr = errors.Join(retErr, runtime.Close()) }()
 	started, err := runtime.Start(ctx, operate.RuntimeStartRequest{Dir: ws.Dir})
 	if err != nil {
 		return err

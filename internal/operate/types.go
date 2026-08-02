@@ -14,6 +14,7 @@ const (
 	StatusSelected    Status = "selected"
 	StatusPlanned     Status = "planned"
 	StatusPatching    Status = "patching"
+	StatusPatchFailed Status = "patch_failed"
 	StatusPatched     Status = "patched"
 	StatusAuditing    Status = "auditing"
 	StatusAuditFailed Status = "audit_failed"
@@ -50,6 +51,19 @@ type Driver interface {
 	Close() error
 }
 
+// ExternalDriver marks a Driver whose turn executes outside Ouvrier's own
+// process and trust boundary. Review and mutation turns for these drivers run
+// against a disposable, sanitized copy of the worker; the external process is
+// never handed the live worker directory.
+//
+// The marker is deliberately opt-in so in-process test and manual drivers keep
+// their existing behavior. Every process-backed production driver must
+// implement ExternalDriverMarker.
+type ExternalDriver interface {
+	Driver
+	ExternalDriverMarker()
+}
+
 // Capabilities describes an agent driver discovered on the operator machine.
 type Capabilities struct {
 	Name          string `json:"name"`
@@ -66,6 +80,10 @@ type TurnRequest struct {
 	Prompt       string      `json:"prompt"`
 	ContextFiles []string    `json:"context_files,omitempty"`
 	OutputSchema string      `json:"output_schema,omitempty"`
+	// Redactor is propagated by the harness to the driver trust boundary. It is
+	// deliberately excluded from serialization because its concrete values are
+	// secrets; drivers may only apply Redact before constructing transport data.
+	Redactor Redactor `json:"-"`
 }
 
 // TurnResult is the final result of one agent turn. Patch turns are considered
@@ -77,7 +95,7 @@ type TurnResult struct {
 
 // EventSink receives normalized streaming events from an agent driver.
 type EventSink interface {
-	Event(Event)
+	Event(Event) error
 }
 
 // EventKind is a normalized operate event type.

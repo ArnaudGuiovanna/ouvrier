@@ -2,7 +2,9 @@ package ovr
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -26,8 +28,9 @@ import (
 // configuration; the read side — run leases, the recovery loop, and the
 // /admin/runs endpoints — lives in durable_recovery.go.
 
-// defaultDurableRetention bounds how long failed/suspended run journals are
-// kept before the retention sweep prunes them.
+// defaultDurableRetention bounds how long terminal failed run journals are
+// kept before the retention sweep prunes them. Running runs and executions
+// parked on a pending approval are never retention candidates.
 const defaultDurableRetention = 72 * time.Hour
 
 const (
@@ -161,11 +164,87 @@ func durableRunsConfigForStore(store state.Store) (*durableRunsConfig, error) {
 		return nil, fmt.Errorf("%s=1 is not supported with a custom WithStateStore: the run journal needs the built-in %s or %s state backend",
 			envnames.DurableRuns, state.BackendSQLite, state.BackendPostgres)
 	}
+	if _, err := durableReplayBuildIdentity(); err != nil {
+		return nil, fmt.Errorf("%s=1 cannot bind recovery to the running worker executable: %w", envnames.DurableRuns, err)
+	}
 	config := newDurableRunsConfig(retention)
 	// Env-configured runtimes recover interrupted runs; test runtimes opt in
 	// by setting recovery explicitly.
 	config.recovery = newDurableRecoveryConfig()
 	return config, nil
+}
+
+type durableBuildIdentityResult struct {
+	identity string
+	err      error
+}
+
+var (
+	durableBuildIdentityOnce   sync.Once
+	durableBuildIdentityCached durableBuildIdentityResult
+)
+
+// durableReplayBuildIdentity fingerprints the exact executable image once per
+// process. The Linux /proc handle stays bound to the running image even when a
+// deploy atomically replaces its pathname; os.Executable is the portable
+// fallback. Production durable mode refuses to start when neither image can be
+// read, because a structure-only plan hash could replay changed Go handlers.
+func durableReplayBuildIdentity() (string, error) {
+	durableBuildIdentityOnce.Do(func() {
+		identity, err := fingerprintDurableExecutable()
+		if err == nil {
+			durableBuildIdentityCached.identity = identity
+			return
+		}
+
+		// Keep internal/manual test configurations fail-closed too. Production
+		// startup returns the error above; the per-process fallback merely makes
+		// hashes from an unreadable executable unable to match after a restart.
+		var nonce [32]byte
+		if _, randomErr := cryptorand.Read(nonce[:]); randomErr == nil {
+			durableBuildIdentityCached.identity = "unavailable:" + hex.EncodeToString(nonce[:])
+		} else {
+			durableBuildIdentityCached.identity = fmt.Sprintf("unavailable:%d:%d", os.Getpid(), time.Now().UnixNano())
+		}
+		durableBuildIdentityCached.err = err
+	})
+	return durableBuildIdentityCached.identity, durableBuildIdentityCached.err
+}
+
+func fingerprintDurableExecutable() (string, error) {
+	paths := []string{"/proc/self/exe"}
+	executable, executableErr := os.Executable()
+	if executableErr == nil && executable != "" && executable != paths[0] {
+		paths = append(paths, executable)
+	}
+
+	var lastErr error
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			lastErr = copyErr
+			continue
+		}
+		if closeErr != nil {
+			lastErr = closeErr
+			continue
+		}
+		return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+	}
+	if executableErr != nil {
+		lastErr = executableErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no executable path is available")
+	}
+	return "", fmt.Errorf("fingerprint current executable: %w", lastErr)
 }
 
 // durablePlanKey identifies a plan by its trigger, the same identity an
@@ -185,51 +264,161 @@ func durablePlanKey(plan runtimeplan.Plan) string {
 	}
 }
 
-// durablePlanHash fingerprints the compiled steps so recovery can detect a
-// pipeline edited between deploys (plan_hash mismatch => abandon, #40). It
-// hashes the structural identity of every step — kinds, goals, models,
-// tool/bash/skill/MCP/subagent names and effects, nested branches — never
-// secrets, schemas' Go types, or function pointers.
-func durablePlanHash(steps []runtimeplan.Step) string {
+// durablePlanHash fingerprints the complete replay contract so recovery can
+// detect a worker edited between deploys (plan_hash mismatch => abandon,
+// #40). In particular, terminal destinations, schemas, and the exact worker
+// executable are part of the contract: an interrupted run must never resume
+// against changed Go handler/tool code or a newly configured sink or queue.
+// Length-prefixed fields avoid delimiter collisions. Function pointers and
+// secret values loaded from the environment are never serialized; configured
+// URIs and the executable identity remain confined to the digest.
+func durablePlanHash(plan runtimeplan.Plan) string {
+	buildIdentity, _ := durableReplayBuildIdentity()
+	return durablePlanHashWithBuildIdentity(plan, buildIdentity)
+}
+
+func durablePlanHashWithBuildIdentity(plan runtimeplan.Plan, buildIdentity string) string {
 	hash := sha256.New()
-	writePlanHashSteps(hash, steps, 0)
+	writePlanHashFields(hash, "ouvrier-durable-plan", "v3", "worker-build", buildIdentity)
+	writePlanHashTrigger(hash, plan.Trigger)
+	writePlanHashSteps(hash, plan.Steps, 0)
+	writePlanHashTerminal(hash, plan.Terminal)
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func writePlanHashSteps(hash io.Writer, steps []runtimeplan.Step, depth int) {
+	writePlanHashFields(hash, "steps", strconv.Itoa(depth), strconv.Itoa(len(steps)))
 	for index, step := range steps {
-		fmt.Fprintf(hash, "%d/%d|%s|%s|%s|%v|%d|%t|%t|%t\n",
-			depth, index, step.Kind, step.Goal, step.Model, step.Fallback,
-			step.Concurrency, step.PartialOK, step.NoCache, step.SequentialTools)
+		writePlanHashFields(hash, "step", strconv.Itoa(depth), strconv.Itoa(index),
+			string(step.Kind), step.Goal, step.Model,
+			strconv.Itoa(step.Concurrency), strconv.FormatBool(step.PartialOK),
+			strconv.FormatBool(step.NoCache), strconv.FormatBool(step.SequentialTools))
+		writePlanHashStrings(hash, "fallback", step.Fallback)
+
+		writePlanHashFields(hash, "tools", strconv.Itoa(len(step.Tools)))
 		for _, tool := range step.Tools {
-			fmt.Fprintf(hash, "tool|%s|%s|%s|%v|%t\n",
-				tool.Name, tool.Effect, tool.IdempotencyKey, tool.SideEffects, tool.RequiresApproval)
+			writePlanHashFields(hash, "tool", tool.Name, tool.Description,
+				string(tool.InputSchema), tool.ArgumentName, string(tool.Effect),
+				tool.IdempotencyKey, strconv.FormatBool(tool.RequiresApproval),
+				strconv.FormatInt(int64(tool.Timeout), 10))
+			writePlanHashStrings(hash, "side-effects", tool.SideEffects)
 		}
+
+		writePlanHashFields(hash, "bash-tools", strconv.Itoa(len(step.Bash)))
 		for _, bash := range step.Bash {
-			fmt.Fprintf(hash, "bash|%s|%t\n", bash.Name, bash.UnsafeHostExecution)
+			writePlanHashFields(hash, "bash", bash.Name, bash.SandboxRoot,
+				strconv.FormatInt(int64(bash.Timeout), 10), strconv.Itoa(bash.MaxOutputBytes),
+				strconv.FormatBool(bash.UnsafeHostExecution))
+			writePlanHashStrings(hash, "allowed-env", bash.AllowedEnv)
 		}
+
+		writePlanHashFields(hash, "skills", strconv.Itoa(len(step.Skills)))
 		for _, skill := range step.Skills {
-			fmt.Fprintf(hash, "skill|%s\n", skill.Name)
+			writePlanHashFields(hash, "skill", skill.Name)
 		}
+		writePlanHashFields(hash, "mcp-servers", strconv.Itoa(len(step.MCPServers)))
 		for _, server := range step.MCPServers {
-			fmt.Fprintf(hash, "mcp|%s\n", server.Name)
+			writePlanHashFields(hash, "mcp", server.Name)
 		}
+		writePlanHashFields(hash, "subagents", strconv.Itoa(len(step.SubAgents)))
 		for _, subAgent := range step.SubAgents {
-			fmt.Fprintf(hash, "subagent|%s|%d|%t\n", subAgent.Name, subAgent.MaxParallel, subAgent.PartialOK)
+			writePlanHashFields(hash, "subagent", subAgent.Name,
+				strconv.Itoa(subAgent.MaxParallel), strconv.FormatBool(subAgent.PartialOK))
 			writePlanHashSteps(hash, subAgent.Pipeline.Steps, depth+1)
 		}
-		if step.ResultSchema != nil {
-			fmt.Fprintf(hash, "schema|%s\n", step.ResultSchema.Name)
+
+		writePlanHashResultSchema(hash, step.ResultSchema)
+		if step.Retry == nil {
+			writePlanHashFields(hash, "retry", "absent")
+		} else {
+			writePlanHashFields(hash, "retry", "present",
+				strconv.Itoa(step.Retry.ProviderRetries),
+				strconv.FormatInt(int64(step.Retry.Backoff), 10))
 		}
+		writePlanHashFields(hash, "budget",
+			strconv.Itoa(step.Budget.MaxIterations), strconv.Itoa(step.Budget.MaxTokens),
+			strconv.FormatFloat(step.Budget.MaxCostUSD, 'g', -1, 64),
+			strconv.FormatInt(int64(step.Budget.MaxWallClock), 10))
+
+		writePlanHashFields(hash, "branches", strconv.Itoa(len(step.Branches)))
 		for _, branch := range step.Branches {
-			fmt.Fprintf(hash, "branch\n")
+			writePlanHashFields(hash, "branch")
 			writePlanHashSteps(hash, branch.Steps, depth+1)
 		}
-		if len(step.MapPipeline.Steps) > 0 {
-			fmt.Fprintf(hash, "map\n")
-			writePlanHashSteps(hash, step.MapPipeline.Steps, depth+1)
-		}
+		writePlanHashFields(hash, "map")
+		writePlanHashSteps(hash, step.MapPipeline.Steps, depth+1)
 	}
+}
+
+func writePlanHashTrigger(hash io.Writer, trigger runtimeplan.Trigger) {
+	writePlanHashFields(hash, "trigger", string(trigger.Kind), trigger.Method,
+		trigger.Path, trigger.Expr, trigger.Value, trigger.URI,
+		strconv.Itoa(trigger.WorkerPool), trigger.IdempotencyHeader,
+		trigger.SignatureEnv, trigger.SignatureHeader, trigger.DLQTarget,
+		strconv.Itoa(trigger.MaxAttempts), strconv.Itoa(trigger.MaxInFlight),
+		trigger.AckPolicy)
+}
+
+func writePlanHashTerminal(hash io.Writer, terminal runtimeplan.Terminal) {
+	writePlanHashFields(hash, "terminal", string(terminal.Kind),
+		strconv.FormatBool(terminal.Async), strconv.FormatBool(terminal.SSE),
+		strconv.FormatBool(terminal.SinkLog), terminal.SinkFilePath,
+		terminal.PushWebhookURL, terminal.PushQueueURI)
+	writePlanHashResultSchema(hash, terminal.ResultSchema)
+}
+
+func writePlanHashResultSchema(hash io.Writer, schema *runtimeplan.ResultSchema) {
+	if schema == nil {
+		writePlanHashFields(hash, "schema", "absent")
+		return
+	}
+	typePackage, typeName := "", ""
+	if schema.Type != nil {
+		typePackage = schema.Type.PkgPath()
+		typeName = schema.Type.String()
+	}
+	writePlanHashFields(hash, "schema", "present", schema.Name,
+		typePackage, typeName, string(schema.JSONSchema))
+}
+
+func writePlanHashStrings(hash io.Writer, label string, values []string) {
+	writePlanHashFields(hash, label, strconv.Itoa(len(values)))
+	for _, value := range values {
+		writePlanHashFields(hash, value)
+	}
+}
+
+func writePlanHashFields(hash io.Writer, fields ...string) {
+	var size [8]byte
+	for _, field := range fields {
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		_, _ = hash.Write(size[:])
+		_, _ = io.WriteString(hash, field)
+	}
+}
+
+// toolIdempotencyPlanNamespace and its child/step derivations scope an
+// idempotent business key to the exact logical Pipe definition that owns the
+// tool. They intentionally omit executions and sessions so deduplication
+// remains durable across runs, while same-named tools in different Pipes can
+// never reserve each other's keys.
+func toolIdempotencyPlanNamespace(plan runtimeplan.Plan) string {
+	hash := sha256.New()
+	writePlanHashFields(hash, "ouvrier-tool-idempotency", "v1", durablePlanKey(plan))
+	return "pipe:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func toolIdempotencyStepNamespace(parent string, index int, step runtimeplan.Step) string {
+	hash := sha256.New()
+	writePlanHashFields(hash, "ouvrier-tool-idempotency-step", "v1", parent, strconv.Itoa(index))
+	writePlanHashSteps(hash, []runtimeplan.Step{step}, 0)
+	return "pipe:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func toolIdempotencyChildNamespace(parent, kind string, index int) string {
+	hash := sha256.New()
+	writePlanHashFields(hash, "ouvrier-tool-idempotency-child", "v1", parent, kind, strconv.Itoa(index))
+	return "pipe:" + hex.EncodeToString(hash.Sum(nil))
 }
 
 // durableStepJournal is the per-run checkpoint writer threaded through

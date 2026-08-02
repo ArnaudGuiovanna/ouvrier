@@ -200,8 +200,8 @@ func (o streamDLQOption) applyFrom(config *fromConfig) {
 	config.maxAttempts = o.maxAttempts
 }
 
-// StreamAckMode selects when a stream delivery is acknowledged to the source
-// broker.
+// StreamAckMode selects the acknowledgement policy requested for stream
+// deliveries.
 type StreamAckMode string
 
 const (
@@ -209,11 +209,9 @@ const (
 	// processed it successfully (or it has been routed to the DLQ). This is the
 	// default and matches at-least-once delivery with runtime-managed acks.
 	StreamAckAuto StreamAckMode = "auto"
-	// StreamAckManual leaves acknowledgement to the message handler: the runtime
-	// never auto-acks a successfully processed delivery, so the broker keeps
-	// redelivering until the source's own ack closure is invoked. Brokers whose
-	// receiver does not expose an ack closure treat this as a no-op (the
-	// transport's own delivery semantics apply).
+	// StreamAckManual is retained for source compatibility. It is rejected by
+	// validation because worker handlers currently have no public capability for
+	// acknowledging a stream delivery. Use StreamAckAuto.
 	StreamAckManual StreamAckMode = "manual"
 )
 
@@ -221,18 +219,22 @@ type streamAckPolicyOption struct {
 	policy StreamAckMode
 }
 
-// StreamAckPolicy configures the per-broker acknowledgement mode for a stream
-// trigger. See StreamAckAuto and StreamAckManual.
+// StreamAckPolicy configures acknowledgement for a stream trigger.
+// StreamAckAuto is the only supported policy. StreamAckManual is retained for
+// source compatibility but is rejected by validation until worker handlers can
+// explicitly acknowledge deliveries.
 func StreamAckPolicy(policy StreamAckMode) FromOption {
 	return streamAckPolicyOption{policy: policy}
 }
 
 func (o streamAckPolicyOption) applyFrom(config *fromConfig) {
 	switch o.policy {
-	case StreamAckAuto, StreamAckManual:
+	case StreamAckAuto:
 		config.ackPolicy = string(o.policy)
+	case StreamAckManual:
+		config.setErr(fmt.Errorf("%w: StreamAckManual is unsupported because worker handlers cannot acknowledge stream deliveries; use StreamAckAuto", ErrInvalidNode))
 	default:
-		config.setErr(fmt.Errorf("%w: StreamAckPolicy must be %q or %q", ErrInvalidNode, StreamAckAuto, StreamAckManual))
+		config.setErr(fmt.Errorf("%w: StreamAckPolicy must be %q; StreamAckManual is currently unsupported", ErrInvalidNode, StreamAckAuto))
 	}
 }
 

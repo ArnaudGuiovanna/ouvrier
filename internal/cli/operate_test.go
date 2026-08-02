@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
 
@@ -59,7 +61,7 @@ func TestRunOperateWithoutSubcommandUsesBubbleTeaRunner(t *testing.T) {
 	}
 }
 
-func TestRunOperatePrintPromptCreatesWorker(t *testing.T) {
+func TestRunOperatePrintPromptFailsClosedWithoutAutoSafe(t *testing.T) {
 	parent := t.TempDir()
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -72,16 +74,14 @@ func TestRunOperatePrintPromptCreatesWorker(t *testing.T) {
 		"--print",
 		"Create a worker that receives POST /tickets",
 	})
-	if err != nil {
-		t.Fatalf("run() error = %v", err)
+	if !errors.Is(err, operate.ErrToolDenied) {
+		t.Fatalf("run() error = %v, want ErrToolDenied", err)
 	}
-	if _, err := os.Stat(filepath.Join(parent, "ticket-worker", "pip.yaml")); err != nil {
-		t.Fatalf("generated worker missing pip.yaml: %v", err)
+	if _, statErr := os.Stat(filepath.Join(parent, "ticket-worker")); !os.IsNotExist(statErr) {
+		t.Fatalf("headless default created worker; stat error = %v", statErr)
 	}
-	for _, want := range []string{"tool scaffold_worker", "created worker ticket-worker", "tool patch_worker"} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("stdout missing %q in:\n%s", want, out.String())
-		}
+	if !strings.Contains(out.String(), "skipped scaffold_worker") {
+		t.Fatalf("stdout does not expose fail-closed denial:\n%s", out.String())
 	}
 }
 
@@ -126,8 +126,56 @@ func TestRunOperateRPCPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
-	if !strings.Contains(out.String(), `"type":"turn"`) || !strings.Contains(out.String(), "Available Ouvrier tools") || !strings.Contains(out.String(), "session compaction") {
+	if !strings.Contains(out.String(), `"type":"turn"`) || !strings.Contains(out.String(), "Available Ouvrier tools") || !strings.Contains(out.String(), `"context_compaction":true`) {
 		t.Fatalf("stdout = %q, want rpc turn", out.String())
+	}
+}
+
+func TestOperatePrintJSONAndRPCRedactProductionEnvironmentSecrets(t *testing.T) {
+	const secret = "cli-production-secret-value"
+	t.Setenv("OUVRIER_ADMIN_TOKEN", secret)
+
+	tests := []struct {
+		name  string
+		input string
+		args  func(string) []string
+	}{
+		{
+			name: "print",
+			args: func(dir string) []string {
+				return []string{"operate", "--agent", "manual", "--dir", dir, "--print", "/policy " + secret}
+			},
+		},
+		{
+			name: "json",
+			args: func(dir string) []string {
+				return []string{"operate", "--agent", "manual", "--dir", dir, "--mode", "json", "--prompt", "/policy " + secret}
+			},
+		},
+		{
+			name:  "rpc",
+			input: `{"type":"prompt","text":"/policy ` + secret + `"}` + "\n",
+			args: func(dir string) []string {
+				return []string{"operate", "--agent", "manual", "--dir", dir, "--mode", "rpc"}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			var errOut bytes.Buffer
+			app := New("dev", WithStreams(strings.NewReader(test.input), &out, &errOut), WithSignedIn(func() bool { return false }))
+			if err := app.run(context.Background(), test.args(t.TempDir())); err != nil {
+				t.Fatalf("run() error = %v", err)
+			}
+			if strings.Contains(out.String(), secret) || strings.Contains(errOut.String(), secret) {
+				t.Fatalf("operate %s leaked secret; stdout=%q stderr=%q", test.name, out.String(), errOut.String())
+			}
+			if !strings.Contains(out.String(), "***") {
+				t.Fatalf("operate %s output has no redaction marker: %q", test.name, out.String())
+			}
+		})
 	}
 }
 
@@ -138,8 +186,8 @@ func TestRunOperateReviewWorkerManualCreatesReviewSession(t *testing.T) {
 	app := New("dev", WithStreams(nil, &out, &errOut))
 
 	err := app.run(context.Background(), []string{"operate", "review-worker", "--agent", "manual", "--dir", dir})
-	if err != nil {
-		t.Fatalf("run() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "review failed") {
+		t.Fatalf("run() error = %v, want failed-review exit", err)
 	}
 	if !strings.Contains(out.String(), "reviewed demo") || !strings.Contains(out.String(), "manual mode review") {
 		t.Fatalf("stdout = %q", out.String())
@@ -147,10 +195,22 @@ func TestRunOperateReviewWorkerManualCreatesReviewSession(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".ouvrier", "operate", "sessions")); err != nil {
 		t.Fatalf("session dir missing: %v", err)
 	}
+	reviews, err := filepath.Glob(filepath.Join(dir, ".ouvrier", "operate", "sessions", "*", "review.json"))
+	if err != nil || len(reviews) != 1 {
+		t.Fatalf("persisted review artifacts = %v, %v", reviews, err)
+	}
+	reviewData, err := os.ReadFile(reviews[0])
+	if err != nil {
+		t.Fatalf("read persisted review: %v", err)
+	}
+	if !strings.Contains(string(reviewData), `"passed": false`) || !strings.Contains(string(reviewData), "manual mode review") {
+		t.Fatalf("persisted failed review = %s", reviewData)
+	}
 }
 
 func TestRunOperatePatchManualPersistsDiffArtifact(t *testing.T) {
 	dir := writeOperateWorkerFixture(t)
+	gitInitAndCommitOperateFixture(t, dir)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	app := New("dev", WithStreams(nil, &out, &errOut))
@@ -161,6 +221,22 @@ func TestRunOperatePatchManualPersistsDiffArtifact(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "patched demo") || !strings.Contains(out.String(), "diff:") {
 		t.Fatalf("stdout = %q", out.String())
+	}
+}
+
+func gitInitAndCommitOperateFixture(t *testing.T, dir string) {
+	t.Helper()
+	commands := [][]string{
+		{"git", "init"},
+		{"git", "add", "."},
+		{"git", "-c", "user.name=Ouvrier Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"},
+	}
+	for _, args := range commands {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
 	}
 }
 

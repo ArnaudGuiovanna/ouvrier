@@ -1,7 +1,6 @@
 # Ouvrier Syntax Handbook
 
-Version: current `main` (v0.1 and v0.2 milestone work; latest tag `v0.1.0`
-until v0.2 is tagged)
+Version: current `main` (v0.1-v0.5 shipped work; latest tag `v0.5.5`)
 
 Scope: this handbook is exclusively about Ouvrier syntax and composition. It
 explains how to read and write Ouvrier declarations, from a single HTTP agent

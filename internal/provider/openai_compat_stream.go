@@ -75,6 +75,7 @@ func decodeOpenAICompatStream(r io.Reader, onDelta func(Delta)) (Response, error
 	var text strings.Builder
 	var finishReason string
 	var usage openAICompatUsage
+	var streamErr error
 	toolCalls := map[int]*openAICompatPendingToolCall{}
 
 	scanErr := scanSSE(r, func(ev sseEvent) bool {
@@ -84,7 +85,8 @@ func decodeOpenAICompatStream(r io.Reader, onDelta func(Delta)) (Response, error
 		}
 		var chunk openAICompatStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return true
+			streamErr = fmt.Errorf("decode provider stream event: %w", err)
+			return false
 		}
 		if chunk.Usage != nil {
 			usage = *chunk.Usage
@@ -94,22 +96,46 @@ func decodeOpenAICompatStream(r io.Reader, onDelta func(Delta)) (Response, error
 				finishReason = choice.FinishReason
 			}
 			if choice.Delta.Content != "" {
+				if err := providerTextOverflow(text.Len(), len(choice.Delta.Content)); err != nil {
+					streamErr = err
+					return false
+				}
 				text.WriteString(choice.Delta.Content)
 				if onDelta != nil {
 					onDelta(Delta{Text: choice.Delta.Content})
 				}
 			}
 			for _, tc := range choice.Delta.ToolCalls {
+				if tc.Index < 0 || tc.Index >= maxProviderToolCalls {
+					streamErr = fmt.Errorf("provider stream tool index %d exceeds limit %d", tc.Index, maxProviderToolCalls)
+					return false
+				}
 				pending := toolCalls[tc.Index]
 				if pending == nil {
+					if len(toolCalls) >= maxProviderToolCalls {
+						streamErr = fmt.Errorf("provider stream exceeds %d tool calls", maxProviderToolCalls)
+						return false
+					}
 					pending = &openAICompatPendingToolCall{}
 					toolCalls[tc.Index] = pending
 				}
 				if tc.ID != "" {
+					if err := validateProviderToolIdentity(tc.ID, pending.name); err != nil {
+						streamErr = err
+						return false
+					}
 					pending.id = tc.ID
 				}
 				if tc.Function.Name != "" {
+					if err := validateProviderToolIdentity(pending.id, tc.Function.Name); err != nil {
+						streamErr = err
+						return false
+					}
 					pending.name = tc.Function.Name
+				}
+				if err := providerToolArgsOverflow(pending.args.Len(), len(tc.Function.Arguments)); err != nil {
+					streamErr = err
+					return false
 				}
 				pending.args.WriteString(tc.Function.Arguments)
 			}
@@ -118,6 +144,9 @@ func decodeOpenAICompatStream(r io.Reader, onDelta func(Delta)) (Response, error
 	})
 	if scanErr != nil {
 		return Response{}, scanErr
+	}
+	if streamErr != nil {
+		return Response{}, streamErr
 	}
 
 	calls, err := assembleOpenAICompatStreamToolCalls(toolCalls)

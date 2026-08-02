@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -18,17 +19,25 @@ type RunJournal struct {
 	PlanHash    string
 	TriggerKind string
 	Input       string
-	CreatedAt   time.Time
+	// ReplayUnsafe is set when credential redaction changed Input. The
+	// redacted value is safe to inspect, but it is not valid business data for
+	// a replay; recovery must fail closed instead of sending [REDACTED] to the
+	// next Pipe.
+	ReplayUnsafe bool
+	CreatedAt    time.Time
 }
 
 // RunCheckpoint persists the redacted inter-step output string after one
 // completed top-level pipe step. Parallel/Map steps checkpoint as one unit
 // under the composite step's index; sub-branch steps are never checkpointed.
 type RunCheckpoint struct {
-	ExecID      string
-	StepIndex   int
-	Output      string
-	CompletedAt time.Time
+	ExecID    string
+	StepIndex int
+	Output    string
+	// ReplayUnsafe has the same fail-closed meaning as RunJournal.ReplayUnsafe
+	// for an inter-step value.
+	ReplayUnsafe bool
+	CompletedAt  time.Time
 }
 
 // ToolIntent marks one non-read tool call: a row is written before the tool
@@ -49,6 +58,15 @@ type ToolIntent struct {
 	CompletedAt time.Time
 }
 
+func terminalExecutionStatus(status ExecutionStatus) bool {
+	switch status {
+	case ExecutionCompleted, ExecutionFailed, ExecutionTruncated:
+		return true
+	default:
+		return false
+	}
+}
+
 // normalizeRunJournal validates and redaction-cleans a journal write shared
 // by every Store backend. Input goes through the same credential redaction as
 // persisted events so no raw secret reaches durable storage.
@@ -60,7 +78,9 @@ func normalizeRunJournal(journal RunJournal) (RunJournal, error) {
 	journal.PlanKey = strings.TrimSpace(journal.PlanKey)
 	journal.PlanHash = strings.TrimSpace(journal.PlanHash)
 	journal.TriggerKind = strings.TrimSpace(journal.TriggerKind)
-	journal.Input = events.RedactText(journal.Input)
+	original := journal.Input
+	journal.Input = events.RedactJSONText(original)
+	journal.ReplayUnsafe = journal.ReplayUnsafe || journal.Input != original
 	if journal.CreatedAt.IsZero() {
 		journal.CreatedAt = time.Now().UTC()
 	}
@@ -77,11 +97,53 @@ func normalizeRunCheckpoint(checkpoint RunCheckpoint) (RunCheckpoint, error) {
 	if checkpoint.StepIndex < 0 {
 		return RunCheckpoint{}, errors.New("run checkpoint step index must not be negative")
 	}
-	checkpoint.Output = events.RedactText(checkpoint.Output)
+	original := checkpoint.Output
+	checkpoint.Output = events.RedactJSONText(original)
+	checkpoint.ReplayUnsafe = checkpoint.ReplayUnsafe || checkpoint.Output != original
 	if checkpoint.CompletedAt.IsZero() {
 		checkpoint.CompletedAt = time.Now().UTC()
 	}
 	return checkpoint, nil
+}
+
+const storedReplayValueVersion = 1
+
+// storedReplayValue makes the replay-safety bit explicit at rest without a
+// schema migration. Older rows contain the value directly and are decoded by
+// decodeStoredReplayValue's conservative compatibility path.
+type storedReplayValue struct {
+	Version      int    `json:"__ouvrier_replay_value"`
+	ReplayUnsafe bool   `json:"replay_unsafe"`
+	Value        string `json:"value"`
+}
+
+func encodeStoredReplayValue(value string, replayUnsafe bool) string {
+	encoded, err := json.Marshal(storedReplayValue{
+		Version:      storedReplayValueVersion,
+		ReplayUnsafe: replayUnsafe,
+		Value:        value,
+	})
+	if err != nil {
+		// All fields are JSON-marshalable primitives. Keep this branch
+		// fail-closed if that invariant ever changes.
+		return `{"__ouvrier_replay_value":1,"replay_unsafe":true,"value":"[REDACTED]"}`
+	}
+	return string(encoded)
+}
+
+func decodeStoredReplayValue(stored string) (string, bool) {
+	var envelope storedReplayValue
+	if json.Unmarshal([]byte(stored), &envelope) == nil && envelope.Version == storedReplayValueVersion {
+		redacted := events.RedactJSONText(envelope.Value)
+		return redacted, envelope.ReplayUnsafe || redacted != envelope.Value
+	}
+
+	// Legacy/out-of-band rows have no trustworthy provenance. Redact them on
+	// read and mark any changed or already-redacted value unsafe: an older
+	// binary may have persisted [REDACTED] without recording that business data
+	// was destroyed.
+	redacted := events.RedactJSONText(stored)
+	return redacted, redacted != stored || strings.Contains(stored, "[REDACTED]")
 }
 
 // normalizeToolIntent validates a tool-intent write shared by every Store

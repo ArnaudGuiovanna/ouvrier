@@ -2,16 +2,41 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui/ide"
 )
+
+type closingOperateDriver struct {
+	operate.ManualDriver
+	closed bool
+}
+
+func (d *closingOperateDriver) Close() error {
+	d.closed = true
+	return nil
+}
+
+type closingOperateModel struct{ closed bool }
+
+func (*closingOperateModel) Complete(context.Context, provider.Request, func(string)) (provider.Response, error) {
+	return provider.Response{}, nil
+}
+
+func (m *closingOperateModel) Close() error {
+	m.closed = true
+	return nil
+}
 
 func TestOperateModelSelectsWorkerCandidate(t *testing.T) {
 	parent := t.TempDir()
@@ -84,6 +109,168 @@ func TestOperateModelStreamsTurnIntoBlocks(t *testing.T) {
 	}
 	if !strings.Contains(out, "ready") && !strings.Contains(out, "working") {
 		t.Fatalf("rendered cockpit missing status bar:\n%s", out)
+	}
+}
+
+func TestOperateModelRedactsLocallyEchoedQueuedPrompt(t *testing.T) {
+	const secret = "tui-production-secret-value"
+	t.Setenv("OUVRIER_ADMIN_TOKEN", secret)
+	dir := t.TempDir()
+	writeOperateWorker(t, dir, "ticket-triage")
+
+	m := newOperateModel(context.Background(), OperateOptions{Dir: dir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	if m.runtime == nil {
+		t.Fatalf("runtime = nil: %v", m.err)
+	}
+	defer m.runtime.Close()
+	m.running = true
+	m.submit("queued " + secret)
+	if len(m.blocks) == 0 {
+		t.Fatal("queued prompt did not create a user block")
+	}
+	got := m.blocks[len(m.blocks)-1].text
+	if strings.Contains(got, secret) {
+		t.Fatalf("queued prompt leaked secret: %q", got)
+	}
+	if !strings.Contains(got, "***") {
+		t.Fatalf("queued prompt = %q, want redaction marker", got)
+	}
+}
+
+func TestOperateDoesNotAdvertiseOrPerformCosmeticModelCycling(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, dir, "ticket-triage")
+
+	m := newOperateModel(context.Background(), OperateOptions{Dir: dir, Agent: "codex", Driver: operate.ManualDriver{}}).(*operateModel)
+	t.Cleanup(func() { _ = m.runtime.Close() })
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
+
+	label, value := m.modelStatus()
+	if label != "planner" || value != "deterministic" {
+		t.Fatalf("backend status = %s/%s, want the actual deterministic planner", label, value)
+	}
+	m.handleKey(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	gotLabel, gotValue := m.modelStatus()
+	if gotLabel != label || gotValue != value {
+		t.Fatalf("ctrl+p changed backend label from %s/%s to %s/%s without changing the runtime", label, value, gotLabel, gotValue)
+	}
+	if hints := ansiRE.ReplaceAllString(m.renderHints(200), ""); strings.Contains(hints, "ctrl+p") {
+		t.Fatalf("footer still advertises cosmetic model switching: %q", hints)
+	}
+	if help := ansiRE.ReplaceAllString(m.renderHelp(), ""); strings.Contains(help, "cycle model") {
+		t.Fatalf("help still advertises cosmetic model switching:\n%s", help)
+	}
+}
+
+func TestOperateStreamErrorWithoutTranscriptEntryIsVisible(t *testing.T) {
+	m := &operateModel{}
+	m.applyStream(operate.StreamEvent{Kind: operate.StreamError, Err: errors.New("transport unavailable")})
+
+	if !m.turnFailed {
+		t.Fatal("stream error did not mark the turn failed")
+	}
+	if len(m.blocks) != 1 || m.blocks[0].kind != blockError || !strings.Contains(m.blocks[0].text, "transport unavailable") {
+		t.Fatalf("entry-less stream error was not rendered: %+v", m.blocks)
+	}
+}
+
+func TestOperateDeniedToolIsNotPresentedAsTurnFailure(t *testing.T) {
+	m := &operateModel{}
+	m.applyStream(operate.StreamEvent{Kind: operate.StreamDone, Err: operate.ErrToolDenied})
+	if m.turnFailed {
+		t.Fatal("a governed tool denial is non-fatal and must not be presented as a failed turn")
+	}
+}
+
+func TestOperateFailedStreamSettlesCardsAndDropsQueuedWork(t *testing.T) {
+	m := &operateModel{
+		running:         true,
+		turnFailed:      true,
+		pendingApproval: &operate.ApprovalRequest{ID: "pending"},
+		decisions:       make(chan operate.ApprovalDecision, 1),
+		queue:           []string{"must not run"},
+		blocks: []opBlock{
+			{kind: blockAssistant, text: "partial", streaming: true},
+			{kind: blockTool, toolName: "build_worker", running: true},
+		},
+	}
+	m.handleStream(opStreamMsg{ok: false})
+
+	if m.running || m.pendingApproval != nil || m.decisions != nil {
+		t.Fatalf("closed stream left active state: running=%v approval=%v decisions=%v", m.running, m.pendingApproval, m.decisions)
+	}
+	if len(m.queue) != 0 {
+		t.Fatalf("failed turn retained executable queued work: %v", m.queue)
+	}
+	if m.blocks[0].streaming || m.blocks[1].running || !m.blocks[1].toolErr {
+		t.Fatalf("closed stream left stale transcript cards: %+v", m.blocks[:2])
+	}
+	if m.status != "turn failed" {
+		t.Fatalf("status = %q, want turn failed", m.status)
+	}
+	if last := m.blocks[len(m.blocks)-1].text; !strings.Contains(last, "not run") {
+		t.Fatalf("discarded follow-up was not explained: %q", last)
+	}
+}
+
+func TestOperateCtrlCCancelsActiveTurnBeforeQuit(t *testing.T) {
+	turnCtx, cancel := context.WithCancel(context.Background())
+	m := &operateModel{running: true, cancel: cancel}
+
+	_, cmd := m.handleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	select {
+	case <-turnCtx.Done():
+	default:
+		t.Fatal("ctrl+c did not cancel the active turn")
+	}
+	if cmd == nil {
+		t.Fatal("ctrl+c did not return a quit command")
+	}
+	quitMsg := cmd()
+	if _, ok := quitMsg.(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+c command returned %T, want tea.QuitMsg", quitMsg)
+	}
+}
+
+func TestRunOperateContextCancellationClosesOwnedResources(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, dir, "ticket-triage")
+	driver := &closingOperateDriver{}
+	model := &closingOperateModel{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunOperate(ctx, strings.NewReader(""), io.Discard, OperateOptions{
+			Dir: dir, Agent: "manual", Driver: driver, Model: model, ModelID: "test/model",
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunOperate ignored context cancellation")
+	}
+	if !driver.closed || !model.closed {
+		t.Fatalf("RunOperate resource closure: driver=%v model=%v", driver.closed, model.closed)
+	}
+}
+
+func TestOperateStartupErrorIsNotShownAsReady(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, dir, "ticket-triage")
+	m := newOperateModel(context.Background(), OperateOptions{Dir: dir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	t.Cleanup(func() { _ = m.runtime.Close() })
+	m.err = errors.New("session unavailable")
+	m.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
+
+	status := ansiRE.ReplaceAllString(m.renderStatusBar(200), "")
+	if !strings.Contains(status, "unavailable") || strings.Contains(status, "ready") {
+		t.Fatalf("startup error status is misleading: %q", status)
+	}
+	hints := ansiRE.ReplaceAllString(m.renderHints(200), "")
+	if strings.Contains(hints, "enter send") || !strings.Contains(hints, "ctrl+c quit") {
+		t.Fatalf("startup error footer advertises unavailable actions: %q", hints)
 	}
 }
 
@@ -201,6 +388,10 @@ func TestOperateReviewOverlay(t *testing.T) {
 	out := m.render()
 	if !strings.Contains(out, "feeds.go") || !strings.Contains(out, "no timeout") {
 		t.Fatalf("review overlay did not render the finding:\n%s", out)
+	}
+	plain := ansiRE.ReplaceAllString(out, "")
+	if strings.Contains(plain, "a accept") || strings.Contains(plain, "x dismiss") || !strings.Contains(plain, "/accept-risk") {
+		t.Fatalf("review overlay advertises ephemeral finding decisions:\n%s", plain)
 	}
 }
 

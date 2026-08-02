@@ -201,6 +201,16 @@ func (rt httpRuntime) processStreamMessage(ctx context.Context, plan runtimeplan
 	attempt := attempts.next(message.ID)
 
 	result, err := runStreamPlanOnce(ctx, rt, plan, message)
+	if errors.Is(err, errStreamIdempotencyPending) {
+		// Another worker still owns this delivery. Park it at the broker rather
+		// than executing concurrently or consuming the poison-message retry
+		// budget; a later redelivery will observe succeeded or failed and make
+		// the corresponding atomic decision.
+		return errors.Join(
+			rt.emitStreamRedelivered(ctx, plan, result, message, err, attempt),
+			nackStreamMessage(ctx, message, err),
+		)
+	}
 	if err == nil {
 		attempts.clear(message.ID)
 		// Under the manual ack policy the handler owns acknowledgement: the
@@ -287,49 +297,46 @@ func runStreamPlanOnce(ctx context.Context, rt httpRuntime, plan runtimeplan.Pla
 	}
 	session, duplicate, err := rt.reserveStreamIdempotency(ctx, plan, message)
 	if err != nil {
-		return planRunResult{}, err
+		return planRunResultFromInput(input, session), err
 	}
 	if duplicate {
 		return planRunResultFromInput(input, session), nil
 	}
-
-	result := planRunResultFromInput(input, session)
-	directExecution := false
-	if len(plan.Steps) == 0 && result.HasSession {
-		if err := rt.startPipelineExecution(ctx, result.Session, plan); err != nil {
-			return result, err
-		}
-		directExecution = true
-	}
-	if len(plan.Steps) > 0 {
-		result, err = rt.runPlanResultWithSession(ctx, plan, input, session)
-		if err != nil {
-			return result, err
-		}
+	if len(plan.Steps) == 0 && rt.durableRuns == nil && session == nil {
+		// Preserve the lightweight non-durable direct-terminal path: without a
+		// StateStore reservation or durable journal there is no execution state
+		// to own, so manufacturing a session would only change observable IDs.
+		result := planRunResultFromInput(input, nil)
+		return result, rt.applyStreamTerminal(ctx, plan, result)
 	}
 
+	// Zero-step stream terminals use the same lease/journal/terminal-intent
+	// path as pipelines. This removes the former durability hole around direct
+	// Push/Sink deliveries while preserving the simple public syntax.
+	result, runErr := rt.runPlanResultWithSessionAndTerminal(ctx, plan, input, session, func(terminalCtx context.Context, result planRunResult) error {
+		return rt.applyStreamTerminal(terminalCtx, plan, result)
+	})
+	if runErr != nil {
+		runErr = errors.Join(runErr, rt.resolveReservedTriggerFailure(context.WithoutCancel(ctx), session))
+	}
+	return result, runErr
+}
+
+func (rt httpRuntime) applyStreamTerminal(ctx context.Context, plan runtimeplan.Plan, result planRunResult) error {
 	switch plan.Terminal.Kind {
 	case runtimeplan.TerminalPush:
-		err = rt.applyPushTerminal(ctx, plan.Terminal, result, result.Output)
+		return rt.applyPushTerminal(ctx, plan.Terminal, result, result.Output)
 	case runtimeplan.TerminalSink:
 		payloadKey := "output"
 		if len(plan.Steps) == 0 {
 			payloadKey = "input"
 		}
-		err = rt.applySinkTerminal(ctx, plan.Terminal, result, payloadKey)
+		return rt.applySinkTerminal(ctx, plan.Terminal, result, payloadKey)
 	case runtimeplan.TerminalReply:
-		err = fmt.Errorf("%w: Reply requires an HTTP trigger", ErrIncompatibleTerminal)
+		return fmt.Errorf("%w: Reply requires an HTTP trigger", ErrIncompatibleTerminal)
+	default:
+		return fmt.Errorf("%w: terminal missing", ErrIncompatibleTerminal)
 	}
-	if err != nil {
-		if result.HasSession {
-			err = errors.Join(err, rt.finishPipelineExecution(ctx, result.Session, plan, "failed", err))
-		}
-		return result, err
-	}
-	if directExecution {
-		err = rt.finishPipelineExecution(ctx, result.Session, plan, "completed", nil)
-	}
-	return result, err
 }
 
 func streamInput(plan runtimeplan.Plan, message streamMessage) (string, error) {

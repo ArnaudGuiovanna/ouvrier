@@ -16,7 +16,7 @@ type MemoryStore struct {
 	mu              sync.RWMutex
 	executions      map[string]Execution
 	sessions        map[string]runtimecore.Session
-	idempotency     map[string]string
+	idempotency     map[string]IdempotencyRecord
 	events          []events.Event
 	eventIDs        map[uint64]struct{}
 	nextEventID     uint64
@@ -36,7 +36,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		executions:     make(map[string]Execution),
 		sessions:       make(map[string]runtimecore.Session),
-		idempotency:    make(map[string]string),
+		idempotency:    make(map[string]IdempotencyRecord),
 		eventIDs:       make(map[uint64]struct{}),
 		memory:         make(map[string]map[string]MemoryRecord),
 		approvals:      make(map[string]PendingApproval),
@@ -145,11 +145,80 @@ func (s *MemoryStore) ReserveIdempotency(ctx context.Context, key, execID string
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing := s.idempotency[key]; existing != "" {
-		return existing, false, nil
+	if existing, ok := s.idempotency[key]; ok && existing.Outcome != IdempotencyFailed {
+		return existing.ExecID, false, nil
 	}
-	s.idempotency[key] = execID
+	now := time.Now().UTC()
+	s.idempotency[key] = IdempotencyRecord{
+		Key: key, ExecID: execID, Outcome: IdempotencyPending,
+		CreatedAt: now, UpdatedAt: now,
+	}
 	return "", true, nil
+}
+
+func (s *MemoryStore) Idempotency(ctx context.Context, key string) (IdempotencyRecord, bool, error) {
+	if err := checkContext(ctx); err != nil {
+		return IdempotencyRecord{}, false, err
+	}
+	if strings.TrimSpace(key) == "" {
+		return IdempotencyRecord{}, false, errors.New("idempotency key is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.idempotency[key]
+	return record, ok, nil
+}
+
+func (s *MemoryStore) ResolveIdempotency(ctx context.Context, key, execID string, outcome IdempotencyOutcome) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if err := validateIdempotencyResolution(key, execID, outcome); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.idempotency[key]
+	if !ok {
+		return errors.New("idempotency reservation not found")
+	}
+	if record.ExecID != execID {
+		return errors.New("idempotency reservation owner mismatch")
+	}
+	if record.Outcome != IdempotencyPending {
+		if record.Outcome == outcome {
+			return nil
+		}
+		return errors.New("idempotency reservation already resolved")
+	}
+	record.Outcome = outcome
+	record.UpdatedAt = time.Now().UTC()
+	s.idempotency[key] = record
+	return nil
+}
+
+func (s *MemoryStore) ResolveIdempotencyByExecution(ctx context.Context, execID, keyPrefix string, outcome IdempotencyOutcome) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if strings.TrimSpace(execID) == "" {
+		return errors.New("execution ID is required")
+	}
+	if err := validateResolvedIdempotencyOutcome(outcome); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	for key, record := range s.idempotency {
+		if record.ExecID != execID || record.Outcome != IdempotencyPending || !strings.HasPrefix(key, keyPrefix) {
+			continue
+		}
+		record.Outcome = outcome
+		record.UpdatedAt = now
+		s.idempotency[key] = record
+	}
+	return nil
 }
 
 func (s *MemoryStore) AddEvent(ctx context.Context, event events.Event) (events.Event, error) {
@@ -161,6 +230,9 @@ func (s *MemoryStore) AddEvent(ctx context.Context, event events.Event) (events.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if event.ID == 0 {
+		if s.nextEventID == ^uint64(0) {
+			return events.Event{}, events.ErrEventIDExhausted
+		}
 		s.nextEventID++
 		event.ID = s.nextEventID
 	} else {

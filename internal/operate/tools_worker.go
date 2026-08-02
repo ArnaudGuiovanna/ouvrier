@@ -22,9 +22,9 @@ func toolScaffoldWorker(ctx context.Context, env ToolEnv, input map[string]any) 
 	if name == "" || trigger == "" {
 		return ToolResult{}, fmt.Errorf("operate: scaffold_worker requires name and trigger")
 	}
-	parent := strings.TrimSpace(stringValue(input, "dir"))
-	if parent == "" {
-		parent = scaffoldParentDir(env.Session)
+	parent, err := safeScaffoldParent(env.Session, stringValue(input, "dir"), name)
+	if err != nil {
+		return ToolResult{}, err
 	}
 	project, err := scaffold.Generate(ctx, scaffold.Config{
 		Name:    name,
@@ -43,9 +43,6 @@ func toolScaffoldWorker(ctx context.Context, env ToolEnv, input map[string]any) 
 	env.Session.Status = StatusSelected
 	if err := env.Harness.Store.Save(env.Session); err != nil {
 		return ToolResult{}, err
-	}
-	if env.Runtime != nil {
-		env.Runtime.workspace = &ws
 	}
 	return ToolResult{
 		Summary: "created worker " + project.Name,
@@ -98,7 +95,11 @@ func toolReviewWorker(ctx context.Context, env ToolEnv, input map[string]any) (T
 			"action":   finding.Action,
 		})
 	}
-	return ToolResult{Summary: fmt.Sprintf("review completed with %d finding(s)", len(report.Findings)), Data: map[string]any{"summary": report.Summary, "findings": findings, "review_path": env.Session.ReviewPath}}, nil
+	return ToolResult{Summary: fmt.Sprintf("review completed with %d finding(s)", len(report.Findings)), Data: map[string]any{
+		"passed": report.Passed, "summary": report.Summary, "findings": findings,
+		"review_path": env.Session.ReviewPath, "source_sha256": report.SourceSHA256,
+		"source_files": report.SourceFiles, "source_bytes": report.SourceBytes,
+	}}, nil
 }
 
 func toolFixWorker(ctx context.Context, env ToolEnv, input map[string]any) (ToolResult, error) {
@@ -130,7 +131,15 @@ func toolAuditWorker(ctx context.Context, env ToolEnv, _ map[string]any) (ToolRe
 	if report.Passed {
 		status = "passed"
 	}
-	return ToolResult{Summary: fmt.Sprintf("audit %s with %d gate(s)", status, len(report.Results)), Data: map[string]any{"passed": report.Passed, "gates": gates, "audit_path": env.Session.AuditPath}}, nil
+	auditSHA, err := fileSHA256(env.Session.AuditPath)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("operate: hash persisted audit: %w", err)
+	}
+	return ToolResult{Summary: fmt.Sprintf("audit %s with %d gate(s)", status, len(report.Results)), Data: map[string]any{
+		"passed": report.Passed, "gates": gates, "audit_path": env.Session.AuditPath,
+		"audit_sha256": auditSHA, "source_sha256": report.SourceSHA256,
+		"source_files": report.SourceFiles, "source_bytes": report.SourceBytes,
+	}}, nil
 }
 
 func toolDiffWorker(ctx context.Context, env ToolEnv, _ map[string]any) (ToolResult, error) {
@@ -154,17 +163,23 @@ func toolBuildWorker(ctx context.Context, env ToolEnv, input map[string]any) (To
 	if target == "" {
 		target = env.Options.Target
 	}
-	auditPassed := LatestAuditPassed(env.Session.AuditPath)
-	allowFailed := env.Options.AllowFail || boolValue(input, "allow_failed")
+	dir := CandidateDir(env.Session, ws)
+	auditPassed := LatestAuditPassedFor(env.Session.AuditPath, dir)
+	allowFailed := env.Options.AllowFail
 	if !auditPassed && !allowFailed {
-		return ToolResult{}, fmt.Errorf("operate: build requires passing audit; run /audit or pass --allow-failed")
+		return ToolResult{}, fmt.Errorf("operate: build requires passing audit evidence that is current and bound to this worker; run /audit or pass --allow-failed")
 	}
 	var out, errOut bytes.Buffer
-	artifact, err := env.Harness.Build(ctx, env.Session, CandidateDir(env.Session, ws), target, auditPassed, ProgressWriter{Out: &out, Err: &errOut})
+	artifact, err := env.Harness.Build(ctx, env.Session, dir, target, auditPassed, ProgressWriter{Out: &out, Err: &errOut})
 	if err != nil {
 		return ToolResult{}, err
 	}
-	return ToolResult{Summary: "built " + artifact.BinaryPath, Data: map[string]any{"binary_path": artifact.BinaryPath, "sha256": artifact.SHA256, "target": artifact.Target, "stdout": out.String(), "stderr": errOut.String()}}, nil
+	return ToolResult{Summary: "built " + artifact.BinaryPath, Data: map[string]any{
+		"binary_path": artifact.BinaryPath, "sha256": artifact.SHA256, "target": artifact.Target,
+		"source_sha256": artifact.SourceSHA256, "audit_path": artifact.AuditPath,
+		"audit_sha256": artifact.AuditSHA256, "audit_passed": artifact.AuditPassed,
+		"stdout": out.String(), "stderr": errOut.String(),
+	}}, nil
 }
 
 func toolTransferWorker(ctx context.Context, env ToolEnv, input map[string]any) (ToolResult, error) {
@@ -188,15 +203,14 @@ func toolTransferWorker(ctx context.Context, env ToolEnv, input map[string]any) 
 		envFile = env.Options.EnvFile
 	}
 	var out, errOut bytes.Buffer
+	dir := CandidateDir(env.Session, ws)
 	report, err := env.Harness.Transfer(ctx, env.Session, TransferRequest{
-		Dir:          CandidateDir(env.Session, ws),
-		Env:          deployEnv,
-		EnvFile:      envFile,
-		Target:       target,
-		Keep:         env.Options.Keep,
-		AllowFailed:  env.Options.AllowFail || boolValue(input, "allow_failed") || strings.TrimSpace(env.Session.AcceptedRiskReason) != "",
-		AuditPassed:  LatestAuditPassed(env.Session.AuditPath),
-		ReviewPassed: ReviewPassed(env.Session.ReviewPath),
+		Dir:         dir,
+		Env:         deployEnv,
+		EnvFile:     envFile,
+		Target:      target,
+		Keep:        env.Options.Keep,
+		AllowFailed: env.Options.AllowFail || strings.TrimSpace(env.Session.AcceptedRiskReason) != "",
 	}, ProgressWriter{Out: &out, Err: &errOut})
 	if err != nil {
 		return ToolResult{}, err
@@ -216,30 +230,8 @@ func toolAcceptRisk(_ context.Context, env ToolEnv, input map[string]any) (ToolR
 	return ToolResult{Summary: "accepted risk recorded", Data: map[string]any{"rationale": rationale}}, nil
 }
 
-func toolExportSession(_ context.Context, env ToolEnv, _ map[string]any) (ToolResult, error) {
-	entries, err := ReadTranscript(env.Session.TranscriptPath)
-	if err != nil {
-		return ToolResult{}, err
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Ouvrier operate session %s\n\n", env.Session.ID)
-	for _, entry := range entries {
-		switch entry.Kind {
-		case TranscriptUser:
-			fmt.Fprintf(&b, "## User\n\n%s\n\n", entry.Text)
-		case TranscriptAssistant:
-			fmt.Fprintf(&b, "## Agent\n\n%s\n\n", entry.Text)
-		case TranscriptToolCall:
-			fmt.Fprintf(&b, "## Tool Call: %s\n\n```json\n%s\n```\n\n", entry.ToolName, prettyJSON(entry.Input))
-		case TranscriptToolResult:
-			fmt.Fprintf(&b, "## Tool Result: %s\n\n```json\n%s\n```\n\n", entry.ToolName, prettyJSON(entry.Output))
-		case TranscriptError:
-			fmt.Fprintf(&b, "## Error\n\n%s\n\n", entry.Text)
-		case TranscriptStatus:
-			fmt.Fprintf(&b, "## Status\n\n%s\n\n", entry.Text)
-		}
-	}
-	if err := writeAtomic(env.Session.ExportPath, []byte(b.String()), 0o600); err != nil {
+func toolExportSession(ctx context.Context, env ToolEnv, _ map[string]any) (ToolResult, error) {
+	if err := exportTranscriptMarkdown(ctx, env.Session, env.Session.ExportPath); err != nil {
 		return ToolResult{}, err
 	}
 	return ToolResult{Summary: "exported transcript to " + env.Session.ExportPath, Data: map[string]any{"path": env.Session.ExportPath}}, nil
@@ -271,12 +263,4 @@ func toolLoginCodex(ctx context.Context, env ToolEnv, _ map[string]any) (ToolRes
 		_ = writeAtomic(env.Session.AuthProfilePath, append(data, '\n'), 0o600)
 	}
 	return ToolResult{Summary: summary, Data: profile}, nil
-}
-
-func prettyJSON(value any) string {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return "{}"
-	}
-	return string(data)
 }

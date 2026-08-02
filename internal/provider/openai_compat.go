@@ -148,7 +148,7 @@ func (p *openAICompatProvider) Complete(ctx context.Context, req Request) (Respo
 	}
 
 	var decoded openAICompatResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&decoded); err != nil {
+	if err := decodeBoundedProviderJSON(httpResp.Body, &decoded); err != nil {
 		return Response{}, fmt.Errorf("decode %s response: %w", p.name, err)
 	}
 	resp, err := decoded.toProviderResponse()

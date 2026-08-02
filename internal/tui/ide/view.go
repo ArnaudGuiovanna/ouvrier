@@ -252,14 +252,25 @@ func (m *ideModel) renderStatusLine(width int) string {
 
 // renderHints renders the footer keybinding hints line.
 func (m *ideModel) renderHints(width int) string {
-	hints := "ctrl+s save&audit · ctrl+b build · tab focus · ]d/[d problem · ctrl+p snippets · ctrl+space complete · ctrl+\\ API · ctrl+q quit"
+	parts := make([]string, 0, 10)
+	if m.exec != nil && m.session != nil {
+		parts = append(parts, "ctrl+s save&audit", "ctrl+b build")
+	} else {
+		parts = append(parts, "read only")
+	}
+	parts = append(parts, "tab focus", "ctrl+p snippets", "ctrl+space complete", "ctrl+\\ API")
+	if m.embedded {
+		parts = append(parts, "ctrl+q back")
+	} else {
+		parts = append(parts, "ctrl+q quit")
+	}
 	if m.client != nil {
-		hints += " · ctrl+k hover · ctrl+] def · ctrl+t back"
+		parts = append(parts, "ctrl+k hover", "ctrl+] def", "ctrl+t back")
 	}
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color(overlay1Hex)).
 		Width(width).
-		Render(hints)
+		Render(strings.Join(parts, " · "))
 }
 
 // renderAPIPanel renders the right-docked Ouvrier API reference panel.

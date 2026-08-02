@@ -149,11 +149,7 @@ func seedHTTPEventStreamFromStore(rt *httpRuntime, store state.Store) error {
 	if maxID == 0 {
 		return nil
 	}
-	stream, err := events.NewEventStream(events.WithInitialID(maxID))
-	if err != nil {
-		return err
-	}
-	rt.eventStream = stream
+	rt.eventStream.EnsureNextIDAtLeast(maxID)
 	return nil
 }
 
@@ -162,11 +158,20 @@ func (rt httpRuntime) runPlanWithSession(ctx context.Context, plan runtimeplan.P
 	return result.Output, err
 }
 
-func (rt httpRuntime) runPlanResult(ctx context.Context, plan runtimeplan.Plan, input string) (planRunResult, error) {
-	return rt.runPlanResultWithSession(ctx, plan, input, nil)
+type planTerminalFunc func(context.Context, planRunResult) error
+
+func (rt httpRuntime) runPlanResultWithTerminal(ctx context.Context, plan runtimeplan.Plan, input string, terminal planTerminalFunc) (planRunResult, error) {
+	return rt.runPlanResultWithSessionAndTerminal(ctx, plan, input, nil, terminal)
 }
 
 func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session) (planRunResult, error) {
+	return rt.runPlanResultWithSessionAndTerminal(ctx, plan, input, session, nil)
+}
+
+// runPlanResultWithSessionAndTerminal keeps the durable run lease and journal
+// alive through the observable terminal. A run is completed, and its journal
+// pruned, only after Reply validation or the Push/Sink output tool succeeds.
+func (rt httpRuntime) runPlanResultWithSessionAndTerminal(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session, terminal planTerminalFunc) (planRunResult, error) {
 	pipelineSession, err := pipelineSessionForPlan(plan, session)
 	if err != nil {
 		return planRunResult{Output: input}, err
@@ -174,51 +179,99 @@ func (rt httpRuntime) runPlanResultWithSession(ctx context.Context, plan runtime
 	pipelineResult := planRunResult{Output: input, Session: pipelineSession, HasSession: true}
 
 	if err := rt.startPipelineExecution(ctx, pipelineSession, plan); err != nil {
-		return pipelineResult, err
+		return pipelineResult, errors.Join(err, rt.resolveReservedTriggerFailure(ctx, &pipelineSession))
 	}
 
-	scope := planRunScope{parentSession: &pipelineSession}
+	scope := planRunScope{
+		parentSession:        &pipelineSession,
+		idempotencyNamespace: toolIdempotencyPlanNamespace(plan),
+	}
+	executionCtx := ctx
+	var runLease *durableRunLeaseHeartbeat
 	if rt.durableRuns != nil && rt.stateStore != nil {
 		// Hold the run lease before the journal row exists so there is no
 		// instant at which recovery could mistake this live run for an
 		// orphan. The heartbeat renews at TTL/3 until the deferred release
 		// after finishPipelineExecution (or after the run parks suspended).
-		runLease, err := rt.acquireDurableRunLease(ctx, pipelineSession.ExecID)
+		runLease, err = rt.acquireDurableRunLease(ctx, pipelineSession.ExecID)
 		if err != nil {
 			err = fmt.Errorf("durable run lease: %w", err)
 			return pipelineResult, errors.Join(err, rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err))
 		}
 		defer runLease.release()
+		executionCtx = runLease.context()
 		// Journal the run before its first step so a crash at any point
 		// leaves a recoverable record. A failed journal write fails the run:
 		// the operator opted in to durability, silently running without it
 		// would be a lie.
-		if err := rt.stateStore.SaveRunJournal(ctx, state.RunJournal{
+		if err := rt.stateStore.SaveRunJournal(executionCtx, state.RunJournal{
 			ExecID:      pipelineSession.ExecID,
 			PlanKey:     durablePlanKey(plan),
-			PlanHash:    durablePlanHash(plan.Steps),
+			PlanHash:    durablePlanHash(plan),
 			TriggerKind: string(plan.Trigger.Kind),
 			Input:       input,
 		}); err != nil {
 			err = fmt.Errorf("durable run journal: %w", err)
-			return pipelineResult, errors.Join(err, rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err))
+			err = runLease.executionError(err)
+			return pipelineResult, errors.Join(err, rt.finishPipelineExecution(executionCtx, pipelineSession, plan, "failed", err))
 		}
 		scope.durable = &durableStepJournal{store: rt.stateStore, execID: pipelineSession.ExecID}
 	}
 
-	result, err := rt.runStepsResult(ctx, plan.Steps, input, scope)
+	result, err := rt.runStepsResult(executionCtx, plan.Steps, input, scope)
 	if !result.HasSession {
 		result.Session = pipelineSession
 		result.HasSession = true
 	}
 	if err != nil {
-		if rt.rememberSuspendedPlan(err, plan, pipelineSession) {
+		err = runLease.executionError(err)
+		if !errors.Is(err, errDurableRunLeaseLost) && rt.rememberSuspendedPlan(err, plan, pipelineSession) {
 			return result, err
 		}
-		emitErr := rt.finishPipelineExecution(ctx, pipelineSession, plan, "failed", err)
+		emitErr := rt.finishPipelineExecution(executionCtx, pipelineSession, plan, "failed", err)
 		return result, errors.Join(err, emitErr)
 	}
-	if err := rt.finishPipelineExecution(ctx, pipelineSession, plan, "completed", nil); err != nil {
+	if runLease != nil {
+		if err := runLease.confirm(executionCtx); err != nil {
+			err = runLease.executionError(err)
+			emitErr := rt.finishPipelineExecution(executionCtx, pipelineSession, plan, "failed", err)
+			return result, errors.Join(err, emitErr)
+		}
+	}
+	terminalEffectSucceeded := false
+	if terminal != nil {
+		terminalCtx := scope.durable.intentContext(executionCtx, len(plan.Steps))
+		if err := terminal(terminalCtx, result); err != nil {
+			err = runLease.executionError(err)
+			emitErr := rt.finishPipelineExecution(executionCtx, pipelineSession, plan, "failed", err)
+			return result, errors.Join(err, emitErr)
+		}
+		// The observable terminal effect is now confirmed. Persist its trigger
+		// idempotency outcome immediately under a cancellation-independent,
+		// bounded context so a disconnected HTTP client cannot reopen the key
+		// and repeat a successful Push/Sink effect.
+		settleCtx, settleCancel := newHTTPFinalizationContext(executionCtx)
+		_ = rt.resolveTriggerIdempotency(settleCtx, pipelineSession.ExecID, "completed")
+		settleCancel()
+		terminalEffectSucceeded = true
+	}
+	if runLease != nil {
+		confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(executionCtx), cronLeaseReleaseTimeout)
+		err := runLease.stopAndConfirm(confirmCtx)
+		cancel()
+		if err != nil {
+			err = runLease.executionError(err)
+			triggerOutcome := "failed"
+			if terminalEffectSucceeded {
+				// A terminal that already returned success must remain
+				// idempotently succeeded even when the final lease proof fails.
+				triggerOutcome = "completed"
+			}
+			emitErr := rt.finishPipelineExecutionWithTriggerOutcome(executionCtx, pipelineSession, plan, "failed", triggerOutcome, err)
+			return result, errors.Join(err, emitErr)
+		}
+	}
+	if err := rt.finishPipelineExecution(executionCtx, pipelineSession, plan, "completed", nil); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -275,15 +328,24 @@ func (rt httpRuntime) startPipelineExecution(ctx context.Context, session runtim
 }
 
 func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runtimeplan.Session, plan runtimeplan.Plan, status string, eventErr error) error {
-	finishCtx := ctx
-	if runtimeCancellationError(eventErr) {
-		finishCtx = context.WithoutCancel(ctx)
-	}
+	return rt.finishPipelineExecutionWithTriggerOutcome(ctx, session, plan, status, status, eventErr)
+}
+
+func (rt httpRuntime) finishPipelineExecutionWithTriggerOutcome(ctx context.Context, session runtimeplan.Session, plan runtimeplan.Plan, status, triggerOutcome string, eventErr error) error {
+	finishCtx, cancelFinish := newHTTPFinalizationContext(ctx)
+	defer cancelFinish()
 	kind := events.EventPipelineCompleted
 	stateStatus := state.ExecutionCompleted
 	if status != "completed" {
 		kind = events.EventPipelineFailed
 		stateStatus = state.ExecutionFailed
+	}
+	var idempotencyErr error
+	if rt.stateStore != nil {
+		// Resolve the trigger key before best-effort lifecycle observability. A
+		// successful terminal must stay at-most-once even if saving the final
+		// execution snapshot or an event fails afterward.
+		idempotencyErr = rt.resolveTriggerIdempotency(finishCtx, session.ExecID, triggerOutcome)
 	}
 	var emitErr error
 	if runtimeCancellationError(eventErr) {
@@ -296,25 +358,42 @@ func (rt httpRuntime) finishPipelineExecution(ctx context.Context, session runti
 	emitErr = errors.Join(emitErr, rt.emitSessionEvent(finishCtx, session, events.EventSessionSaved, map[string]any{
 		"status": status,
 	}))
-	if rt.stateStore == nil {
-		return emitErr
+	var saveErr error
+	if rt.stateStore != nil {
+		saveErr = rt.stateStore.SaveExecution(finishCtx, state.Execution{
+			ExecID:      session.ExecID,
+			TraceID:     session.TraceID,
+			Status:      stateStatus,
+			StartedAt:   session.StartedAt,
+			CompletedAt: time.Now().UTC(),
+		})
 	}
-	rt.pruneDurableRunJournal(finishCtx, session, status)
-	return errors.Join(emitErr, rt.stateStore.SaveExecution(finishCtx, state.Execution{
-		ExecID:      session.ExecID,
-		TraceID:     session.TraceID,
-		Status:      stateStatus,
-		StartedAt:   session.StartedAt,
-		CompletedAt: time.Now().UTC(),
-	}))
+	if rt.stateStore != nil && emitErr == nil && saveErr == nil && idempotencyErr == nil {
+		// A successful run's recovery evidence is only disposable once terminal
+		// events, final execution state, and trigger idempotency outcome are all
+		// durable. Failed runs retain their journal by policy.
+		rt.pruneDurableRunJournal(finishCtx, session, status)
+	}
+	return errors.Join(emitErr, saveErr, idempotencyErr)
+}
+
+// newHTTPFinalizationContext preserves request-scoped values but deliberately
+// drops cancellation and the client deadline, then applies a short internal
+// bound. Runtime state, idempotency, and journals therefore get a deterministic
+// final write window without risking an unbounded shutdown.
+func newHTTPFinalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), cronLeaseReleaseTimeout)
 }
 
 // pruneDurableRunJournal applies durable-run retention when an execution
 // finishes: a successful run's journal rows are pruned immediately, and the
-// retention sweep removes failed/suspended journals older than
-// OUVRIER_DURABLE_RETENTION. Prune failures never fail the (already
-// finished) run; they emit durable_run_prune_failed and surface in
-// /admin/health.
+// retention sweep removes terminal failed journals older than
+// OUVRIER_DURABLE_RETENTION. Running, unknown, and pending-approval runs stay
+// intact. Prune failures never fail the (already finished) run; they emit
+// durable_run_prune_failed and surface in /admin/health.
 func (rt httpRuntime) pruneDurableRunJournal(ctx context.Context, session runtimeplan.Session, status string) {
 	if rt.durableRuns == nil || rt.stateStore == nil {
 		return
@@ -350,6 +429,12 @@ type planRunScope struct {
 	// recorder. Parallel/Map strip it before running sub-branches (they
 	// checkpoint as one unit) and subagents build their own scope without it.
 	durable *durableStepJournal
+
+	// idempotencyNamespace is a stable digest of the owning plan/Pipe
+	// definition. idempotencyBase preserves absolute Pipe positions when a
+	// suspended or durable run resumes with a sliced step list.
+	idempotencyNamespace string
+	idempotencyBase      int
 }
 
 type planRunResult struct {
@@ -377,18 +462,17 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 	if len(steps) == 0 {
 		return result, nil
 	}
-	executor := tools.NewExecutor()
-	if rt.toolExecutor != nil {
-		executor = rt.toolExecutor.NewScope()
-	}
 
 	current := input
 	for stepIndex, step := range steps {
+		stepScope := scope
+		stepScope.idempotencyNamespace = toolIdempotencyStepNamespace(scope.idempotencyNamespace, scope.idempotencyBase+stepIndex, step)
+		stepScope.idempotencyBase = 0
 		// stepCtx carries the durable tool-intent recorder for this top-level
 		// step; with durable runs off it is exactly ctx.
 		stepCtx := scope.durable.intentContext(ctx, stepIndex)
 		if step.Kind == runtimeplan.StepParallel {
-			stepResult, err := rt.runParallelStepResult(stepCtx, step, current, scope)
+			stepResult, err := rt.runParallelStepResult(stepCtx, step, current, stepScope)
 			if err != nil {
 				return stepResult, err
 			}
@@ -400,7 +484,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			continue
 		}
 		if step.Kind == runtimeplan.StepMap {
-			stepResult, err := rt.runMapStepResult(stepCtx, step, current, scope)
+			stepResult, err := rt.runMapStepResult(stepCtx, step, current, stepScope)
 			if err != nil {
 				return stepResult, err
 			}
@@ -412,6 +496,10 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			continue
 		}
 
+		executor := tools.NewExecutor()
+		if rt.toolExecutor != nil {
+			executor = rt.toolExecutor.NewScope()
+		}
 		specs, closeMCP, err := rt.registerStepTools(ctx, executor, step)
 		if err != nil {
 			return result, err
@@ -431,6 +519,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 			harness.WithSystemPrompt(systemPrompt),
 			harness.WithToolExecutor(executor),
 			harness.WithTools(specs...),
+			harness.WithIdempotencyNamespace(stepScope.idempotencyNamespace),
 		}
 		if rt.stateStore != nil {
 			harnessOptions = append(harnessOptions, harness.WithStateStore(rt.stateStore))
@@ -521,6 +610,7 @@ func (rt httpRuntime) runStepsResult(ctx context.Context, steps []runtimeplan.St
 					// with the original plan.
 					restScope := scope
 					restScope.durable = scope.durable.withBase(suspendedStepIndex + 1)
+					restScope.idempotencyBase = scope.idempotencyBase + suspendedStepIndex + 1
 					restResult, restErr := rt.runStepsResult(resumeCtx, remainingSteps, resumed.Text, restScope)
 					if !restResult.HasSession && resumedResult.HasSession {
 						restResult.Session = resumedResult.Session

@@ -2,6 +2,7 @@ package ovr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -38,50 +39,176 @@ func durableRunLeaseName(execID string) string {
 	return "run:" + execID
 }
 
+var errDurableRunLeaseLost = errors.New("durable run lease lost")
+
 // durableRunLeaseHeartbeat owns one held run lease: a TTL/3 renewer keeps it
-// alive while the run (or its recovery replay) executes, and release()
-// tombstones it for instant takeover. Renewals run on their own context so a
-// canceled request cannot strand an unexpired lease until the TTL backstop.
+// alive while the run (or its recovery replay) executes. Its execution
+// context is cancelled with cause as soon as renewal cannot prove ownership;
+// providers, tools, and terminals must all run under that context. release()
+// stops renewal and tombstones the lease for instant takeover. Renewals use a
+// separate control context so a cancelled request cannot strand an unexpired
+// lease until the TTL backstop.
 type durableRunLeaseHeartbeat struct {
-	leases state.LeaseStore
-	name   string
-	holder string
-	ttl    time.Duration
-	lease  state.Lease
-	stop   context.CancelFunc
-	done   chan struct{}
+	leases          state.LeaseStore
+	name            string
+	holder          string
+	ttl             time.Duration
+	lease           state.Lease
+	executionCtx    context.Context
+	cancelExecution context.CancelCauseFunc
+	stop            context.CancelFunc
+	done            chan struct{}
+	stopOnce        sync.Once
+	renewMu         sync.Mutex
+	lossOnce        sync.Once
+	lossMu          sync.RWMutex
+	lossErr         error
 }
 
-func startDurableRunLeaseHeartbeat(leases state.LeaseStore, name, holder string, ttl time.Duration, lease state.Lease) *durableRunLeaseHeartbeat {
+func startDurableRunLeaseHeartbeat(parent context.Context, leases state.LeaseStore, name, holder string, ttl time.Duration, lease state.Lease) *durableRunLeaseHeartbeat {
+	if parent == nil {
+		parent = context.Background()
+	}
+	executionCtx, cancelExecution := context.WithCancelCause(parent)
 	renewCtx, stop := context.WithCancel(context.Background())
 	heartbeat := &durableRunLeaseHeartbeat{
-		leases: leases,
-		name:   name,
-		holder: holder,
-		ttl:    ttl,
-		lease:  lease,
-		stop:   stop,
-		done:   make(chan struct{}),
+		leases:          leases,
+		name:            name,
+		holder:          holder,
+		ttl:             ttl,
+		lease:           lease,
+		executionCtx:    executionCtx,
+		cancelExecution: cancelExecution,
+		stop:            stop,
+		done:            make(chan struct{}),
 	}
 	go func() {
 		defer close(heartbeat.done)
-		ticker := time.NewTicker(ttl / 3)
+		interval := ttl / 3
+		if interval <= 0 {
+			interval = time.Nanosecond
+		}
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-renewCtx.Done():
 				return
 			case <-ticker.C:
-				if _, renewed, err := leases.RenewLease(renewCtx, name, holder, lease.Fence, ttl); err != nil || !renewed {
-					// The lease was taken over (we were presumed dead) or the
-					// store failed. Mirroring the cron loop, the in-flight run
-					// is never cancelled; we simply stop renewing.
+				if err := heartbeat.renew(renewCtx); err != nil {
+					if renewCtx.Err() != nil {
+						return
+					}
+					heartbeat.markLost(err)
 					return
 				}
 			}
 		}
 	}()
 	return heartbeat
+}
+
+func (h *durableRunLeaseHeartbeat) renew(ctx context.Context) error {
+	h.renewMu.Lock()
+	defer h.renewMu.Unlock()
+	current, renewed, err := h.leases.RenewLease(ctx, h.name, h.holder, h.lease.Fence, h.ttl)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("%w: renew %s fence %d: %w", errDurableRunLeaseLost, h.name, h.lease.Fence, err)
+	}
+	if !renewed {
+		if current.Name == "" {
+			return fmt.Errorf("%w: %s fence %d is no longer owned", errDurableRunLeaseLost, h.name, h.lease.Fence)
+		}
+		return fmt.Errorf("%w: %s fence %d is now held by %s at fence %d", errDurableRunLeaseLost, h.name, h.lease.Fence, current.Holder, current.Fence)
+	}
+	return nil
+}
+
+func (h *durableRunLeaseHeartbeat) markLost(err error) {
+	if h == nil || err == nil {
+		return
+	}
+	h.lossOnce.Do(func() {
+		h.lossMu.Lock()
+		h.lossErr = err
+		h.lossMu.Unlock()
+		h.cancelExecution(err)
+	})
+}
+
+func (h *durableRunLeaseHeartbeat) loss() error {
+	if h == nil {
+		return nil
+	}
+	h.lossMu.RLock()
+	defer h.lossMu.RUnlock()
+	return h.lossErr
+}
+
+func (h *durableRunLeaseHeartbeat) context() context.Context {
+	if h == nil || h.executionCtx == nil {
+		return context.Background()
+	}
+	return h.executionCtx
+}
+
+// executionError preserves the operation error and adds a cancellation-shaped
+// lease-loss cause. The cancellation component makes lifecycle persistence use
+// an uncancelled cleanup context, while the sentinel keeps the real reason
+// inspectable with errors.Is.
+func (h *durableRunLeaseHeartbeat) executionError(operationErr error) error {
+	loss := h.loss()
+	if loss == nil {
+		return operationErr
+	}
+	if operationErr == nil {
+		return errors.Join(context.Canceled, loss)
+	}
+	return errors.Join(operationErr, context.Canceled, loss)
+}
+
+// confirm proves that holder+fence are still current immediately before a
+// terminal or completion boundary. Any store error is fail-closed: inability
+// to prove ownership is indistinguishable from ownership loss.
+func (h *durableRunLeaseHeartbeat) confirm(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	if err := h.executionError(nil); err != nil {
+		return err
+	}
+	if err := h.renew(ctx); err != nil {
+		if errors.Is(err, errDurableRunLeaseLost) {
+			h.markLost(err)
+			return h.executionError(nil)
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *durableRunLeaseHeartbeat) stopRenewing() {
+	if h == nil {
+		return
+	}
+	h.stopOnce.Do(func() {
+		h.stop()
+		<-h.done
+	})
+}
+
+// stopAndConfirm freezes the renewal goroutine, then extends the still-owned
+// lease once synchronously. Completion and journal pruning can therefore run
+// inside a fresh TTL window with no late heartbeat racing the decision.
+func (h *durableRunLeaseHeartbeat) stopAndConfirm(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	h.stopRenewing()
+	return h.confirm(ctx)
 }
 
 // release stops the renewer and tombstones the lease so the journal row stops
@@ -91,8 +218,8 @@ func (h *durableRunLeaseHeartbeat) release() {
 	if h == nil {
 		return
 	}
-	h.stop()
-	<-h.done
+	h.stopRenewing()
+	h.cancelExecution(context.Canceled)
 	releaseCtx, cancel := context.WithTimeout(context.Background(), cronLeaseReleaseTimeout)
 	defer cancel()
 	_ = h.leases.ReleaseLease(releaseCtx, h.name, h.holder, h.lease.Fence)
@@ -129,7 +256,7 @@ func (rt httpRuntime) acquireDurableRunLease(ctx context.Context, execID string)
 	if !acquired {
 		return nil, fmt.Errorf("durable run lease %s is held by %s until %s", name, lease.Holder, lease.ExpiresAt.UTC().Format(time.RFC3339))
 	}
-	return startDurableRunLeaseHeartbeat(leases, name, holder, ttl, lease), nil
+	return startDurableRunLeaseHeartbeat(ctx, leases, name, holder, ttl, lease), nil
 }
 
 // acquireDurableRunLeaseWithRetry retries acquisition briefly for the resumed
@@ -292,8 +419,16 @@ func (rt httpRuntime) durableRunHasPendingApproval(ctx context.Context, execID s
 // (the operator has inspected the intents) but never the plan-identity or
 // client-gone checks.
 func (rt httpRuntime) recoverClaimedDurableRun(ctx context.Context, leases state.LeaseStore, plans []runtimeplan.Plan, journal state.RunJournal, execution state.Execution, lease state.Lease, force bool) {
-	heartbeat := startDurableRunLeaseHeartbeat(leases, durableRunLeaseName(journal.ExecID), cronReplicaID(), rt.durableRunLeaseTTLForRuntime(), lease)
-	defer heartbeat.release()
+	heartbeat := startDurableRunLeaseHeartbeat(ctx, leases, durableRunLeaseName(journal.ExecID), cronReplicaID(), rt.durableRunLeaseTTLForRuntime(), lease)
+	executionCtx := heartbeat.context()
+	defer func() {
+		if heartbeat.loss() != nil {
+			finishCtx, cancel := context.WithTimeout(context.Background(), cronLeaseReleaseTimeout)
+			rt.failDurableRunExecution(finishCtx, execution)
+			cancel()
+		}
+		heartbeat.release()
+	}()
 
 	// Re-check pending approvals now that the lease is ours: an operator
 	// approving in the scan→claim gap parks the run on a fresh pending record,
@@ -301,46 +436,75 @@ func (rt httpRuntime) recoverClaimedDurableRun(ctx context.Context, leases state
 	// store error that leaves it unknown) skip the replay; the deferred
 	// release tombstones the claim so the approval resume — or the next scan —
 	// takes over instantly.
-	if pending, err := rt.durableRunHasPendingApproval(ctx, journal.ExecID); err != nil || pending {
+	if pending, err := rt.durableRunHasPendingApproval(executionCtx, journal.ExecID); err != nil || pending {
 		return
 	}
 
 	plan, ok := durablePlanForJournal(plans, journal)
 	if !ok {
-		rt.abandonDurableRun(ctx, journal, execution, "plan_missing")
+		rt.abandonDurableRun(executionCtx, journal, execution, "plan_missing")
 		return
 	}
-	if durablePlanHash(plan.Steps) != journal.PlanHash {
-		rt.abandonDurableRun(ctx, journal, execution, "plan_hash_mismatch")
+	if durablePlanHash(plan) != journal.PlanHash {
+		rt.abandonDurableRun(executionCtx, journal, execution, "plan_hash_mismatch")
 		return
 	}
 	if durableRunClientGone(plan) {
-		rt.abandonDurableRun(ctx, journal, execution, "client_gone")
+		rt.abandonDurableRun(executionCtx, journal, execution, "client_gone")
 		return
 	}
 
-	checkpoints, err := rt.stateStore.RunCheckpoints(ctx, journal.ExecID)
+	checkpoints, err := rt.stateStore.RunCheckpoints(executionCtx, journal.ExecID)
 	if err != nil {
 		return
 	}
-	resumeIndex := 0
-	input := journal.Input
-	if len(checkpoints) > 0 {
-		last := checkpoints[len(checkpoints)-1]
-		resumeIndex = last.StepIndex + 1
-		input = last.Output
+	resumeIndex, input, replayUnsafe, replaySource, replayStep := durableReplayInput(journal, checkpoints)
+	if replayUnsafe {
+		rt.markDurableRunReplayUnsafe(executionCtx, journal, execution, replaySource, replayStep)
+		return
 	}
 	if !force {
-		intents, err := rt.stateStore.ToolIntents(ctx, journal.ExecID)
+		intents, err := rt.stateStore.ToolIntents(executionCtx, journal.ExecID)
 		if err != nil {
 			return
 		}
 		if blocking, blocked := durableReplayBlockingIntent(intents, resumeIndex); blocked {
-			rt.markDurableRunIndeterminate(ctx, journal, execution, blocking)
+			rt.markDurableRunIndeterminate(executionCtx, journal, execution, blocking)
 			return
 		}
 	}
-	rt.replayDurableRun(ctx, plan, journal, execution, resumeIndex, input, force)
+	rt.replayDurableRun(executionCtx, plan, journal, execution, resumeIndex, input, force, heartbeat)
+}
+
+func durableReplayInput(journal state.RunJournal, checkpoints []state.RunCheckpoint) (resumeIndex int, input string, replayUnsafe bool, source string, stepIndex int) {
+	resumeIndex = 0
+	input = journal.Input
+	replayUnsafe = journal.ReplayUnsafe
+	source = "journal_input"
+	stepIndex = -1
+	if len(checkpoints) == 0 {
+		return
+	}
+	last := checkpoints[len(checkpoints)-1]
+	return last.StepIndex + 1, last.Output, last.ReplayUnsafe, "checkpoint_output", last.StepIndex
+}
+
+// markDurableRunReplayUnsafe refuses a replay whose required input was
+// credential-redacted before persistence. Replaying the placeholder would
+// silently corrupt business behavior. The journal is deliberately retained
+// for inspection; unlike an edited/missing plan, no forced replay can recover
+// the original secret-bearing value.
+func (rt httpRuntime) markDurableRunReplayUnsafe(ctx context.Context, journal state.RunJournal, execution state.Execution, source string, stepIndex int) {
+	payload := map[string]any{
+		"plan_key": journal.PlanKey,
+		"reason":   "replay_input_redacted",
+		"source":   source,
+	}
+	if stepIndex >= 0 {
+		payload["step_index"] = stepIndex
+	}
+	rt.emitDurableRecoveryEvent(ctx, journal, execution, events.EventRunAbandoned, payload)
+	rt.failDurableRunExecution(ctx, execution)
 }
 
 // durablePlanForJournal re-resolves a journal row against the CURRENT
@@ -354,7 +518,7 @@ func durablePlanForJournal(plans []runtimeplan.Plan, journal state.RunJournal) (
 		if durablePlanKey(plan) != journal.PlanKey {
 			continue
 		}
-		if durablePlanHash(plan.Steps) == journal.PlanHash {
+		if durablePlanHash(plan) == journal.PlanHash {
 			return plan, true
 		}
 		if !found {
@@ -427,6 +591,9 @@ func (rt httpRuntime) abandonDurableRun(ctx context.Context, journal state.RunJo
 }
 
 func (rt httpRuntime) failDurableRunExecution(ctx context.Context, execution state.Execution) {
+	if current, ok, err := rt.stateStore.Execution(ctx, execution.ExecID); err == nil && ok {
+		execution = current
+	}
 	if execution.Status != state.ExecutionRunning {
 		return
 	}
@@ -440,7 +607,7 @@ func (rt httpRuntime) failDurableRunExecution(ctx context.Context, execution sta
 // offset to the original plan indices (the same withBase machinery the
 // approval resume uses), then the terminal applies and the run finishes —
 // pruning the journal on success.
-func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Plan, journal state.RunJournal, execution state.Execution, resumeIndex int, input string, forced bool) {
+func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Plan, journal state.RunJournal, execution state.Execution, resumeIndex int, input string, forced bool, heartbeat *durableRunLeaseHeartbeat) {
 	session, err := runtimeplan.NewSession(httpPipelineSessionModel(plan),
 		runtimeplan.WithSessionIDs(journal.ExecID, "", execution.TraceID),
 		runtimeplan.WithSessionBudget(runtimeplan.Budget{
@@ -478,8 +645,10 @@ func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Pla
 	// iterations, wall clock — is not restored. A replayed run can therefore
 	// spend up to a full budget again on its remaining steps.
 	scope := planRunScope{
-		parentSession: &session,
-		durable:       &durableStepJournal{store: rt.stateStore, execID: journal.ExecID, baseIndex: resumeIndex},
+		parentSession:        &session,
+		durable:              &durableStepJournal{store: rt.stateStore, execID: journal.ExecID, baseIndex: resumeIndex},
+		idempotencyNamespace: toolIdempotencyPlanNamespace(plan),
+		idempotencyBase:      resumeIndex,
 	}
 	result := planRunResult{Output: input, Session: session, HasSession: true}
 	if resumeIndex < len(plan.Steps) {
@@ -490,7 +659,8 @@ func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Pla
 			stepResult.HasSession = true
 		}
 		if err != nil {
-			if rt.rememberSuspendedPlan(err, plan, session) {
+			err = heartbeat.executionError(err)
+			if !errors.Is(err, errDurableRunLeaseLost) && rt.rememberSuspendedPlan(err, plan, session) {
 				// Re-suspended on a fresh gated call: the run parks again with
 				// its journal intact; the deferred lease release lets a later
 				// approval (or recovery after another crash) pick it up.
@@ -501,8 +671,27 @@ func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Pla
 		}
 		result = stepResult
 	}
-	if err := rt.applyResumedTerminal(replayCtx, plan, result); err != nil {
+	if err := heartbeat.confirm(replayCtx); err != nil {
+		err = heartbeat.executionError(err)
 		_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), session, plan, "failed", err)
+		return
+	}
+	terminalJournal := &durableStepJournal{store: rt.stateStore, execID: journal.ExecID}
+	terminalCtx := terminalJournal.intentContext(replayCtx, len(plan.Steps))
+	if err := rt.applyResumedTerminal(terminalCtx, plan, result); err != nil {
+		err = heartbeat.executionError(err)
+		_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), session, plan, "failed", err)
+		return
+	}
+	settleCtx, settleCancel := newHTTPFinalizationContext(replayCtx)
+	_ = rt.resolveTriggerIdempotency(settleCtx, session.ExecID, "completed")
+	settleCancel()
+	confirmCtx, cancel := context.WithTimeout(context.WithoutCancel(replayCtx), cronLeaseReleaseTimeout)
+	err = heartbeat.stopAndConfirm(confirmCtx)
+	cancel()
+	if err != nil {
+		err = heartbeat.executionError(err)
+		_ = rt.finishPipelineExecutionWithTriggerOutcome(context.WithoutCancel(ctx), session, plan, "failed", "completed", err)
 		return
 	}
 	_ = rt.finishPipelineExecution(context.WithoutCancel(ctx), session, plan, "completed", nil)
@@ -521,6 +710,7 @@ func (rt httpRuntime) replayDurableRun(ctx context.Context, plan runtimeplan.Pla
 // transient store error as "no approvals" — and one log line records the
 // fallback.
 func (rt httpRuntime) durableApprovalReplayContext(ctx context.Context, execID string) context.Context {
+	ctx = tools.ContextWithIdempotencyReplay(ctx)
 	approvals, err := rt.stateStore.ApprovalsForExecution(ctx, execID)
 	if err != nil {
 		log.Printf("ouvrier: durable recovery exec_id=%s: loading approvals for replay failed (%v); replayed gated calls will re-park on fresh approvals", execID, err)

@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
+
+var errStreamIdempotencyPending = errors.New("stream idempotency reservation is still pending")
 
 func (rt httpRuntime) emitStreamDeadLetter(ctx context.Context, plan runtimeplan.Plan, result planRunResult, message streamMessage, deliveryErr error, attempt int) error {
 	dlq := "event_only"
@@ -59,6 +63,14 @@ func (rt httpRuntime) reserveStreamIdempotency(ctx context.Context, plan runtime
 	}
 
 	key := streamIdempotencyReservationKey(plan, id)
+	retrying := false
+	if outcomes, ok := rt.stateStore.(state.IdempotencyOutcomeStore); ok {
+		if record, found, lookupErr := outcomes.Idempotency(ctx, key); lookupErr != nil {
+			return nil, false, lookupErr
+		} else if found && record.Outcome == state.IdempotencyFailed {
+			retrying = true
+		}
+	}
 	existingExecID, reserved, err := rt.stateStore.ReserveIdempotency(ctx, key, session.ExecID)
 	if err != nil {
 		return nil, false, err
@@ -70,11 +82,14 @@ func (rt httpRuntime) reserveStreamIdempotency(ctx context.Context, plan runtime
 	}
 	if reserved {
 		if err := rt.stateStore.SaveSession(ctx, session); err != nil {
-			return nil, false, err
+			return nil, false, resolveStreamReservationFailure(ctx, rt.stateStore, key, session.ExecID, err)
 		}
 		payload["decision"] = "reserved"
+		if retrying {
+			payload["decision"] = "retry"
+		}
 		if err := rt.emitSessionEvent(ctx, session, events.EventIdempotencyDecision, payload); err != nil {
-			return nil, false, err
+			return nil, false, resolveStreamReservationFailure(ctx, rt.stateStore, key, session.ExecID, err)
 		}
 		return &session, false, nil
 	}
@@ -87,19 +102,58 @@ func (rt httpRuntime) reserveStreamIdempotency(ctx context.Context, plan runtime
 	if foundSession {
 		eventSession = existingSession
 	}
-	duplicate, err := rt.streamReservationCompleted(ctx, existingExecID)
-	if err != nil {
-		return nil, false, err
+	duplicate := false
+	pending := false
+	if outcomes, ok := rt.stateStore.(state.IdempotencyOutcomeStore); ok {
+		record, found, lookupErr := outcomes.Idempotency(ctx, key)
+		if lookupErr != nil {
+			return nil, false, lookupErr
+		}
+		if !found {
+			return nil, false, errors.New("stream idempotency reservation disappeared after conflict")
+		}
+		switch record.Outcome {
+		case state.IdempotencySucceeded:
+			duplicate = true
+		case state.IdempotencyPending:
+			pending = true
+		case state.IdempotencyFailed:
+			return nil, false, errors.New("failed stream idempotency reservation was not made available for retry")
+		default:
+			return nil, false, fmt.Errorf("unknown stream idempotency outcome %q", record.Outcome)
+		}
+	} else {
+		// Legacy custom stores do not expose reservation outcomes. A completed
+		// execution is safe to deduplicate; every other state is treated as
+		// in-flight and fails closed because ownership cannot be transferred
+		// atomically through the legacy interface.
+		duplicate, err = rt.streamReservationCompleted(ctx, existingExecID)
+		if err != nil {
+			return nil, false, err
+		}
+		pending = !duplicate
 	}
 	if duplicate {
 		payload["decision"] = "duplicate"
-	} else {
-		payload["decision"] = "retry"
+	} else if pending {
+		payload["decision"] = "in_progress"
 	}
 	if err := rt.emitSessionEvent(ctx, eventSession, events.EventIdempotencyDecision, payload); err != nil {
 		return nil, false, err
 	}
+	if pending {
+		return &eventSession, false, fmt.Errorf("%w for execution %s", errStreamIdempotencyPending, existingExecID)
+	}
 	return &eventSession, duplicate, nil
+}
+
+func resolveStreamReservationFailure(ctx context.Context, store state.Store, key, execID string, cause error) error {
+	outcomes, ok := store.(state.IdempotencyOutcomeStore)
+	if !ok {
+		return cause
+	}
+	resolveCtx := context.WithoutCancel(ctx)
+	return errors.Join(cause, outcomes.ResolveIdempotency(resolveCtx, key, execID, state.IdempotencyFailed))
 }
 
 func (rt httpRuntime) streamReservationCompleted(ctx context.Context, execID string) (bool, error) {

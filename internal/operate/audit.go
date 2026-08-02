@@ -1,19 +1,19 @@
 package operate
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 )
+
+const auditGateTimeout = 2 * time.Minute
 
 // GateStatus is one audit gate outcome.
 type GateStatus string
@@ -36,10 +36,15 @@ type GateResult struct {
 
 // AuditReport is persisted as audit.json.
 type AuditReport struct {
-	At        time.Time    `json:"at"`
-	Workspace string       `json:"workspace"`
-	Results   []GateResult `json:"results"`
-	Passed    bool         `json:"passed"`
+	At                time.Time    `json:"at"`
+	Workspace         string       `json:"workspace"`
+	SourceSHA256      string       `json:"source_sha256"`
+	SourceFiles       int          `json:"source_files"`
+	SourceBytes       int64        `json:"source_bytes"`
+	Toolchain         string       `json:"toolchain"`
+	LocalReplacements int          `json:"local_replacements"`
+	Results           []GateResult `json:"results"`
+	Passed            bool         `json:"passed"`
 }
 
 // CommandRunner is the command-execution seam for audit gates.
@@ -48,32 +53,23 @@ type CommandRunner func(ctx context.Context, dir string, name string, args []str
 // AuditRunner executes deterministic audit gates in a candidate workspace.
 type AuditRunner struct {
 	RunCommand CommandRunner
-	Build      func(ctx context.Context, dir string, out, errOut *bytes.Buffer) error
+	Build      func(ctx context.Context, dir string, out, errOut io.Writer) error
 	Now        func() time.Time
+	Redactor   Redactor
 }
 
 // NewAuditRunner returns the default audit runner.
 func NewAuditRunner() AuditRunner {
-	return AuditRunner{
-		RunCommand: defaultAuditCommandRunner,
-		Build: func(ctx context.Context, dir string, out, errOut *bytes.Buffer) error {
-			_, err := deploy.StaticBuild(ctx, dir, "linux/amd64", out, errOut, deploy.DefaultGoRunner)
-			return err
-		},
-		Now: time.Now,
-	}
+	// The nil execution seams are intentional: Run installs the production
+	// sandbox after it has resolved and fingerprinted the concrete workspace.
+	// Tests may still inject both seams explicitly without requiring bwrap.
+	return AuditRunner{Now: time.Now}
 }
 
 // Run executes the v0.4 required gates.
 func (r AuditRunner) Run(ctx context.Context, dir string) (AuditReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if r.RunCommand == nil {
-		r.RunCommand = defaultAuditCommandRunner
-	}
-	if r.Build == nil {
-		r.Build = NewAuditRunner().Build
 	}
 	if r.Now == nil {
 		r.Now = time.Now
@@ -82,8 +78,52 @@ func (r AuditRunner) Run(ctx context.Context, dir string) (AuditReport, error) {
 	if err != nil {
 		return AuditReport{}, fmt.Errorf("operate: resolve audit dir: %w", err)
 	}
+	r.Redactor, err = productionRedactor(abs, "", "", r.Redactor)
+	if err != nil {
+		return AuditReport{}, err
+	}
+	before, err := stableCandidateSourceSnapshot(abs)
+	if err != nil {
+		return AuditReport{}, fmt.Errorf("operate: fingerprint worker before audit: %w", err)
+	}
 
-	report := AuditReport{At: r.Now().UTC(), Workspace: abs, Passed: true}
+	// Compiling or testing a candidate can execute attacker-controlled code.
+	// Default audit execution therefore fails closed unless the OS sandbox can
+	// prove the requested isolation guarantees. Explicitly injected seams are
+	// retained for deterministic unit tests and specialized trusted harnesses.
+	var sandbox *auditSandbox
+	if (r.RunCommand == nil) != (r.Build == nil) {
+		return AuditReport{}, fmt.Errorf("operate: incomplete custom audit runner: command and build seams must be supplied together")
+	}
+	if r.RunCommand == nil {
+		sandbox, err = newAuditSandbox(ctx, abs, before)
+		if err != nil {
+			return AuditReport{}, err
+		}
+		defer func() { _ = sandbox.Close() }()
+	}
+	if r.RunCommand == nil {
+		r.RunCommand = func(commandCtx context.Context, commandDir, name string, args []string) (string, string, error) {
+			if name == "go" && len(args) > 0 && (args[0] == "test" || args[0] == "vet") {
+				return sandbox.RunGo(commandCtx, commandDir, args)
+			}
+			return defaultAuditCommandRunner(commandCtx, commandDir, name, args)
+		}
+	}
+	if r.Build == nil {
+		r.Build = sandbox.Build
+	}
+
+	report := AuditReport{
+		At:                r.Now().UTC(),
+		Workspace:         before.Workspace,
+		SourceSHA256:      before.SHA256,
+		SourceFiles:       before.Files,
+		SourceBytes:       before.Bytes,
+		Toolchain:         before.Toolchain,
+		LocalReplacements: before.LocalReplacements,
+		Passed:            true,
+	}
 	gates := []func(context.Context, string) GateResult{
 		r.gateGitDiffCheck,
 		r.gateGofmt,
@@ -100,12 +140,46 @@ func (r AuditRunner) Run(ctx context.Context, dir string) (AuditReport, error) {
 			report.Passed = false
 		}
 	}
+	if sandbox != nil {
+		if err := sandbox.Close(); err != nil {
+			return AuditReport{}, err
+		}
+	}
+	after, err := stableCandidateSourceSnapshot(abs)
+	if err != nil {
+		return AuditReport{}, fmt.Errorf("operate: fingerprint worker after audit: %w", err)
+	}
+	if before != after {
+		report.Passed = false
+		report.Results = append(report.Results, GateResult{
+			Name:     "source immutability",
+			Status:   GateFail,
+			Error:    "worker source changed while audit gates were running; the audit is bound to the pre-gate snapshot and cannot authorize a build",
+			Duration: 0,
+		})
+	} else {
+		report.Results = append(report.Results, GateResult{
+			Name: "source immutability", Status: GatePass,
+			Output: "pre-gate and post-gate source fingerprints match",
+		})
+	}
 	return report, nil
 }
 
 func (r AuditRunner) gateGitDiffCheck(ctx context.Context, dir string) GateResult {
 	start := time.Now()
-	stdout, stderr, err := r.RunCommand(ctx, dir, "git", []string{"diff", "--check"})
+	args, prepareErr := hardenedGitArgs("diff", "--check", "--", ".")
+	if prepareErr != nil {
+		return GateResult{Name: "git diff --check", Status: GateFail, Error: prepareErr.Error(), Duration: time.Since(start)}
+	}
+	stdout, stderr, err := r.RunCommand(ctx, dir, "git", args)
+	if err != nil && strings.Contains(strings.ToLower(stdout+"\n"+stderr), "not a git repository") {
+		return GateResult{
+			Name: "git diff --check", Status: GateSkip,
+			Output:   "worker is not a Git worktree; source fingerprinting still binds audit and build evidence",
+			Duration: time.Since(start),
+		}
+	}
 	return commandGateResult("git diff --check", start, stdout, stderr, err)
 }
 
@@ -131,21 +205,35 @@ func (r AuditRunner) gateGofmt(ctx context.Context, dir string) GateResult {
 
 func (r AuditRunner) gateGoTest(ctx context.Context, dir string) GateResult {
 	start := time.Now()
-	stdout, stderr, err := r.RunCommand(ctx, dir, "go", []string{"test", "./..."})
+	gateCtx, cancel := auditTimeoutContext(ctx)
+	defer cancel()
+	stdout, stderr, err := r.RunCommand(gateCtx, dir, "go", []string{"test", "./..."})
 	return commandGateResult("go test ./...", start, stdout, stderr, err)
 }
 
 func (r AuditRunner) gateGoVet(ctx context.Context, dir string) GateResult {
 	start := time.Now()
-	stdout, stderr, err := r.RunCommand(ctx, dir, "go", []string{"vet", "./..."})
+	gateCtx, cancel := auditTimeoutContext(ctx)
+	defer cancel()
+	stdout, stderr, err := r.RunCommand(gateCtx, dir, "go", []string{"vet", "./..."})
 	return commandGateResult("go vet ./...", start, stdout, stderr, err)
 }
 
 func (r AuditRunner) gateBuild(ctx context.Context, dir string) GateResult {
 	start := time.Now()
-	var out, errOut bytes.Buffer
-	err := r.Build(ctx, dir, &out, &errOut)
+	gateCtx, cancel := auditTimeoutContext(ctx)
+	defer cancel()
+	out := newBoundedOutput(maxAuditStreamBytes, "audit build stdout")
+	errOut := newBoundedOutput(maxAuditStreamBytes, "audit build stderr")
+	err := r.Build(gateCtx, dir, out, errOut)
 	return commandGateResult("ouvrier build --static --target linux/amd64", start, out.String(), errOut.String(), err)
+}
+
+func auditTimeoutContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, auditGateTimeout)
 }
 
 func gateManifestCoherence(_ context.Context, dir string) GateResult {
@@ -175,18 +263,19 @@ func gateManifestCoherence(_ context.Context, dir string) GateResult {
 
 func (r AuditRunner) gateSecretScan(ctx context.Context, dir string) GateResult {
 	start := time.Now()
-	stdout, _, err := r.RunCommand(ctx, dir, "git", []string{"diff", "--cached", "--", "."})
-	if err != nil || strings.TrimSpace(stdout) == "" {
-		stdout, _, _ = r.RunCommand(ctx, dir, "git", []string{"diff", "--", "."})
-	}
-	text := stdout
-	needles := []string{"OPENAI_API_KEY=", "ANTHROPIC_API_KEY=", "OUVRIER_ADMIN_TOKEN=", "AWS_SECRET_ACCESS_KEY=", "PRIVATE KEY"}
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
-			return GateResult{Name: "secret scan", Status: GateFail, Error: "candidate diff contains token-shaped text: " + needle, Duration: time.Since(start)}
+	summary, err := scanBoundedWorkerSecrets(ctx, dir, r.Redactor)
+	if err != nil {
+		return GateResult{
+			Name: "secret scan", Status: GateFail,
+			Error:    "cannot safely inspect bounded worker source: " + r.Redactor.Redact(err.Error()),
+			Duration: time.Since(start),
 		}
 	}
-	return GateResult{Name: "secret scan", Status: GatePass, Output: "no obvious secrets in candidate diff", Duration: time.Since(start)}
+	return GateResult{
+		Name: "secret scan", Status: GatePass,
+		Output:   fmt.Sprintf("no credential-shaped material in %d safe source files (%d bytes)", summary.files, summary.bytes),
+		Duration: time.Since(start),
+	}
 }
 
 func commandGateResult(name string, start time.Time, stdout, stderr string, err error) GateResult {
@@ -206,11 +295,15 @@ func commandGateResult(name string, start time.Time, stdout, stderr string, err 
 }
 
 func defaultAuditCommandRunner(ctx context.Context, dir string, name string, args []string) (string, string, error) {
+	if name == "git" {
+		return runPreparedGit(ctx, dir, args)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newBoundedOutput(maxAuditStreamBytes, "audit command stdout")
+	stderr := newBoundedOutput(maxAuditStreamBytes, "audit command stderr")
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
 }
@@ -243,12 +336,9 @@ func goFiles(dir string) ([]string, error) {
 }
 
 // WriteAuditReport persists report as indented JSON.
-func WriteAuditReport(path string, report AuditReport) error {
-	data, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		return fmt.Errorf("operate: encode audit report: %w", err)
-	}
-	return writeAtomic(path, append(data, '\n'), 0o600)
+func WriteAuditReport(path string, report AuditReport, redactors ...Redactor) error {
+	report = sanitizeAuditReport(mergedOptionalRedactor(redactors), report)
+	return writeJSONArtifact(path, "audit report", report)
 }
 
 // LoadAuditReport reads a persisted audit report.

@@ -46,6 +46,7 @@ type config struct {
 	providerResolver func(model string) (provider.Provider, error)
 	providerGate     *ProviderGate
 	memoryScope      string
+	idempotencyScope string
 }
 
 func defaultConfig() config {
@@ -203,6 +204,16 @@ func WithStateStore(store state.Store) Option {
 func WithMemoryScope(scope string) Option {
 	return func(cfg *config) error {
 		cfg.memoryScope = strings.TrimSpace(scope)
+		return nil
+	}
+}
+
+// WithIdempotencyNamespace sets the internal Pipe-definition scope used for
+// idempotent tool reservations. It is intentionally an internal harness
+// surface, not part of the ovr public syntax.
+func WithIdempotencyNamespace(namespace string) Option {
+	return func(cfg *config) error {
+		cfg.idempotencyScope = strings.TrimSpace(namespace)
 		return nil
 	}
 }

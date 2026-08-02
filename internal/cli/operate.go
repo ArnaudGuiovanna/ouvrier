@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	authpkg "github.com/ArnaudGuiovanna/ouvrier/internal/auth"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
@@ -33,8 +34,18 @@ type operateConfig struct {
 	Model     string
 	Keep      int
 	AllowFail bool
+	AutoSafe  bool
 	Print     bool
 }
+
+const (
+	// RPC uses fixed worker pools plus bounded queues. A client that exceeds
+	// these limits receives an explicit overload response; request goroutines can
+	// therefore never grow with input volume.
+	operateRPCWorkerLimit         = 8
+	operateRPCQueueLimit          = 32
+	operateRPCInterruptQueueLimit = 8
+)
 
 func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if hasHelpFlag(args) {
@@ -70,7 +81,7 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	model, modelID, err := resolveAgentModel(cfg.Model, app.signedIn)
+	model, modelID, err := resolveAgentModel(cfg.Model, cfg.CodexMode, cfg.Dir, app.signedIn)
 	if err != nil {
 		return err
 	}
@@ -97,6 +108,7 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 		Target:      cfg.Target,
 		Keep:        cfg.Keep,
 		AllowFail:   cfg.AllowFail,
+		AutoSafe:    cfg.AutoSafe,
 		Model:       model,
 		ModelID:     modelID,
 		AuthState:   authState,
@@ -118,8 +130,14 @@ func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, dri
 		Target:    cfg.Target,
 		Keep:      cfg.Keep,
 		AllowFail: cfg.AllowFail,
-		Model:     model,
-		ModelID:   modelID,
+		HeadlessPosture: func() operate.Posture {
+			if cfg.AutoSafe {
+				return operate.PostureAutoSafe
+			}
+			return operate.PostureManual
+		}(),
+		Model:   model,
+		ModelID: modelID,
 	})
 	if err != nil {
 		return err
@@ -148,16 +166,22 @@ func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, dri
 	if cfg.Mode == "json" {
 		enc := json.NewEncoder(app.out)
 		enc.SetIndent("", "  ")
-		if encodeErr := enc.Encode(turn); encodeErr != nil {
+		payload, encodeErr := runtime.RedactedJSON(turn)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if encodeErr := enc.Encode(payload); encodeErr != nil {
 			return encodeErr
 		}
 		return err
 	}
-	printOperateTurn(app.out, turn)
-	return err
+	return errors.Join(err, printOperateTurn(app.out, turn))
 }
 
 func (app *App) runOperateRPC(ctx context.Context, runtime *operate.AgentRuntime, cfg operateConfig) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	current, err := runtime.Start(ctx, operate.RuntimeStartRequest{
 		Dir:       cfg.Dir,
 		SessionID: cfg.Session,
@@ -167,80 +191,221 @@ func (app *App) runOperateRPC(ctx context.Context, runtime *operate.AgentRuntime
 	if err != nil {
 		return err
 	}
+	rpcCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var currentMu sync.Mutex
+	currentSessionID := func(requested string) string {
+		currentMu.Lock()
+		defer currentMu.Unlock()
+		return rpcSessionID(current, requested)
+	}
+	setCurrent := func(next operate.RuntimeSession) {
+		currentMu.Lock()
+		current = next
+		currentMu.Unlock()
+	}
 	encoder := json.NewEncoder(app.out)
-	scanner := bufio.NewScanner(app.in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		var req struct {
-			Type      string `json:"type"`
-			Text      string `json:"text"`
-			SessionID string `json:"session_id"`
+	var encodeMu sync.Mutex
+	encode := func(value any) error {
+		encodeMu.Lock()
+		defer encodeMu.Unlock()
+		payload, err := runtime.RedactedJSON(value)
+		if err != nil {
+			return err
 		}
-		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
-			_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
-			continue
+		return encoder.Encode(payload)
+	}
+	type rpcRequest struct {
+		ID        json.RawMessage `json:"id,omitempty"`
+		Type      string          `json:"type"`
+		Text      string          `json:"text"`
+		SessionID string          `json:"session_id"`
+	}
+	response := func(req rpcRequest, value map[string]any) error {
+		if len(req.ID) != 0 {
+			value["id"] = append(json.RawMessage(nil), req.ID...)
 		}
-		switch strings.ToLower(strings.TrimSpace(req.Type)) {
-		case "", "prompt":
-			turn, err := runtime.Prompt(ctx, rpcSessionID(current, req.SessionID), req.Text)
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "turn": turn})
-				continue
-			}
-			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
-		case "steer":
-			turn, err := runtime.Steer(ctx, rpcSessionID(current, req.SessionID), req.Text)
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "turn": turn})
-				continue
-			}
-			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
-		case "follow_up", "follow-up", "followup":
-			turn, err := runtime.FollowUp(ctx, rpcSessionID(current, req.SessionID), req.Text)
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error(), "turn": turn})
-				continue
-			}
-			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
-		case "interrupt":
-			turn, err := runtime.Interrupt(ctx, rpcSessionID(current, req.SessionID), req.Text)
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
-				continue
-			}
-			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
-		case "compact":
-			turn, err := runtime.Compact(ctx, rpcSessionID(current, req.SessionID))
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
-				continue
-			}
-			_ = encoder.Encode(map[string]any{"type": "turn", "turn": turn})
-		case "resume":
-			sessionID := strings.TrimSpace(req.SessionID)
-			if sessionID == "" {
-				sessionID = strings.TrimSpace(req.Text)
-			}
-			resumed, err := runtime.Resume(ctx, sessionID)
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
-				continue
-			}
-			current = resumed
-			_ = encoder.Encode(map[string]any{"type": "session", "session": resumed})
-		case "fork":
-			forked, err := runtime.Fork(ctx, rpcSessionID(current, req.SessionID))
-			if err != nil {
-				_ = encoder.Encode(map[string]any{"type": "error", "error": err.Error()})
-				continue
-			}
-			current = forked
-			_ = encoder.Encode(map[string]any{"type": "session", "session": forked})
+		return encode(value)
+	}
+	asyncErr := make(chan error, 1)
+	recordAsyncErr := func(err error) {
+		if err == nil {
+			return
+		}
+		select {
+		case asyncErr <- err:
+			cancel()
 		default:
-			_ = encoder.Encode(map[string]any{"type": "error", "error": "unsupported rpc type " + req.Type})
 		}
 	}
-	return scanner.Err()
+	dispatch := func(req rpcRequest) {
+		sessionID := currentSessionID(req.SessionID)
+		switch strings.ToLower(strings.TrimSpace(req.Type)) {
+		case "", "prompt":
+			turn, runErr := runtime.Prompt(rpcCtx, sessionID, req.Text)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error(), "turn": turn}))
+				return
+			}
+			recordAsyncErr(response(req, map[string]any{"type": "turn", "turn": turn}))
+		case "steer":
+			turn, runErr := runtime.Steer(rpcCtx, sessionID, req.Text)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error(), "turn": turn}))
+				return
+			}
+			recordAsyncErr(response(req, map[string]any{"type": "turn", "turn": turn}))
+		case "follow_up", "follow-up", "followup":
+			turn, runErr := runtime.FollowUp(rpcCtx, sessionID, req.Text)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error(), "turn": turn}))
+				return
+			}
+			recordAsyncErr(response(req, map[string]any{"type": "turn", "turn": turn}))
+		case "interrupt":
+			turn, runErr := runtime.Interrupt(rpcCtx, sessionID, req.Text)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error()}))
+				return
+			}
+			recordAsyncErr(response(req, map[string]any{"type": "turn", "turn": turn}))
+		case "compact":
+			turn, runErr := runtime.Compact(rpcCtx, sessionID)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error()}))
+				return
+			}
+			recordAsyncErr(response(req, map[string]any{"type": "turn", "turn": turn}))
+		case "resume":
+			resumeID := strings.TrimSpace(req.SessionID)
+			if resumeID == "" {
+				resumeID = strings.TrimSpace(req.Text)
+			}
+			resumed, runErr := runtime.Resume(rpcCtx, resumeID)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error()}))
+				return
+			}
+			setCurrent(resumed)
+			recordAsyncErr(response(req, map[string]any{"type": "session", "session": resumed}))
+		case "fork":
+			forked, runErr := runtime.Fork(rpcCtx, sessionID)
+			if runErr != nil {
+				recordAsyncErr(response(req, map[string]any{"type": "error", "error": runErr.Error()}))
+				return
+			}
+			setCurrent(forked)
+			recordAsyncErr(response(req, map[string]any{"type": "session", "session": forked}))
+		default:
+			recordAsyncErr(response(req, map[string]any{"type": "error", "error": "unsupported rpc type " + req.Type}))
+		}
+	}
+	requests := make(chan rpcRequest, operateRPCQueueLimit)
+	interrupts := make(chan rpcRequest, operateRPCInterruptQueueLimit)
+	var workers sync.WaitGroup
+	startWorkers := func(count int, queue <-chan rpcRequest) {
+		for range count {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for {
+					// Prefer cancellation over draining buffered work after an
+					// output failure or caller shutdown.
+					if rpcCtx.Err() != nil {
+						return
+					}
+					select {
+					case <-rpcCtx.Done():
+						return
+					case req, ok := <-queue:
+						if !ok {
+							return
+						}
+						dispatch(req)
+					}
+				}
+			}()
+		}
+	}
+	startWorkers(operateRPCWorkerLimit, requests)
+	// Interrupts have a dedicated bounded lane. They must not sit behind a full
+	// queue of prompts whose active turn is precisely what they need to cancel.
+	startWorkers(1, interrupts)
+
+	type scanResult struct {
+		line []byte
+		err  error
+		done bool
+	}
+	scanResults := make(chan scanResult, 1)
+	go func() {
+		scanner := bufio.NewScanner(app.in)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			select {
+			case <-rpcCtx.Done():
+				return
+			case scanResults <- scanResult{line: line}:
+			}
+		}
+		select {
+		case <-rpcCtx.Done():
+		case scanResults <- scanResult{err: scanner.Err(), done: true}:
+		}
+	}()
+
+	overload := func(req rpcRequest, active, queued int) {
+		message := fmt.Sprintf("operate rpc overloaded: maximum %d active and %d queued requests", active, queued)
+		recordAsyncErr(response(req, map[string]any{"type": "error", "error": message}))
+	}
+	var scanErr error
+	scanning := true
+	for scanning {
+		select {
+		case <-rpcCtx.Done():
+			scanning = false
+		case scanned := <-scanResults:
+			if scanned.done {
+				scanErr = scanned.err
+				scanning = false
+				continue
+			}
+			var req rpcRequest
+			if err := json.Unmarshal(scanned.line, &req); err != nil {
+				if err := encode(map[string]any{"type": "error", "error": err.Error()}); err != nil {
+					recordAsyncErr(err)
+					scanning = false
+				}
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(req.Type), "interrupt") {
+				select {
+				case interrupts <- req:
+				default:
+					overload(req, 1, operateRPCInterruptQueueLimit)
+				}
+				continue
+			}
+			select {
+			case requests <- req:
+			default:
+				overload(req, operateRPCWorkerLimit, operateRPCQueueLimit)
+			}
+		}
+	}
+	if scanErr != nil {
+		cancel()
+	}
+	close(requests)
+	close(interrupts)
+	workers.Wait()
+	var runErr error
+	select {
+	case runErr = <-asyncErr:
+	default:
+	}
+	return errors.Join(scanErr, runErr, ctx.Err())
 }
 
 func rpcSessionID(current operate.RuntimeSession, requested string) string {
@@ -253,26 +418,29 @@ func rpcSessionID(current operate.RuntimeSession, requested string) string {
 	return current.Session.ID
 }
 
-func printOperateTurn(w io.Writer, turn operate.RuntimeTurn) {
-	fmt.Fprintf(w, "session %s\n", turn.SessionID)
+func printOperateTurn(w io.Writer, turn operate.RuntimeTurn) error {
+	var output strings.Builder
+	fmt.Fprintf(&output, "session %s\n", turn.SessionID)
 	for _, entry := range turn.Entries {
 		switch entry.Kind {
 		case operate.TranscriptUser:
-			fmt.Fprintf(w, "> %s\n", strings.TrimSpace(entry.Text))
+			fmt.Fprintf(&output, "> %s\n", strings.TrimSpace(entry.Text))
 		case operate.TranscriptToolCall:
-			fmt.Fprintf(w, "tool %s\n", entry.ToolName)
+			fmt.Fprintf(&output, "tool %s\n", entry.ToolName)
 		case operate.TranscriptToolResult:
 			summary, _ := entry.Output["summary"].(string)
 			if summary == "" {
 				summary = "done"
 			}
-			fmt.Fprintf(w, "  %s\n", strings.TrimSpace(summary))
+			fmt.Fprintf(&output, "  %s\n", strings.TrimSpace(summary))
 		case operate.TranscriptAssistant, operate.TranscriptError:
 			if strings.TrimSpace(entry.Text) != "" {
-				fmt.Fprintln(w, strings.TrimSpace(entry.Text))
+				fmt.Fprintln(&output, strings.TrimSpace(entry.Text))
 			}
 		}
 	}
+	_, err := io.WriteString(w, output.String())
+	return err
 }
 
 func (app *App) runOperateReviewWorker(ctx context.Context, args []string) error {
@@ -314,6 +482,13 @@ func (app *App) runOperateReviewWorker(ctx context.Context, args []string) error
 			loc = " " + loc
 		}
 		fmt.Fprintf(app.out, "- [%s]%s %s: %s\n", f.Severity, loc, f.Title, f.Body)
+	}
+	if !report.Passed {
+		summary := strings.TrimSpace(report.Summary)
+		if summary == "" {
+			summary = "review reported one or more blocking findings"
+		}
+		return fmt.Errorf("operate: review failed for %s: %s", ws.Name, summary)
 	}
 	return nil
 }
@@ -384,11 +559,16 @@ func startOrLoadOperateSession(ctx context.Context, h *operate.Harness, cfg oper
 		}
 	}
 	sessionRuntime, err := operate.NewAgentRuntime(operate.RuntimeOptions{
-		Dir:      cfg.Dir,
-		Driver:   h.Driver,
-		Store:    h.Store,
-		Harness:  h,
-		Redactor: h.Redactor,
+		Dir:       cfg.Dir,
+		Driver:    h.Driver,
+		Store:     h.Store,
+		Harness:   h,
+		Redactor:  h.Redactor,
+		Env:       cfg.Env,
+		EnvFile:   cfg.EnvFile,
+		Target:    cfg.Target,
+		Keep:      cfg.Keep,
+		AllowFail: cfg.AllowFail,
 	})
 	if err != nil {
 		return nil, nil, operate.Workspace{}, err

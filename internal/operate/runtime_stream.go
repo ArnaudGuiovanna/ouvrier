@@ -56,6 +56,7 @@ type StreamEvent struct {
 	Entry     *TranscriptEntry `json:"entry,omitempty"`
 	Delta     string           `json:"delta,omitempty"`
 	Final     string           `json:"final,omitempty"`
+	Outcome   RuntimeOutcome   `json:"outcome,omitempty"`
 	Workspace *Workspace       `json:"workspace,omitempty"`
 	Approval  *ApprovalRequest `json:"approval,omitempty"`
 	Review    *ReviewData      `json:"review,omitempty"`
@@ -72,19 +73,36 @@ func (r *AgentRuntime) RunTurn(ctx context.Context, sessionID, text, kind string
 	if r == nil || r.Store == nil {
 		return nil, errors.New("operate: nil runtime")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(kind) == "" {
 		kind = "prompt"
 	}
+	streamCtx, finishStream, err := r.beginRuntimeActivity(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
 	ch := make(chan StreamEvent, 32)
 	go func() {
+		defer finishStream()
 		defer close(ch)
+		done := false
 		emit := func(ev StreamEvent) {
+			ev = r.redactStreamEvent(ev)
+			if ev.Kind == StreamDone {
+				done = true
+			}
 			select {
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 			case ch <- ev:
 			}
 		}
-		_, _ = r.runPrompt(ctx, sessionID, text, kind, emit, headlessControl())
+		turn, runErr := r.runPrompt(streamCtx, sessionID, text, kind, emit, r.headlessControl())
+		if runErr != nil && !done {
+			emit(StreamEvent{Kind: StreamError, Err: runErr})
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Outcome: turn.Outcome, Workspace: turn.Workspace, Err: runErr})
+		}
 	}()
 	return ch, nil
 }
@@ -96,24 +114,41 @@ func (r *AgentRuntime) RunTurnInteractive(ctx context.Context, sessionID, text, 
 	if r == nil || r.Store == nil {
 		return nil, nil, errors.New("operate: nil runtime")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(kind) == "" {
 		kind = "prompt"
 	}
 	if posture == "" {
 		posture = PostureManual
 	}
+	streamCtx, finishStream, err := r.beginRuntimeActivity(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
 	ch := make(chan StreamEvent, 32)
 	decisions := make(chan ApprovalDecision, 1)
 	ctrl := &turnControl{posture: posture, decisions: decisions, interactive: true}
 	go func() {
+		defer finishStream()
 		defer close(ch)
+		done := false
 		emit := func(ev StreamEvent) {
+			ev = r.redactStreamEvent(ev)
+			if ev.Kind == StreamDone {
+				done = true
+			}
 			select {
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 			case ch <- ev:
 			}
 		}
-		_, _ = r.runPrompt(ctx, sessionID, text, kind, emit, ctrl)
+		turn, runErr := r.runPrompt(streamCtx, sessionID, text, kind, emit, ctrl)
+		if runErr != nil && !done {
+			emit(StreamEvent{Kind: StreamError, Err: runErr})
+			emit(StreamEvent{Kind: StreamDone, Final: turn.Final, Outcome: turn.Outcome, Workspace: turn.Workspace, Err: runErr})
+		}
 	}()
 	return ch, decisions, nil
 }

@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultSQLitePath   = ".ouvrier/state.db"
-	sqliteSchemaVersion = 7
+	sqliteSchemaVersion = 8
 )
 
 type SQLiteStore struct {
@@ -120,6 +120,18 @@ func (s *SQLiteStore) migrate(ctx context.Context) ([]int, error) {
 	// their pre-existing approval rows stay valid.
 	if err := s.ensureColumn(ctx, "ouvrier_approvals", "args_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, fmt.Errorf("migrate sqlite state store: %w", err)
+	}
+	// Schema v8: outcome-aware idempotency. Existing reservations predate
+	// outcome tracking, so they migrate conservatively as succeeded; every new
+	// reservation explicitly writes pending.
+	if err := s.ensureColumn(ctx, "ouvrier_idempotency_keys", "outcome", "TEXT NOT NULL DEFAULT 'succeeded'"); err != nil {
+		return nil, fmt.Errorf("migrate sqlite state store: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "ouvrier_idempotency_keys", "updated_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("migrate sqlite state store: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE ouvrier_idempotency_keys SET updated_at = created_at WHERE updated_at = ''`); err != nil {
+		return nil, fmt.Errorf("migrate sqlite state store: backfill idempotency updated_at: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", sqliteSchemaVersion)); err != nil {
 		return nil, fmt.Errorf("set sqlite state schema version: %w", err)
@@ -265,10 +277,12 @@ var sqliteSchemaStatements = []string{
 		max_wallclock_ns INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS ouvrier_idempotency_keys (
-		key TEXT PRIMARY KEY,
-		exec_id TEXT NOT NULL,
-		created_at TEXT NOT NULL
-	)`,
+			key TEXT PRIMARY KEY,
+			exec_id TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			outcome TEXT NOT NULL DEFAULT 'pending',
+			updated_at TEXT NOT NULL
+		)`,
 	`CREATE TABLE IF NOT EXISTS ouvrier_events (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		at TEXT NOT NULL,

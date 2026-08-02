@@ -7,14 +7,15 @@ func TestToolGovernanceClassification(t *testing.T) {
 	cases := map[string]Governance{
 		"list_workers":     GovReadOnly,
 		"read_worker_file": GovReadOnly,
-		"audit_worker":     GovReadOnly,
-		"review_worker":    GovReadOnly,
+		"audit_worker":     GovSideEffecting,
+		"review_worker":    GovSideEffecting,
 		"diff_worker":      GovReadOnly,
 		"scaffold_worker":  GovSideEffecting,
 		"patch_worker":     GovSideEffecting,
 		"fix_worker":       GovSideEffecting,
 		"build_worker":     GovSideEffecting,
 		"transfer_worker":  GovRequiresApproval,
+		"accept_risk":      GovRequiresApproval,
 	}
 	for name, want := range cases {
 		tool, ok := r.Tool(name)
@@ -24,6 +25,10 @@ func TestToolGovernanceClassification(t *testing.T) {
 		if tool.Governance != want {
 			t.Errorf("tool %q governance = %v, want %v", name, tool.Governance, want)
 		}
+	}
+	acceptRisk, _ := r.Tool("accept_risk")
+	if !acceptRisk.OperatorOnly {
+		t.Fatal("accept_risk must be operator-only so a model cannot authorize its own gate override")
 	}
 }
 

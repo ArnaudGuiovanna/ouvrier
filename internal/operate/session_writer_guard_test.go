@@ -97,7 +97,7 @@ func TestSessionMutationErrorsDistinguishWriterStates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = unopened.Close() })
 
-	if _, err := unopened.Prompt(context.Background(), "missing-session", "hello"); !errors.Is(err, ErrSessionNotFound) {
+	if _, err := unopened.Prompt(context.Background(), "aaaaaaaaaaaaaaaa", "hello"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("missing Prompt() error = %v, want ErrSessionNotFound", err)
 	}
 

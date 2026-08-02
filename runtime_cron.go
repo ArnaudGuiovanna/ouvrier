@@ -309,23 +309,22 @@ func runCronPlanOnceWithSession(ctx context.Context, rt httpRuntime, plan runtim
 	if err != nil {
 		return planRunResult{}, err
 	}
-	result, err := rt.runPlanResultWithSession(ctx, plan, input, session)
-	if err != nil {
-		return result, err
-	}
-	switch plan.Terminal.Kind {
-	case runtimeplan.TerminalPush:
-		err = rt.applyPushTerminal(ctx, plan.Terminal, result, result.Output)
-	case runtimeplan.TerminalSink:
-		payloadKey := "output"
-		if len(plan.Steps) == 0 {
-			payloadKey = "input"
+	return rt.runPlanResultWithSessionAndTerminal(ctx, plan, input, session, func(terminalCtx context.Context, result planRunResult) error {
+		switch plan.Terminal.Kind {
+		case runtimeplan.TerminalPush:
+			return rt.applyPushTerminal(terminalCtx, plan.Terminal, result, result.Output)
+		case runtimeplan.TerminalSink:
+			payloadKey := "output"
+			if len(plan.Steps) == 0 {
+				payloadKey = "input"
+			}
+			return rt.applySinkTerminal(terminalCtx, plan.Terminal, result, payloadKey)
+		case runtimeplan.TerminalReply:
+			return fmt.Errorf("%w: Reply requires an HTTP trigger", ErrIncompatibleTerminal)
+		default:
+			return fmt.Errorf("%w: terminal missing", ErrIncompatibleTerminal)
 		}
-		err = rt.applySinkTerminal(ctx, plan.Terminal, result, payloadKey)
-	case runtimeplan.TerminalReply:
-		err = fmt.Errorf("%w: Reply requires an HTTP trigger", ErrIncompatibleTerminal)
-	}
-	return result, err
+	})
 }
 
 func cronInput(plan runtimeplan.Plan, scheduledAt time.Time) (string, error) {

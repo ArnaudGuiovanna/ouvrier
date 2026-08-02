@@ -499,7 +499,18 @@ func (rt httpRuntime) adminEventsSince(ctx context.Context, execID string, after
 	if rt.eventStream == nil {
 		return nil, nil
 	}
-	recorded := rt.eventStream.Since(afterID)
+	var recorded []events.Event
+	if afterID == 0 {
+		// A cursor-less store-less admin request intentionally receives the
+		// retained recent window; it did not claim continuity from event zero.
+		recorded = rt.eventStream.Since(0)
+	} else {
+		var err error
+		recorded, err = rt.eventStream.SinceChecked(afterID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if execID == "" {
 		return recorded, nil
 	}
@@ -1067,7 +1078,9 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 	}
 	defer route.releaseWorker()
 
-	result, err := rt.runPlanResult(req.Context(), route.plan, input)
+	result, err := rt.runPlanResultWithTerminal(req.Context(), route.plan, input, func(ctx context.Context, result planRunResult) error {
+		return rt.applyResumedTerminal(ctx, route.plan, result)
+	})
 	if err != nil {
 		if suspended, ok := suspendedExecutionError(err); ok {
 			writeSuspendedResponse(w, suspended)
@@ -1076,26 +1089,14 @@ func (rt httpRuntime) executeAdminTriggerRoute(w http.ResponseWriter, req *http.
 		writeAdminTriggerPlanError(w, result, err)
 		return
 	}
-	if err := rt.validateObservedTerminalReplyOutput(req.Context(), route.plan, result); err != nil {
-		writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
-		return
-	}
 	output := result.Output
 
 	switch route.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
 		writeAdminTriggerOutput(w, http.StatusOK, "ok", result, events.RedactJSONText(output))
 	case runtimeplan.TerminalPush:
-		if err := rt.applyPushTerminal(req.Context(), route.plan.Terminal, result, output); err != nil {
-			writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
-			return
-		}
 		writeAdminTriggerOutput(w, http.StatusAccepted, "accepted", result, events.RedactJSONText(output))
 	case runtimeplan.TerminalSink:
-		if err := rt.applySinkTerminal(req.Context(), route.plan.Terminal, result, "output"); err != nil {
-			writeAdminTriggerStatus(w, http.StatusBadGateway, "pipeline_execution_failed", result)
-			return
-		}
 		writeAdminTriggerStatus(w, http.StatusAccepted, "accepted", result)
 	default:
 		writeAdminTriggerStatus(w, http.StatusInternalServerError, "terminal_missing", result)

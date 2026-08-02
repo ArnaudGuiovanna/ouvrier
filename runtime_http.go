@@ -112,6 +112,9 @@ func prepareHTTPServeRuntime(routes []httpRoute, plans []runtimeplan.Plan, runti
 	if err := validateRuntimeGuardsForPlans(plans); err != nil {
 		return httpRuntime{}, err
 	}
+	if err := validateDurableRunPlanCoverage(plans, runtime); err != nil {
+		return httpRuntime{}, err
+	}
 	runtime = runtime.withAsyncGroup()
 	runtime.adminRoutes = routes
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
@@ -179,12 +182,36 @@ func newAdminHandlerWithRuntime(plans []runtimeplan.Plan, runtime httpRuntime) (
 	if err := validateRuntimeGuardsForPlans(plans); err != nil {
 		return nil, err
 	}
+	if err := validateDurableRunPlanCoverage(plans, runtime); err != nil {
+		return nil, err
+	}
 	runtime = runtime.withAsyncGroup()
 	runtime.adminPlans = adminPlanRoutesFromPlans(plans)
 	startDurableRunRecovery(runtime, plans)
 	mux := http.NewServeMux()
 	registerHTTPAdminRoutes(mux, runtime)
 	return newRuntimeHTTPHandler(mux, runtime.async), nil
+}
+
+// validateDurableRunPlanCoverage refuses the one direct path that cannot yet
+// provide crash-safe terminal journaling: an HTTP/Webhook plan with no Pipe.
+// Cron and stream plans both execute zero-step terminals through the durable
+// runner. Failing at serve setup is safer than advertising durability while a
+// Push/Sink can escape its lease and terminal intent.
+func validateDurableRunPlanCoverage(plans []runtimeplan.Plan, runtime httpRuntime) error {
+	if runtime.durableRuns == nil {
+		return nil
+	}
+	for _, plan := range plans {
+		if len(plan.Steps) != 0 {
+			continue
+		}
+		switch plan.Trigger.Kind {
+		case runtimeplan.TriggerHTTP, runtimeplan.TriggerWebhook:
+			return fmt.Errorf("%w: durable runs require at least one Pipe for %s trigger %s; add a Pipe or disable OUVRIER_DURABLE_RUNS", ErrInvalidNode, plan.Trigger.Kind, durablePlanKey(plan))
+		}
+	}
+	return nil
 }
 
 func validateRuntimeGuardsForPlans(plans []runtimeplan.Plan) error {
@@ -257,6 +284,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if !r.tryAcquireWorker() {
+		_ = r.runtime.resolveReservedTriggerFailure(req.Context(), session)
 		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
 		return
 	}
@@ -264,6 +292,7 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 
 	result, err := r.runtime.startDirectPlanExecution(req.Context(), r.plan, input, session)
 	if err != nil {
+		_ = r.runtime.resolveReservedTriggerFailure(req.Context(), session)
 		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
 		return
 	}
@@ -326,6 +355,9 @@ func (r httpRoute) serve(w http.ResponseWriter, req *http.Request) {
 }
 
 func (rt httpRuntime) startDirectPlanExecution(ctx context.Context, plan runtimeplan.Plan, input string, session *runtimeplan.Session) (planRunResult, error) {
+	if rt.durableRuns != nil && (plan.Trigger.Kind == runtimeplan.TriggerHTTP || plan.Trigger.Kind == runtimeplan.TriggerWebhook) {
+		return planRunResult{Output: input}, fmt.Errorf("%w: durable runs require at least one Pipe for direct HTTP/Webhook terminals", ErrInvalidNode)
+	}
 	pipelineSession, err := pipelineSessionForPlan(plan, session)
 	if err != nil {
 		return planRunResult{Output: input}, err
@@ -361,6 +393,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 
 	if r.plan.Terminal.Async {
 		if !r.tryAcquireWorker() {
+			_ = r.runtime.resolveReservedTriggerFailure(req.Context(), session)
 			writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
 			return
 		}
@@ -369,6 +402,7 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 			_, _ = r.runtime.runPlanWithSession(ctx, r.plan, input, session)
 		}) {
 			r.releaseWorker()
+			_ = r.runtime.resolveReservedTriggerFailure(req.Context(), session)
 			writeJSONStatus(w, http.StatusServiceUnavailable, "shutting_down")
 			return
 		}
@@ -381,12 +415,15 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if !r.tryAcquireWorker() {
+		_ = r.runtime.resolveReservedTriggerFailure(req.Context(), session)
 		writeJSONStatus(w, http.StatusTooManyRequests, "worker_pool_full")
 		return
 	}
 	defer r.releaseWorker()
 
-	result, err := r.runtime.runPlanResultWithSession(req.Context(), r.plan, input, session)
+	result, err := r.runtime.runPlanResultWithSessionAndTerminal(req.Context(), r.plan, input, session, func(ctx context.Context, result planRunResult) error {
+		return r.runtime.applyResumedTerminal(ctx, r.plan, result)
+	})
 	if err != nil {
 		if suspended, ok := suspendedExecutionError(err); ok {
 			writeSuspendedResponse(w, suspended)
@@ -402,26 +439,14 @@ func (r httpRoute) servePipeline(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-	if err := r.runtime.validateObservedTerminalReplyOutput(req.Context(), r.plan, result); err != nil {
-		writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
-		return
-	}
 	output := result.Output
 
 	switch r.plan.Terminal.Kind {
 	case runtimeplan.TerminalReply:
 		writeJSONOutput(w, http.StatusOK, "ok", output)
 	case runtimeplan.TerminalPush:
-		if err := r.runtime.applyPushTerminal(req.Context(), r.plan.Terminal, result, output); err != nil {
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
-			return
-		}
 		writeJSONOutput(w, http.StatusAccepted, "accepted", output)
 	case runtimeplan.TerminalSink:
-		if err := r.runtime.applySinkTerminal(req.Context(), r.plan.Terminal, result, "output"); err != nil {
-			writeJSONStatus(w, http.StatusBadGateway, "pipeline_execution_failed")
-			return
-		}
 		writeJSONStatus(w, http.StatusAccepted, "accepted")
 	default:
 		writeJSONStatus(w, http.StatusInternalServerError, "terminal_missing")
@@ -472,17 +497,17 @@ func (r httpRoute) prepareRequestInput(w http.ResponseWriter, req *http.Request)
 	if !r.verifyRequestSignature(w, req, []byte(body)) {
 		return "", nil, false
 	}
+	input, err := r.buildPipelineInput(body, httpPathParams(req, r.plan.Trigger.Path))
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, "invalid_request")
+		return "", nil, false
+	}
 	session, duplicate, ok := r.runtime.reserveTriggerIdempotency(w, req, r.plan)
 	if !ok {
 		return "", nil, false
 	}
 	if duplicate {
 		return "", session, false
-	}
-	input, err := r.buildPipelineInput(body, httpPathParams(req, r.plan.Trigger.Path))
-	if err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, "invalid_request")
-		return "", nil, false
 	}
 	return input, session, true
 }
@@ -579,6 +604,15 @@ func (rt httpRuntime) reserveTriggerIdempotency(w http.ResponseWriter, req *http
 	}
 
 	key := triggerIdempotencyReservationKey(plan, headerName, value)
+	retrying := false
+	if outcomes, ok := rt.stateStore.(state.IdempotencyOutcomeStore); ok {
+		if record, found, lookupErr := outcomes.Idempotency(req.Context(), key); lookupErr != nil {
+			writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
+			return nil, false, false
+		} else if found && record.Outcome == state.IdempotencyFailed {
+			retrying = true
+		}
+	}
 	existingExecID, reserved, err := rt.stateStore.ReserveIdempotency(req.Context(), key, session.ExecID)
 	if err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, "state_store_error")
@@ -592,7 +626,11 @@ func (rt httpRuntime) reserveTriggerIdempotency(w http.ResponseWriter, req *http
 	}
 	if reserved {
 		payload["decision"] = "reserved"
+		if retrying {
+			payload["decision"] = "retry"
+		}
 		if err := rt.emitSessionEvent(req.Context(), session, events.EventIdempotencyDecision, payload); err != nil {
+			_ = rt.resolveReservedTriggerFailure(req.Context(), &session)
 			writeJSONStatus(w, http.StatusInternalServerError, "event_stream_error")
 			return nil, false, false
 		}
@@ -804,12 +842,19 @@ func (rt httpRuntime) appendRuntimeEvent(ctx context.Context, event events.Event
 		_, err := rt.stateStore.AddEvent(ctx, event)
 		return err
 	}
+	if rt.stateStore == nil {
+		_, err := rt.eventStream.Append(ctx, event)
+		return err
+	}
+	if _, globallyAllocated := rt.stateStore.(state.GloballyAllocatedEventIDStore); globallyAllocated {
+		_, err := rt.eventStream.AppendPersisted(ctx, event, rt.stateStore.AddEvent)
+		return err
+	}
+	// Custom public stores keep the pre-existing contract: EventStream owns
+	// ID allocation and the store preserves the explicit ID.
 	appended, err := rt.eventStream.Append(ctx, event)
 	if err != nil {
 		return err
-	}
-	if rt.stateStore == nil {
-		return nil
 	}
 	_, err = rt.stateStore.AddEvent(ctx, appended)
 	return err
@@ -949,19 +994,11 @@ func (rt httpRuntime) applySinkTerminal(ctx context.Context, terminal runtimepla
 		SideEffects: []string{"file"},
 		InputSchema: outputToolInputSchema(),
 	}, outputToolHandlerFunc(func(ctx context.Context, output string) error {
-		resolvedPath, err := rt.resolveFileSinkPath(terminal.SinkFilePath)
-		if err != nil {
-			return err
+		if rt.sandbox == nil {
+			return errors.New("file sink requires sandbox")
 		}
-		return writeFileSink(resolvedPath, output)
+		return rt.sandbox.WriteFileAtomic(terminal.SinkFilePath, []byte(output), 0o644)
 	}), output)
-}
-
-func (rt httpRuntime) resolveFileSinkPath(path string) (string, error) {
-	if rt.sandbox == nil {
-		return "", errors.New("file sink requires sandbox")
-	}
-	return rt.sandbox.Resolve(path)
 }
 
 func (rt httpRuntime) appendLogSinkEvent(ctx context.Context, result planRunResult, payloadKey, output string) error {
@@ -973,10 +1010,6 @@ func (rt httpRuntime) appendLogSinkEvent(ctx context.Context, result planRunResu
 
 func terminalLogPayload(output string) any {
 	return events.RedactJSONText(output)
-}
-
-func writeFileSink(path, output string) error {
-	return os.WriteFile(path, []byte(output), 0o644)
 }
 
 type outputToolArgs struct {

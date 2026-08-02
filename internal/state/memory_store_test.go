@@ -234,6 +234,18 @@ func TestMemoryStoreRejectsDuplicateExplicitEventIDs(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreFailsClosedWhenEventIDSpaceIsExhausted(t *testing.T) {
+	store := NewMemoryStore()
+	if _, err := store.AddEvent(context.Background(), events.Event{
+		ID: ^uint64(0), Kind: events.EventSessionStarted,
+	}); err != nil {
+		t.Fatalf("AddEvent(max ID) returned error: %v", err)
+	}
+	if _, err := store.AddEvent(context.Background(), events.Event{Kind: events.EventAfterLLM}); !errors.Is(err, events.ErrEventIDExhausted) {
+		t.Fatalf("AddEvent after max ID error = %v, want ErrEventIDExhausted", err)
+	}
+}
+
 func TestMemoryStoreRecordsSchemaViolations(t *testing.T) {
 	store := NewMemoryStore()
 	at := time.Date(2026, 5, 18, 15, 0, 0, 0, time.UTC)

@@ -43,7 +43,14 @@ func TestOpenSessionWriterRepairsTornTailOnlyAfterAcquiringLock(t *testing.T) {
 	if err := owner.Close(); err != nil {
 		t.Fatalf("owner Close() error = %v", err)
 	}
-	opened, err := contender.OpenSessionWriter(context.Background(), RuntimeStartRequest{SessionID: session.ID})
+	if _, err := contender.OpenSessionWriter(context.Background(), RuntimeStartRequest{SessionID: session.ID}); !errors.Is(err, ErrRuntimeClosed) {
+		t.Fatalf("closed contender OpenSessionWriter() error = %v, want ErrRuntimeClosed", err)
+	}
+	repairer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatalf("NewAgentRuntime(repairer) error = %v", err)
+	}
+	opened, err := repairer.OpenSessionWriter(context.Background(), RuntimeStartRequest{SessionID: session.ID})
 	if err != nil {
 		t.Fatalf("OpenSessionWriter() after release error = %v", err)
 	}
@@ -60,8 +67,8 @@ func TestOpenSessionWriterRepairsTornTailOnlyAfterAcquiringLock(t *testing.T) {
 	if _, err := ReadTranscript(session.TranscriptPath); err != nil {
 		t.Fatalf("ReadTranscript() error = %v", err)
 	}
-	if err := contender.Close(); err != nil {
-		t.Fatalf("contender Close() error = %v", err)
+	if err := repairer.Close(); err != nil {
+		t.Fatalf("repairer Close() error = %v", err)
 	}
 }
 

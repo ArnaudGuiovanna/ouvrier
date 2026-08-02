@@ -64,7 +64,7 @@ func (e *Executor) authorizeToolCall(ctx context.Context, tool registeredTool, c
 		// resolver matches the call by tool name + args hash against the
 		// already-approved record instead of suspending a second time.
 		if resolver, ok := approvedApprovalResolverFromContext(ctx); ok {
-			if approvalID, ok := resolver(ctx, action.ToolName, toolIntentIdemKey(tool, call)); ok {
+			if approvalID, ok := resolver(ctx, action.ToolName, toolIntentIdemKey(ctx, tool, call)); ok {
 				decision := policy.Decision{Allowed: true, ApprovalID: approvalID, Reason: "approval approved before recovery"}
 				observeErr := observePermissionDecision(ctx, PermissionDecisionAudit{
 					Action:   action,
@@ -130,7 +130,7 @@ func (e *Executor) suspendForApproval(ctx context.Context, tool registeredTool, 
 		// The args hash recorded at suspend time is what the recovery
 		// resolver compares against on replay; both sides derive it from
 		// toolIntentIdemKey so the digests match exactly.
-		ArgsHash: toolIntentIdemKey(tool, call),
+		ArgsHash: toolIntentIdemKey(ctx, tool, call),
 	})
 	decision := policy.Decision{Allowed: false, Suspended: true, ApprovalID: approvalID, Reason: reason}
 	if recordErr != nil {

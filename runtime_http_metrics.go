@@ -22,6 +22,14 @@ func (rt httpRuntime) serveMetrics(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	metrics := summarizeRuntimeMetrics(recorded)
+	// The in-process EventStream retains only a bounded recent window. Its
+	// lifetime kind counts keep Prometheus *_total counters monotonic when a
+	// StateStore is absent, empty, or intentionally retains less history. When
+	// durable history is longer (for example after a restart), max-merging keeps
+	// that durable count instead.
+	if rt.eventStream != nil {
+		metrics.mergeLifetimeStreamStats(rt.eventStream.Stats())
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(metrics.render()))
@@ -31,7 +39,7 @@ func (rt httpRuntime) serveMetrics(w http.ResponseWriter, req *http.Request) {
 type metricCounter struct {
 	name  string
 	help  string
-	value int
+	value uint64
 }
 
 // metricSummary is a Prometheus summary reduced to _sum and _count series. It
@@ -41,7 +49,7 @@ type metricSummary struct {
 	name  string
 	help  string
 	sum   float64
-	count int
+	count uint64
 }
 
 type runtimeMetrics struct {
@@ -57,14 +65,14 @@ type runtimeMetrics struct {
 // content (and no secrets) is emitted.
 func summarizeRuntimeMetrics(recorded []events.Event) runtimeMetrics {
 	var (
-		pipelineStarted, pipelineCompleted, pipelineFailed int
-		pipeStarted, pipeCompleted, pipeFailed             int
-		llmStarted, llmCompleted, llmFailed                int
-		toolStarted, toolCompleted, toolFailed             int
-		streamDeadLettered, streamRedelivered              int
+		pipelineStarted, pipelineCompleted, pipelineFailed uint64
+		pipeStarted, pipeCompleted, pipeFailed             uint64
+		llmStarted, llmCompleted, llmFailed                uint64
+		toolStarted, toolCompleted, toolFailed             uint64
+		streamDeadLettered, streamRedelivered              uint64
 
 		llmLatencySum   float64
-		llmLatencyCount int
+		llmLatencyCount uint64
 	)
 
 	durations := newMetricsDurationTracker()
@@ -146,6 +154,55 @@ func summarizeRuntimeMetrics(recorded []events.Event) runtimeMetrics {
 	}
 }
 
+var prometheusCounterKinds = map[events.EventKind]string{
+	events.EventPipelineStarted:    "ouvrier_pipeline_started_total",
+	events.EventPipelineCompleted:  "ouvrier_pipeline_completed_total",
+	events.EventPipelineFailed:     "ouvrier_pipeline_failed_total",
+	events.EventPipeStarted:        "ouvrier_pipe_started_total",
+	events.EventPipeCompleted:      "ouvrier_pipe_completed_total",
+	events.EventPipeFailed:         "ouvrier_pipe_failed_total",
+	events.EventLLMCallStarted:     "ouvrier_llm_call_started_total",
+	events.EventLLMCallCompleted:   "ouvrier_llm_call_completed_total",
+	events.EventLLMCallFailed:      "ouvrier_llm_call_failed_total",
+	events.EventToolCallStarted:    "ouvrier_tool_call_started_total",
+	events.EventToolCallCompleted:  "ouvrier_tool_call_completed_total",
+	events.EventToolCallFailed:     "ouvrier_tool_call_failed_total",
+	events.EventStreamDeadLettered: "ouvrier_stream_dead_lettered_total",
+	events.EventStreamRedelivered:  "ouvrier_stream_redelivered_total",
+}
+
+func (m *runtimeMetrics) mergeLifetimeStreamStats(stats events.StreamStats) {
+	if m == nil {
+		return
+	}
+	byName := make(map[string]uint64, len(prometheusCounterKinds))
+	for kind, name := range prometheusCounterKinds {
+		byName[name] = stats.KindCounts[events.CanonicalKind(kind)]
+	}
+	for i := range m.counters {
+		if lifetime := byName[m.counters[i].name]; lifetime > m.counters[i].value {
+			m.counters[i].value = lifetime
+		}
+	}
+	summaries := map[string]events.MetricSummaryStats{
+		"ouvrier_llm_call_duration_ms":  stats.LLMCallDuration,
+		"ouvrier_pipeline_duration_ms":  stats.PipelineDuration,
+		"ouvrier_pipe_duration_ms":      stats.PipeDuration,
+		"ouvrier_tool_call_duration_ms": stats.ToolCallDuration,
+	}
+	for i := range m.summaries {
+		lifetime := summaries[m.summaries[i].name]
+		if lifetime.Count > m.summaries[i].count {
+			m.summaries[i].count = lifetime.Count
+			m.summaries[i].sum = lifetime.SumMilliseconds
+			continue
+		}
+		if lifetime.Count == m.summaries[i].count && lifetime.SumMilliseconds > m.summaries[i].sum {
+			m.summaries[i].sum = lifetime.SumMilliseconds
+		}
+	}
+}
+
 func (m runtimeMetrics) render() string {
 	var b strings.Builder
 	for _, counter := range m.counters {
@@ -158,7 +215,7 @@ func (m runtimeMetrics) render() string {
 		b.WriteString(" counter\n")
 		b.WriteString(counter.name)
 		b.WriteString(" ")
-		b.WriteString(strconv.Itoa(counter.value))
+		b.WriteString(strconv.FormatUint(counter.value, 10))
 		b.WriteString("\n")
 	}
 	for _, summary := range m.summaries {
@@ -175,7 +232,7 @@ func (m runtimeMetrics) render() string {
 		b.WriteString("\n")
 		b.WriteString(summary.name)
 		b.WriteString("_count ")
-		b.WriteString(strconv.Itoa(summary.count))
+		b.WriteString(strconv.FormatUint(summary.count, 10))
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -190,14 +247,14 @@ func formatMetricFloat(value float64) string {
 type metricsDurationTracker struct {
 	open   map[string]int64 // key -> start unix nanos
 	sums   map[string]float64
-	counts map[string]int
+	counts map[string]uint64
 }
 
 func newMetricsDurationTracker() *metricsDurationTracker {
 	return &metricsDurationTracker{
 		open:   make(map[string]int64),
 		sums:   make(map[string]float64),
-		counts: make(map[string]int),
+		counts: make(map[string]uint64),
 	}
 }
 
@@ -229,11 +286,11 @@ func (t *metricsDurationTracker) finish(op string, event events.Event) {
 
 func (t *metricsDurationTracker) summary(op string) struct {
 	sum   float64
-	count int
+	count uint64
 } {
 	return struct {
 		sum   float64
-		count int
+		count uint64
 	}{sum: t.sums[op], count: t.counts[op]}
 }
 

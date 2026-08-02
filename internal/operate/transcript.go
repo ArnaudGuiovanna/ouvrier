@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,6 +46,16 @@ type TranscriptStore struct {
 	mu       sync.Mutex
 }
 
+// maxJSONLLineBytes is shared by every operate journal writer, reader, and
+// tail-repair path. Eight MiB accommodates the advertised one-MiB worker-file
+// input even under worst-case JSON escaping while still bounding allocations.
+const maxJSONLLineBytes = 8 * 1024 * 1024
+
+const (
+	maxTranscriptFileBytes = 64 * 1024 * 1024
+	maxTranscriptEntries   = 100_000
+)
+
 func NewTranscriptStore(path string, redactor Redactor) *TranscriptStore {
 	return &TranscriptStore{path: path, redactor: redactor}
 }
@@ -64,29 +74,40 @@ func (s *TranscriptStore) Append(entry TranscriptEntry) (TranscriptEntry, error)
 	if entry.At.IsZero() {
 		entry.At = time.Now().UTC()
 	}
-	entry.Text = s.redactor.Redact(entry.Text)
-	entry.Input = redactMap(s.redactor, entry.Input)
-	entry.Output = redactMap(s.redactor, entry.Output)
+	entry = redactTranscriptEntry(s.redactor, entry)
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return TranscriptEntry{}, redactError(s.redactor, fmt.Errorf("operate: encode transcript entry: %w", err))
+	}
+	if err := validateJSONLLineSize(data, "transcript entry"); err != nil {
+		return TranscriptEntry{}, redactError(s.redactor, err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return TranscriptEntry{}, fmt.Errorf("operate: create transcript dir: %w", err)
-	}
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := openSessionArtifact(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600, true)
 	if err != nil {
-		return TranscriptEntry{}, fmt.Errorf("operate: open transcript: %w", err)
+		return TranscriptEntry{}, redactError(s.redactor, fmt.Errorf("operate: open transcript: %w", err))
 	}
-	defer f.Close()
-	data, err := json.Marshal(entry)
+	info, err := f.Stat()
 	if err != nil {
-		return TranscriptEntry{}, fmt.Errorf("operate: encode transcript entry: %w", err)
+		_ = f.Close()
+		return TranscriptEntry{}, redactError(s.redactor, fmt.Errorf("operate: stat transcript: %w", err))
+	}
+	if info.Size() > int64(maxTranscriptFileBytes-len(data)-1) {
+		_ = f.Close()
+		return TranscriptEntry{}, fmt.Errorf("operate: transcript exceeds %d bytes; fork or start a fresh session", maxTranscriptFileBytes)
 	}
 	if _, err := fmt.Fprintln(f, string(data)); err != nil {
-		return TranscriptEntry{}, fmt.Errorf("operate: append transcript entry: %w", err)
+		_ = f.Close()
+		return TranscriptEntry{}, redactError(s.redactor, fmt.Errorf("operate: append transcript entry: %w", err))
 	}
 	if err := f.Sync(); err != nil {
-		return TranscriptEntry{}, fmt.Errorf("operate: sync transcript entry: %w", err)
+		_ = f.Close()
+		return TranscriptEntry{}, redactError(s.redactor, fmt.Errorf("operate: sync transcript entry: %w", err))
+	}
+	if err := f.Close(); err != nil {
+		return TranscriptEntry{}, redactError(s.redactor, fmt.Errorf("operate: close transcript entry: %w", err))
 	}
 	return entry, nil
 }
@@ -95,7 +116,7 @@ func ReadTranscript(path string) ([]TranscriptEntry, error) {
 	if path == "" {
 		return nil, nil
 	}
-	f, err := os.Open(path)
+	f, err := openSessionArtifact(path, os.O_RDONLY, 0, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -103,12 +124,22 @@ func ReadTranscript(path string) ([]TranscriptEntry, error) {
 		return nil, fmt.Errorf("operate: open transcript: %w", err)
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("operate: stat transcript: %w", err)
+	}
+	if info.Size() > maxTranscriptFileBytes {
+		return nil, fmt.Errorf("operate: transcript exceeds %d bytes", maxTranscriptFileBytes)
+	}
 	var entries []TranscriptEntry
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLLineBytes+1)
 	line := 0
 	for scanner.Scan() {
 		line++
+		if line > maxTranscriptEntries {
+			return nil, fmt.Errorf("operate: transcript exceeds %d entries", maxTranscriptEntries)
+		}
 		var entry TranscriptEntry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			return nil, fmt.Errorf("operate: parse transcript %s at line %d: %w", path, line, err)
@@ -137,7 +168,7 @@ func repairJSONLTail(path, label string) (jsonlTailRepair, error) {
 	if path == "" {
 		return jsonlTailUnchanged, nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := openSessionArtifact(path, os.O_RDWR, 0, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return jsonlTailUnchanged, nil
@@ -179,9 +210,8 @@ func repairJSONLTail(path, label string) (jsonlTailRepair, error) {
 			break
 		}
 	}
-	const maxJSONLLine = int64(4 * 1024 * 1024)
-	if size-lineStart > maxJSONLLine {
-		return jsonlTailUnchanged, fmt.Errorf("operate: %s final line exceeds %d bytes", label, maxJSONLLine)
+	if size-lineStart > int64(maxJSONLLineBytes) {
+		return jsonlTailUnchanged, fmt.Errorf("operate: %s final line exceeds %d bytes", label, maxJSONLLineBytes)
 	}
 	tail := make([]byte, size-lineStart)
 	if _, err := f.ReadAt(tail, lineStart); err != nil {
@@ -205,6 +235,13 @@ func repairJSONLTail(path, label string) (jsonlTailRepair, error) {
 	return jsonlTailDiscarded, nil
 }
 
+func validateJSONLLineSize(data []byte, label string) error {
+	if len(data) > maxJSONLLineBytes {
+		return fmt.Errorf("operate: %s exceeds %d bytes", label, maxJSONLLineBytes)
+	}
+	return nil
+}
+
 func repairTrailingTranscript(path string) (bool, error) {
 	repair, err := repairJSONLTail(path, "transcript")
 	return repair == jsonlTailDiscarded, err
@@ -216,9 +253,33 @@ func redactMap(redactor Redactor, in map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(in))
 	for k, v := range in {
-		out[k] = redactValue(redactor, v)
+		key := redactor.Redact(k)
+		if sensitiveDataKey(k) {
+			out[key] = "***"
+			continue
+		}
+		out[key] = redactValue(redactor, v)
 	}
 	return out
+}
+
+// sensitiveDataKey masks secrets even when their concrete value was not
+// present in the process environment used to construct the Redactor. Avoid
+// broad substring matching so harmless telemetry such as token_count remains
+// observable.
+func sensitiveDataKey(key string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(key))
+	normalized = strings.NewReplacer("-", "_", ".", "_").Replace(normalized)
+	if secretEnvironmentName(normalized) {
+		return true
+	}
+	switch normalized {
+	case "AUTHORIZATION", "PROXY_AUTHORIZATION", "COOKIE", "SET_COOKIE",
+		"CLIENT_SECRET", "PRIVATE_KEY", "CREDENTIALS", "AUTH_TOKEN", "BEARER_TOKEN":
+		return true
+	default:
+		return false
+	}
 }
 
 func redactValue(redactor Redactor, value any) any {
@@ -239,7 +300,46 @@ func redactValue(redactor Redactor, value any) any {
 		return out
 	case map[string]any:
 		return redactMap(redactor, typed)
-	default:
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, item := range typed {
+			redactedKey := redactor.Redact(key)
+			if sensitiveDataKey(key) {
+				out[redactedKey] = "***"
+				continue
+			}
+			out[redactedKey] = redactor.Redact(item)
+		}
+		return out
+	case json.RawMessage:
+		var decoded any
+		if json.Unmarshal(typed, &decoded) == nil {
+			if encoded, err := json.Marshal(redactValue(redactor, decoded)); err == nil {
+				return json.RawMessage(encoded)
+			}
+		}
+		return json.RawMessage(redactor.Redact(string(typed)))
+	case []byte:
+		return []byte(redactor.Redact(string(typed)))
+	case nil, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, json.Number:
 		return value
+	default:
+		// Metadata can carry typed structs, pointers, aliases, and nested slices.
+		// Normalize any JSON-compatible value and recurse so those shapes cannot
+		// bypass redaction merely because their concrete Go type is not map/[]any.
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return value
+		}
+		decoder := json.NewDecoder(bytes.NewReader(encoded))
+		decoder.UseNumber()
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
+			return value
+		}
+		return redactValue(redactor, decoded)
 	}
 }

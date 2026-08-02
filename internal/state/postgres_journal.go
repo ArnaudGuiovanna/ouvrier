@@ -6,8 +6,6 @@ import (
 	"errors"
 	"strings"
 	"time"
-
-	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 )
 
 func (s *PostgresStore) SaveRunJournal(ctx context.Context, journal RunJournal) error {
@@ -30,7 +28,7 @@ func (s *PostgresStore) SaveRunJournal(ctx context.Context, journal RunJournal) 
 		input = excluded.input,
 		created_at = excluded.created_at`,
 		journal.ExecID, journal.PlanKey, journal.PlanHash, journal.TriggerKind,
-		journal.Input, postgresTime(journal.CreatedAt),
+		encodeStoredReplayValue(journal.Input, journal.ReplayUnsafe), postgresTime(journal.CreatedAt),
 	)
 	return err
 }
@@ -92,7 +90,7 @@ func (s *PostgresStore) SaveRunCheckpoint(ctx context.Context, checkpoint RunChe
 	ON CONFLICT (exec_id, step_index) DO UPDATE SET
 		output = excluded.output,
 		completed_at = excluded.completed_at`,
-		checkpoint.ExecID, checkpoint.StepIndex, checkpoint.Output,
+		checkpoint.ExecID, checkpoint.StepIndex, encodeStoredReplayValue(checkpoint.Output, checkpoint.ReplayUnsafe),
 		postgresTime(checkpoint.CompletedAt),
 	)
 	return err
@@ -118,8 +116,7 @@ func (s *PostgresStore) RunCheckpoints(ctx context.Context, execID string) ([]Ru
 		if err := rows.Scan(&checkpoint.ExecID, &checkpoint.StepIndex, &checkpoint.Output, &completedAt); err != nil {
 			return nil, err
 		}
-		// Read-side redaction backstop, matching the schema-violation reader.
-		checkpoint.Output = events.RedactText(checkpoint.Output)
+		checkpoint.Output, checkpoint.ReplayUnsafe = decodeStoredReplayValue(checkpoint.Output)
 		checkpoint.CompletedAt = postgresTime(completedAt)
 		checkpoints = append(checkpoints, checkpoint)
 	}
@@ -219,7 +216,8 @@ func (s *PostgresStore) PruneRunJournal(ctx context.Context, execID string) erro
 	if execID == "" {
 		return errors.New("run journal execution id is required")
 	}
-	return s.pruneRunJournalRows(ctx, execID)
+	_, err = s.pruneRunJournalRows(ctx, execID)
+	return err
 }
 
 func (s *PostgresStore) PruneRunJournalsBefore(ctx context.Context, cutoff time.Time) ([]string, error) {
@@ -247,35 +245,61 @@ func (s *PostgresStore) PruneRunJournalsBefore(ctx context.Context, cutoff time.
 		return nil, err
 	}
 
+	pruned := make([]string, 0, len(expired))
 	for _, execID := range expired {
-		if err := s.pruneRunJournalRows(ctx, execID); err != nil {
+		deleted, err := s.pruneRunJournalRows(ctx, execID)
+		if err != nil {
 			return nil, err
 		}
+		if deleted {
+			pruned = append(pruned, execID)
+		}
 	}
-	return expired, nil
+	return pruned, nil
 }
 
 // pruneRunJournalRows deletes one execution's journal rows inside a single
 // transaction, children first, so a concurrent reader never sees checkpoints
 // or intents without their journal row.
-func (s *PostgresStore) pruneRunJournalRows(ctx context.Context, execID string) error {
+func (s *PostgresStore) pruneRunJournalRows(ctx context.Context, execID string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() {
 		_ = tx.Rollback()
 	}()
+	var eligible bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM ouvrier_run_journal AS journal
+		JOIN ouvrier_executions AS execution ON execution.exec_id = journal.exec_id
+		WHERE journal.exec_id = $1
+		  AND execution.status IN ($2, $3, $4)
+		  AND NOT EXISTS (
+			SELECT 1 FROM ouvrier_approvals AS approval
+			WHERE approval.exec_id = journal.exec_id AND approval.status = $5
+		  )
+	)`, execID, string(ExecutionCompleted), string(ExecutionFailed), string(ExecutionTruncated), string(ApprovalPending)).Scan(&eligible); err != nil {
+		return false, err
+	}
+	if !eligible {
+		return false, nil
+	}
+
 	for _, stmt := range []string{
 		`DELETE FROM ouvrier_tool_intents WHERE exec_id = $1`,
 		`DELETE FROM ouvrier_run_checkpoints WHERE exec_id = $1`,
 		`DELETE FROM ouvrier_run_journal WHERE exec_id = $1`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt, execID); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 const postgresRunJournalSelectColumns = `SELECT exec_id, plan_key, plan_hash, trigger_kind, input, created_at`
@@ -287,8 +311,7 @@ func scanPostgresRunJournal(row sqlRowScanner) (RunJournal, error) {
 		&journal.TriggerKind, &journal.Input, &createdAt); err != nil {
 		return RunJournal{}, err
 	}
-	// Read-side redaction backstop, matching the schema-violation reader.
-	journal.Input = events.RedactText(journal.Input)
+	journal.Input, journal.ReplayUnsafe = decodeStoredReplayValue(journal.Input)
 	journal.CreatedAt = postgresTime(createdAt)
 	return journal, nil
 }

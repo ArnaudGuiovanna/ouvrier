@@ -83,7 +83,12 @@ func (h *subAgentHandler) Execute(ctx context.Context, call provider.ToolCall) (
 	if err := h.emitTask(ctx, parent, events.EventTaskStarted, call, nil); err != nil {
 		return provider.ToolResult{}, err
 	}
-	scope := planRunScope{parentSession: &parent}
+	scope := planRunScope{
+		parentSession: &parent,
+		idempotencyNamespace: toolIdempotencyChildNamespace(
+			tools.IdempotencyNamespaceFromContext(ctx), "subagent:"+h.spec.Name, 0,
+		),
+	}
 	if ledger, ok := harness.BudgetLedgerFromContext(ctx); ok {
 		scope.budgetLedger = ledger
 	}

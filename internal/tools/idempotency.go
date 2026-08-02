@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 type idempotencyStore interface {
@@ -17,13 +18,28 @@ type idempotencyStore interface {
 }
 
 type idempotencyContext struct {
-	store  idempotencyStore
-	execID string
+	store     idempotencyStore
+	execID    string
+	namespace string
 }
 
 type idempotencyContextKey struct{}
+type idempotencyReplayContextKey struct{}
+
+type idempotencyClaim struct {
+	store  state.IdempotencyOutcomeStore
+	key    string
+	execID string
+}
 
 func ContextWithIdempotencyStore(ctx context.Context, store idempotencyStore, execID string) context.Context {
+	return ContextWithIdempotencyStoreNamespace(ctx, store, execID, "")
+}
+
+// ContextWithIdempotencyStoreNamespace isolates otherwise identical tool
+// names and business keys belonging to different Pipe definitions. Namespace
+// is internal harness metadata; the public Tool syntax stays unchanged.
+func ContextWithIdempotencyStoreNamespace(ctx context.Context, store idempotencyStore, execID, namespace string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -31,45 +47,116 @@ func ContextWithIdempotencyStore(ctx context.Context, store idempotencyStore, ex
 		return ctx
 	}
 	return context.WithValue(ctx, idempotencyContextKey{}, idempotencyContext{
-		store:  store,
-		execID: strings.TrimSpace(execID),
+		store:     store,
+		execID:    strings.TrimSpace(execID),
+		namespace: strings.TrimSpace(namespace),
 	})
 }
 
+// IdempotencyNamespaceFromContext returns the current internal Pipe scope.
+// It is used by governed child pipelines to derive, rather than discard, the
+// parent's isolation boundary.
+func IdempotencyNamespaceFromContext(ctx context.Context) string {
+	reservation, ok := idempotencyFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return reservation.namespace
+}
+
+// ContextWithIdempotencyReplay marks a governed durable replay. It allows the
+// same execution to re-enter a pending idempotent reservation: the tool's
+// declared stable key is the deduplication contract. Ordinary in-flight
+// duplicates remain blocked while pending.
+func ContextWithIdempotencyReplay(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, idempotencyReplayContextKey{}, true)
+}
+
 // reserveIdempotency reserves an idempotent tool call's key before execution.
-// It returns skip=true when the reservation is already held by THIS execution
-// — a durable-run replay (#40) or an in-run duplicate re-issuing the same
-// call — which the executor dedupes as a success instead of the historical
-// error: the work is already done under this exec id. A reservation held by a
-// different execution remains an error.
-func reserveIdempotency(ctx context.Context, tool registeredTool, raw json.RawMessage) (bool, error) {
+// It returns skip=true only when THIS execution already resolved the key as
+// succeeded. Pending calls are never mistaken for completed work; a governed
+// durable replay may re-enter its own pending idempotent claim because the
+// stable key is the tool's explicit replay-safety contract. Failed claims are
+// atomically made available to a retry. A succeeded key owned by another
+// execution remains a hard duplicate error for compatibility.
+func reserveIdempotency(ctx context.Context, tool registeredTool, raw json.RawMessage) (bool, *idempotencyClaim, error) {
 	if normalizeEffect(tool.metadata.Effect) != policy.EffectIdempotent {
-		return false, nil
+		return false, nil, nil
 	}
 	expression := strings.TrimSpace(tool.metadata.IdempotencyKey)
 	if expression == "" {
-		return false, errors.New("idempotent tool requires an idempotency key")
+		return false, nil, errors.New("idempotent tool requires an idempotency key")
 	}
 
 	reservation, ok := idempotencyFromContext(ctx)
 	if !ok {
-		return false, errors.New("idempotent tool requires an idempotency StateStore")
+		return false, nil, errors.New("idempotent tool requires an idempotency StateStore")
 	}
-	key, err := idempotencyReservationKey(tool.name, expression, raw)
+	key, err := idempotencyReservationKeyInNamespace(reservation.namespace, tool.name, expression, raw)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	existing, reserved, err := reservation.store.ReserveIdempotency(ctx, key, reservation.execID)
 	if err != nil {
-		return false, fmt.Errorf("reserve idempotency key: %w", err)
+		return false, nil, fmt.Errorf("reserve idempotency key: %w", err)
 	}
-	if !reserved {
-		if existing == reservation.execID {
-			return true, nil
+	outcomes, outcomeAware := reservation.store.(state.IdempotencyOutcomeStore)
+	if reserved {
+		if outcomeAware {
+			return false, &idempotencyClaim{store: outcomes, key: key, execID: reservation.execID}, nil
 		}
-		return false, fmt.Errorf("idempotency key already reserved for execution %s", existing)
+		return false, nil, nil
 	}
-	return false, nil
+	if !outcomeAware {
+		if existing == reservation.execID {
+			return true, nil, nil
+		}
+		return false, nil, fmt.Errorf("idempotency key already reserved for execution %s", existing)
+	}
+	record, found, err := outcomes.Idempotency(ctx, key)
+	if err != nil {
+		return false, nil, fmt.Errorf("read idempotency outcome: %w", err)
+	}
+	if !found {
+		return false, nil, errors.New("idempotency reservation disappeared after conflict")
+	}
+	switch record.Outcome {
+	case state.IdempotencySucceeded:
+		if record.ExecID == reservation.execID {
+			return true, nil, nil
+		}
+		return false, nil, fmt.Errorf("idempotency key already succeeded for execution %s", record.ExecID)
+	case state.IdempotencyPending:
+		if record.ExecID == reservation.execID && idempotencyReplayFromContext(ctx) {
+			return false, &idempotencyClaim{store: outcomes, key: key, execID: reservation.execID}, nil
+		}
+		return false, nil, fmt.Errorf("idempotency key is pending for execution %s", record.ExecID)
+	case state.IdempotencyFailed:
+		return false, nil, errors.New("failed idempotency reservation was not made available for retry")
+	default:
+		return false, nil, fmt.Errorf("unknown idempotency outcome %q", record.Outcome)
+	}
+}
+
+func idempotencyReplayFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	replay, _ := ctx.Value(idempotencyReplayContextKey{}).(bool)
+	return replay
+}
+
+func (c *idempotencyClaim) resolve(ctx context.Context, outcome state.IdempotencyOutcome) error {
+	if c == nil || c.store == nil {
+		return nil
+	}
+	if err := c.store.ResolveIdempotency(ctx, c.key, c.execID, outcome); err != nil {
+		return fmt.Errorf("resolve idempotency key: %w", err)
+	}
+	return nil
 }
 
 func idempotencyFromContext(ctx context.Context) (idempotencyContext, bool) {
@@ -81,11 +168,15 @@ func idempotencyFromContext(ctx context.Context) (idempotencyContext, bool) {
 }
 
 func idempotencyReservationKey(toolName, expression string, raw json.RawMessage) (string, error) {
+	return idempotencyReservationKeyInNamespace("", toolName, expression, raw)
+}
+
+func idempotencyReservationKeyInNamespace(namespace, toolName, expression string, raw json.RawMessage) (string, error) {
 	value, err := resolveIdempotencyValue(raw, expression)
 	if err != nil {
 		return "", err
 	}
-	material := strings.TrimSpace(toolName) + "\x00" + strings.TrimSpace(expression) + "\x00" + string(value)
+	material := strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(toolName) + "\x00" + strings.TrimSpace(expression) + "\x00" + string(value)
 	sum := sha256.Sum256([]byte(material))
 	return "tool:" + strings.TrimSpace(toolName) + ":" + strings.TrimSpace(expression) + ":" + hex.EncodeToString(sum[:]), nil
 }

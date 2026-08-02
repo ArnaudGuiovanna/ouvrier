@@ -15,6 +15,7 @@ var (
 
 type Sandbox struct {
 	root       string
+	rootInfo   os.FileInfo
 	env        map[string]string
 	allowedEnv map[string]struct{}
 }
@@ -46,6 +47,10 @@ func New(root string, options ...Option) (*Sandbox, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: realpath root: %w", ErrInvalidWorkspace, err)
 	}
+	rootInfo, err := os.Stat(realRoot)
+	if err != nil || !rootInfo.IsDir() {
+		return nil, fmt.Errorf("%w: stable root: %s", ErrInvalidWorkspace, realRoot)
+	}
 
 	cfg := config{
 		env:        make(map[string]string),
@@ -59,9 +64,18 @@ func New(root string, options ...Option) (*Sandbox, error) {
 
 	return &Sandbox{
 		root:       realRoot,
+		rootInfo:   rootInfo,
 		env:        cloneMap(cfg.env),
 		allowedEnv: cloneSet(cfg.allowedEnv),
 	}, nil
+}
+
+// WriteFileAtomic writes a regular file through an anchored sandbox path and
+// atomically replaces the destination. Platform implementations must never
+// follow a symlink outside Root; platforms that cannot enforce that invariant
+// fail closed.
+func (s *Sandbox) WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	return s.writeFileAtomic(path, data, mode, nil)
 }
 
 func WithEnvironment(env map[string]string) Option {
@@ -110,6 +124,30 @@ func (s *Sandbox) Resolve(path string) (string, error) {
 		return "", fmt.Errorf("%w: %s", ErrPathEscape, path)
 	}
 	return resolved, nil
+}
+
+func (s *Sandbox) relativePath(path string) (string, error) {
+	if s == nil || s.root == "" || s.rootInfo == nil {
+		return "", fmt.Errorf("%w: sandbox is not initialized", ErrInvalidWorkspace)
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("%w: path is required", ErrInvalidWorkspace)
+	}
+
+	target := path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(s.root, target)
+	}
+	target, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve sandbox path: %w", err)
+	}
+	rel, err := filepath.Rel(s.root, filepath.Clean(target))
+	if err != nil || rel == "." || rel == "" || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %s", ErrPathEscape, path)
+	}
+	return rel, nil
 }
 
 func (s *Sandbox) Environment() map[string]string {

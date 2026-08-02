@@ -5,18 +5,19 @@ import (
 	"io"
 )
 
-const rootHelp = `Ouvrier - the terminal agent that builds, reviews, and ships Go workers.
+const rootHelp = `Ouvrier - the terminal agent that builds, reviews, and validates Go workers.
 
 Usage:
-  ouvrier              Open the agent cockpit (build/review/deploy by prompt)
+  ouvrier              Open the agent cockpit (construct/review/audit/build)
   ouvrier -p "<goal>"  Run one agent prompt non-interactively
   ouvrier -c           Resume the latest session
   ouvrier ide          Review/edit/rebuild a worker in the IDE (gopls + Ouvrier snippets)
   ouvrier version      Print the ouvrier CLI version
 
-Inside the cockpit, describe the worker you want; the agent scaffolds it,
-audits, lets you review, builds, and deploys over SSH - pausing for your
-approval before anything irreversible.
+Inside the cockpit, describe the worker you want; the governed harness
+scaffolds it, audits it, lets you review it, and produces a verified local
+artifact. Deployment commands remain compatibility-only while that product
+workstream is paused.
 
 Advanced (CI/debug) subcommands remain available but are not the product
 surface; run "ouvrier <command> --help" for their details.
@@ -38,14 +39,16 @@ Usage: ouvrier operate [flags]
 
 The interactive cockpit is a prompt-first agent harness specialized for
 manufacturing Ouvrier workers. Type a goal, review the visible tool transcript,
-let the harness scaffold/patch/audit/build/transfer, and keep workers as normal
-Go projects. Codex is used only as a local driver; Ouvrier never stores Codex
-credentials.
+let the harness scaffold/patch/audit/build, and keep workers as normal Go
+projects. Codex is used only as a local driver; Ouvrier never stores Codex
+credentials. Transfer remains an explicit compatibility command and is not a
+cockpit completion criterion while deployment development is paused.
 
 Options:
       --dir string          Worker/project directory (default ".")
       --agent string        Agent driver for edits: codex or manual (default "codex")
-      --codex-mode string   Codex transport: auto, exec, or app-server (default "auto")
+      --codex-mode string   Codex transport: auto/exec, or experimental
+                            app-server opt-in (default "auto")
       --model string        provider/model for the tool-calling loop, e.g.
                             anthropic/claude-sonnet-4-6 (needs the matching API
                             key; falls back to the keyword planner if unset)
@@ -57,6 +60,8 @@ Options:
       --json                Shortcut for --mode json
       --target string       Build/deploy target, e.g. linux/amd64
       --allow-failed        Override audit/review gates for build or transfer
+      --auto-safe           Start in auto-safe permission posture; the TUI and
+                            headless modes otherwise start manual/fail-closed
   -h, --help                Show this help message
 
 Review worker mode:

@@ -21,6 +21,11 @@ type pendingCall struct {
 // is appended once, so subsequent resumes are idempotent and provider history
 // remains structurally valid.
 func (r *AgentRuntime) recoverInterruptedCalls(session *Session, entries []TranscriptEntry) ([]TranscriptEntry, error) {
+	var err error
+	entries, err = normalizeLegacyToolCallIDs(entries)
+	if err != nil {
+		return nil, err
+	}
 	pending := make(map[string]pendingCall)
 	calls := make(map[string]pendingCall)
 	var order []string
@@ -108,7 +113,7 @@ func (r *AgentRuntime) ensureInterruptedAudits(session *Session, entries []Trans
 
 func readToolCallAuditIDs(path string) (map[string]bool, error) {
 	ids := make(map[string]bool)
-	file, err := os.Open(path)
+	file, err := openSessionArtifact(path, os.O_RDONLY, 0, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return ids, nil
 	}
@@ -117,7 +122,7 @@ func readToolCallAuditIDs(path string) (map[string]bool, error) {
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxJSONLLineBytes+1)
 	line := 0
 	for scanner.Scan() {
 		line++

@@ -285,7 +285,7 @@ func newTestManager(t *testing.T, h *testHarness, opts Options, deployments ...d
 		opts.Dir = dir
 	}
 	if opts.SocketDir == "" {
-		opts.SocketDir = filepath.Join(t.TempDir(), "tun")
+		opts.SocketDir = shortTestSocketDir(t)
 	}
 	if opts.Remote == nil {
 		opts.Remote = &fakeRemote{envFor: func(int) string { return "" }}
@@ -296,6 +296,19 @@ func newTestManager(t *testing.T, h *testHarness, opts Options, deployments ...d
 	}
 	t.Cleanup(func() { _ = m.Close() })
 	return m
+}
+
+// shortTestSocketDir avoids embedding the test name in Unix socket paths.
+// Go's t.TempDir path can exceed the platform socket limit when TMPDIR itself
+// is deliberately anchored in a long CI workspace.
+func shortTestSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ovr-tun-")
+	if err != nil {
+		t.Fatalf("create short socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func okHandler() http.Handler {

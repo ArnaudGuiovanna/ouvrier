@@ -41,9 +41,10 @@ type Store interface {
 	// CompleteToolIntent stamps completed_at and errors when no intent row
 	// exists. RunCheckpoints orders by step index, ToolIntents by started_at
 	// then tool call id, RunJournals by created_at then exec id.
-	// PruneRunJournal deletes one execution's journal, checkpoints, and
-	// intents; PruneRunJournalsBefore deletes every journal created before
-	// the cutoff (cascading the same way) and returns the pruned exec ids.
+	// PruneRunJournal deletes one terminal execution's journal, checkpoints,
+	// and intents; it is a safe no-op for running/unknown executions and runs
+	// with a pending approval. PruneRunJournalsBefore applies the same safety
+	// gate to journals created before the cutoff and returns only deleted ids.
 	SaveRunJournal(context.Context, RunJournal) error
 	RunJournal(context.Context, string) (RunJournal, bool, error)
 	RunJournals(context.Context) ([]RunJournal, error)

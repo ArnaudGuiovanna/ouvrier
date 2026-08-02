@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
 )
 
 func TestResumeMarksInterruptedToolCallOnce(t *testing.T) {
@@ -75,6 +78,205 @@ func TestResumeMarksInterruptedToolCallOnce(t *testing.T) {
 	if audit["tool_call_id"] != "call-1" {
 		t.Fatalf("audit tool_call_id = %v", audit["tool_call_id"])
 	}
+}
+
+func TestResumePreservesOneAssistantGroupForMultipleToolCalls(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalWorker(t, dir)
+	toolStarted := make(chan struct{})
+	executions := make(chan string, 2)
+	registry := &ToolRegistry{tools: map[string]Tool{}}
+	registry.Register(Tool{
+		Name:       "blocking_probe",
+		Governance: GovReadOnly,
+		Run: func(ctx context.Context, _ ToolEnv, input map[string]any) (ToolResult, error) {
+			id, _ := input["id"].(string)
+			executions <- id
+			if id == "first" {
+				close(toolStarted)
+				<-ctx.Done()
+				return ToolResult{Summary: "first interrupted"}, ctx.Err()
+			}
+			return ToolResult{Summary: "second must only be recovered"}, nil
+		},
+	})
+	toolSchemas["blocking_probe"] = `{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}`
+	t.Cleanup(func() { delete(toolSchemas, "blocking_probe") })
+	model := &scriptedModel{steps: []provider.Response{{
+		Text:       "running both probes",
+		StopReason: provider.StopToolUse,
+		ToolCalls: []provider.ToolCall{
+			{ID: "resume-c1", Name: "blocking_probe", Arguments: json.RawMessage(`{"id":"first"}`)},
+			{ID: "resume-c2", Name: "blocking_probe", Arguments: json.RawMessage(`{"id":"second"}`)},
+		},
+	}}}
+	runtime, err := NewAgentRuntime(RuntimeOptions{
+		Dir: dir, Driver: ManualDriver{}, Model: model, ModelID: "test/model", Tools: registry,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	type promptResult struct {
+		turn RuntimeTurn
+		err  error
+	}
+	done := make(chan promptResult, 1)
+	go func() {
+		turn, promptErr := runtime.Prompt(ctx, started.Session.ID, "run both probes")
+		done <- promptResult{turn: turn, err: promptErr}
+	}()
+	<-toolStarted
+	cancel()
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("Prompt() error = %v, want context cancellation", result.err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumeModel := &scriptedModel{steps: []provider.Response{{Text: "resumed safely", StopReason: provider.StopEndTurn}}}
+	resumer, err := NewAgentRuntime(RuntimeOptions{
+		Dir: dir, Driver: ManualDriver{}, Model: resumeModel, ModelID: "test/model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resumer.Close() })
+	resumed, err := resumer.Resume(context.Background(), started.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInterruptedResultCount(t, resumed.Transcript, "resume-c2", 1)
+	select {
+	case executed := <-executions:
+		if executed != "first" {
+			t.Fatalf("executed tool = %q, want first", executed)
+		}
+	default:
+		t.Fatal("first tool was not executed")
+	}
+	select {
+	case unexpected := <-executions:
+		t.Fatalf("second sibling executed before recovery: %q", unexpected)
+	default:
+	}
+
+	if _, err := resumer.Prompt(context.Background(), resumed.Session.ID, "continue after recovery"); err != nil {
+		t.Fatalf("resumed Prompt() error = %v", err)
+	}
+	if len(resumeModel.requests) != 1 {
+		t.Fatalf("resumed provider requests = %d, want one", len(resumeModel.requests))
+	}
+	messages := resumeModel.requests[0].Messages
+	_, err = historyMessages(resumed.Transcript)
+	if err != nil {
+		t.Fatalf("historyMessages() error = %v", err)
+	}
+	groupIndex := -1
+	var callIDs []string
+	for index, message := range messages {
+		for _, block := range message.Blocks {
+			if block.Type == provider.BlockToolCall && block.ToolCall != nil {
+				groupIndex = index
+				callIDs = append(callIDs, block.ToolCall.ID)
+			}
+		}
+	}
+	if !slices.Equal(callIDs, []string{"resume-c1", "resume-c2"}) {
+		t.Fatalf("resumed assistant call IDs = %v", callIDs)
+	}
+	if groupIndex < 0 || groupIndex+1 >= len(messages) ||
+		messages[groupIndex+1].Role != provider.RoleTool || len(messages[groupIndex+1].Blocks) != 2 {
+		t.Fatalf("resumed provider history does not contain one assistant group followed by both results: %+v", messages)
+	}
+}
+
+func TestResumeRejectsDuplicateDurableToolCallIDs(t *testing.T) {
+	dir := t.TempDir()
+	runtime, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := runtime.transcript(started.Session)
+	for _, entry := range []TranscriptEntry{
+		{SessionID: started.Session.ID, Kind: TranscriptToolCall, ToolName: "first", Metadata: map[string]any{"tool_call_id": "reused-call"}},
+		{SessionID: started.Session.ID, Kind: TranscriptToolResult, ToolName: "first", Metadata: map[string]any{"tool_call_id": "reused-call"}},
+		{SessionID: started.Session.ID, Kind: TranscriptToolCall, ToolName: "second", Metadata: map[string]any{"tool_call_id": "reused-call"}},
+	} {
+		if _, err := store.Append(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resumer.Close() })
+	if _, err := resumer.Resume(context.Background(), started.Session.ID); err == nil || !strings.Contains(err.Error(), "duplicate tool call id") {
+		t.Fatalf("Resume() error = %v, want fail-closed duplicate ID rejection", err)
+	}
+}
+
+func TestResumeRecoversLegacyToolCallWithoutIDOnce(t *testing.T) {
+	dir := t.TempDir()
+	runtime, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := runtime.Start(context.Background(), RuntimeStartRequest{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyCall, err := runtime.transcript(started.Session).Append(TranscriptEntry{
+		SessionID: started.Session.ID, Kind: TranscriptToolCall, ToolName: "legacy_probe", Input: map[string]any{"value": "old"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyID := syntheticLegacyToolCallID(legacyCall, 1) // the start status is entry zero
+	resumer, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := resumer.Resume(context.Background(), started.Session.ID)
+	if err != nil {
+		t.Fatalf("first Resume() error = %v", err)
+	}
+	assertInterruptedResultCount(t, resumed.Transcript, legacyID, 1)
+	if _, err := historyMessages(resumed.Transcript); err != nil {
+		t.Fatalf("legacy resumed history error = %v", err)
+	}
+	if err := resumer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := NewAgentRuntime(RuntimeOptions{Dir: dir, Driver: ManualDriver{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	resumedAgain, err := again.Resume(context.Background(), started.Session.ID)
+	if err != nil {
+		t.Fatalf("second Resume() error = %v", err)
+	}
+	assertInterruptedResultCount(t, resumedAgain.Transcript, legacyID, 1)
 }
 
 func TestResumeAfterRealProcessKill(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/policy"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
 var (
@@ -159,39 +160,91 @@ func (e *Executor) Execute(ctx context.Context, call provider.ToolCall) (result 
 		if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
 			return errorResult(call, err), nil
 		}
-		skip, err := reserveIdempotency(toolCtx, tool, call.Arguments)
+		skip, claim, err := reserveIdempotency(toolCtx, tool, call.Arguments)
 		if err != nil {
 			return errorResult(call, err), nil
 		}
 		if skip {
 			return duplicateIdempotentResult(call)
 		}
-		return e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
-			result, err := tool.handler.Execute(toolCtx, call)
+		result, executeErr := e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
+			result, err := invokeToolCall(call, func() (provider.ToolResult, error) {
+				return tool.handler.Execute(toolCtx, call)
+			})
 			if err != nil {
+				var failure toolExecutionFailure
+				if errors.As(err, &failure) {
+					return provider.ToolResult{}, err
+				}
 				return provider.ToolResult{}, toolExecutionFailure{err: err}
 			}
 			return result, nil
 		})
+		return settleIdempotency(ctx, claim, result, executeErr)
 	}
 
 	if err := validateToolArguments(tool.metadata.InputSchema, call.Arguments); err != nil {
 		return errorResult(call, err), nil
 	}
-	skip, err := reserveIdempotency(toolCtx, tool, call.Arguments)
+	args, err := buildCallArgs(toolCtx, tool.typ, tool.metadata, call.Arguments)
+	if err != nil {
+		return errorResult(call, err), nil
+	}
+	skip, claim, err := reserveIdempotency(toolCtx, tool, call.Arguments)
 	if err != nil {
 		return errorResult(call, err), nil
 	}
 	if skip {
 		return duplicateIdempotentResult(call)
 	}
-	args, err := buildCallArgs(toolCtx, tool.typ, tool.metadata, call.Arguments)
-	if err != nil {
-		return errorResult(call, err), nil
-	}
-	return e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
-		return toolResultFromValues(call, tool.fn.Call(args))
+	result, executeErr := e.executeWithIntent(toolCtx, tool, call, func() (provider.ToolResult, error) {
+		return invokeToolCall(call, func() (provider.ToolResult, error) {
+			return toolResultFromValues(call, tool.fn.Call(args))
+		})
 	})
+	return settleIdempotency(ctx, claim, result, executeErr)
+}
+
+// invokeToolCall converts a user tool panic into a definite tool failure. This
+// keeps the process alive and, for an explicitly idempotent tool, lets the
+// outcome-aware reservation move to failed instead of remaining pending
+// forever. Panics outside the user invocation still hit Execute's outer safety
+// net and remain indeterminate.
+func invokeToolCall(call provider.ToolCall, invoke func() (provider.ToolResult, error)) (result provider.ToolResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = provider.ToolResult{}
+			err = toolExecutionFailure{err: fmt.Errorf("tool panic: %v", recovered)}
+		}
+	}()
+	return invoke()
+}
+
+func settleIdempotency(ctx context.Context, claim *idempotencyClaim, result provider.ToolResult, executeErr error) (provider.ToolResult, error) {
+	if claim == nil {
+		return result, executeErr
+	}
+	var outcome state.IdempotencyOutcome
+	switch {
+	case executeErr == nil && result.IsError:
+		outcome = state.IdempotencyFailed
+	case executeErr == nil:
+		outcome = state.IdempotencySucceeded
+	case errors.Is(executeErr, context.Canceled), errors.Is(executeErr, context.DeadlineExceeded):
+		// Cancellation leaves the effect indeterminate. Keep the reservation
+		// pending so neither this execution nor another one silently replays it.
+		return result, executeErr
+	default:
+		var toolFailure toolExecutionFailure
+		if !errors.As(executeErr, &toolFailure) {
+			return result, executeErr
+		}
+		outcome = state.IdempotencyFailed
+	}
+	if err := claim.resolve(ctx, outcome); err != nil {
+		return result, errors.Join(executeErr, err)
+	}
+	return result, executeErr
 }
 
 // executeWithIntent brackets a non-read tool invocation with the durable-run
@@ -497,10 +550,9 @@ func successResult(call provider.ToolCall, value any) (provider.ToolResult, erro
 	}, nil
 }
 
-// duplicateIdempotentResult is the success answer for an idempotent call
-// whose reservation this execution already holds: the call was performed (or
-// is being deduped within the run), so the model gets a definite non-error
-// outcome instead of a misleading failure — the durable-run replay contract.
+// duplicateIdempotentResult is the success answer for an idempotent call whose
+// outcome this execution already resolved as succeeded. Pending and failed
+// reservations never reach this path.
 func duplicateIdempotentResult(call provider.ToolCall) (provider.ToolResult, error) {
 	return successResult(call, "duplicate idempotent call skipped: already performed by this execution")
 }

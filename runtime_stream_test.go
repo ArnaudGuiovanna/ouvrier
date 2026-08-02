@@ -11,6 +11,7 @@ import (
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/events"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
+	runtimeplan "github.com/ArnaudGuiovanna/ouvrier/internal/runtime"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/state"
 )
 
@@ -161,6 +162,110 @@ func TestRunStreamPlanOnceSkipsDuplicateDeliveryWhenStateStoreConfigured(t *test
 	}
 	if idempotencyEvents != 2 || duplicateDecisions != 1 {
 		t.Fatalf("idempotency events=%d duplicate=%d, want reserved and duplicate decisions", idempotencyEvents, duplicateDecisions)
+	}
+}
+
+func TestConcurrentStreamDeliveryParksPendingReservationWithoutExecutingTwice(t *testing.T) {
+	store := state.NewMemoryStore()
+	stream, err := events.NewEventStream()
+	if err != nil {
+		t.Fatalf("NewEventStream returned error: %v", err)
+	}
+	plans, err := compilePlans([]Node{
+		From(Stream("kafka://tickets")),
+		Pipe("summarize ticket event", Model("test/stream-concurrency")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	provider := newGatedStreamProvider()
+	rt := httpRuntime{provider: provider, stateStore: store, eventStream: stream}
+	delivery := streamMessage{ID: "delivery-concurrent", Body: `{"event":"created"}`}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, runErr := runStreamPlanOnce(context.Background(), rt, plans[0], delivery)
+		firstDone <- runErr
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("first delivery did not reach the provider")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, pendingErr := runStreamPlanOnce(ctx, rt, plans[0], delivery)
+	cancel()
+	if !errors.Is(pendingErr, errStreamIdempotencyPending) {
+		t.Fatalf("concurrent delivery error = %v, want pending reservation", pendingErr)
+	}
+	if calls := provider.callCount(); calls != 1 {
+		t.Fatalf("provider calls while reservation pending = %d, want exactly one", calls)
+	}
+
+	nacked, acked := false, false
+	parked := delivery
+	parked.ack = func(context.Context) error {
+		acked = true
+		return nil
+	}
+	parked.nack = func(_ context.Context, deliveryErr error) error {
+		nacked = errors.Is(deliveryErr, errStreamIdempotencyPending)
+		return nil
+	}
+	if err := rt.processStreamMessage(context.Background(), plans[0], parked, newStreamAttemptTracker()); err != nil {
+		t.Fatalf("process pending stream delivery returned error: %v", err)
+	}
+	if !nacked || acked {
+		t.Fatalf("pending delivery acked=%v nacked=%v, want parked with nack only", acked, nacked)
+	}
+	if calls := provider.callCount(); calls != 1 {
+		t.Fatalf("provider calls after parked redelivery = %d, want exactly one", calls)
+	}
+
+	close(provider.release)
+	select {
+	case runErr := <-firstDone:
+		if runErr != nil {
+			t.Fatalf("first delivery returned error: %v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first delivery did not finish after provider release")
+	}
+	if _, err := runStreamPlanOnce(context.Background(), rt, plans[0], delivery); err != nil {
+		t.Fatalf("completed duplicate returned error: %v", err)
+	}
+	if calls := provider.callCount(); calls != 1 {
+		t.Fatalf("provider calls after completed duplicate = %d, want exactly one", calls)
+	}
+	if _, ok := findStreamIdempotencyDecision(stream.List(), "in_progress"); !ok {
+		t.Fatalf("events = %+v, want observable in_progress decision", stream.List())
+	}
+}
+
+func TestStreamReservationSetupFailureBecomesRetryable(t *testing.T) {
+	base := state.NewMemoryStore()
+	failing := streamFailSaveSessionStore{Store: base, IdempotencyOutcomeStore: base}
+	plans, err := compilePlans([]Node{
+		From(Stream("kafka://tickets")),
+		Sink(Log()),
+	})
+	if err != nil {
+		t.Fatalf("compilePlans returned error: %v", err)
+	}
+	delivery := streamMessage{ID: "delivery-setup-failure", Body: `{"event":"created"}`}
+
+	if _, err := runStreamPlanOnce(context.Background(), httpRuntime{stateStore: failing}, plans[0], delivery); err == nil {
+		t.Fatal("runStreamPlanOnce returned nil, want injected SaveSession failure")
+	}
+	key := streamIdempotencyReservationKey(plans[0], delivery.ID)
+	record, found, err := base.Idempotency(context.Background(), key)
+	if err != nil || !found || record.Outcome != state.IdempotencyFailed {
+		t.Fatalf("reservation after setup failure = %+v found=%v err=%v, want failed", record, found, err)
+	}
+	if _, err := runStreamPlanOnce(context.Background(), httpRuntime{stateStore: base}, plans[0], delivery); err != nil {
+		t.Fatalf("retry after setup failure returned error: %v", err)
 	}
 }
 
@@ -505,6 +610,50 @@ type blockingStreamProvider struct {
 	maxActive int
 	delay     time.Duration
 	response  provider.Response
+}
+
+type gatedStreamProvider struct {
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+	release chan struct{}
+}
+
+func newGatedStreamProvider() *gatedStreamProvider {
+	return &gatedStreamProvider{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (p *gatedStreamProvider) Name() string { return "gated-stream" }
+
+func (p *gatedStreamProvider) Complete(ctx context.Context, _ provider.Request) (provider.Response, error) {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+	if call == 1 {
+		close(p.started)
+		select {
+		case <-p.release:
+		case <-ctx.Done():
+			return provider.Response{}, ctx.Err()
+		}
+	}
+	return provider.Response{Text: `{"status":"stream"}`, StopReason: provider.StopEndTurn}, nil
+}
+
+func (p *gatedStreamProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+type streamFailSaveSessionStore struct {
+	state.Store
+	state.IdempotencyOutcomeStore
+}
+
+func (streamFailSaveSessionStore) SaveSession(context.Context, runtimeplan.Session) error {
+	return errors.New("injected SaveSession failure")
 }
 
 func (p *blockingStreamProvider) Name() string {
