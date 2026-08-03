@@ -184,6 +184,10 @@ func TestRunBuildCompilesScaffoldedProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scaffold.Generate() error = %v", err)
 	}
+	goSumPath := filepath.Join(project.Dir, "go.sum")
+	if err := os.Remove(goSumPath); err != nil {
+		t.Fatalf("remove scaffolded go.sum: %v", err)
+	}
 
 	var out, errOut bytes.Buffer
 	app := New("dev", WithStreams(nil, &out, &errOut))
@@ -198,6 +202,9 @@ func TestRunBuildCompilesScaffoldedProject(t *testing.T) {
 	}
 	if _, err := os.Stat(bin); err != nil {
 		t.Fatalf("expected binary at %s: %v\nstdout=%s\nstderr=%s", bin, err, out.String(), errOut.String())
+	}
+	if info, err := os.Stat(goSumPath); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("build did not restore go.sum at %s: %v", goSumPath, err)
 	}
 }
 

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ArnaudGuiovanna/ouvrier/internal/scaffold"
 )
 
 func TestDefaultAuditSandboxClearsSecretsProtectsSourceAndDeniesNetwork(t *testing.T) {
@@ -158,5 +160,54 @@ func main() {
 	}
 	if current, err := stableCandidateSourceSnapshot(dir); err != nil || current != before {
 		t.Fatalf("final build changed source: current=%+v err=%v before=%+v", current, err, before)
+	}
+}
+
+func TestDefaultAuditAndBuildHandleMissingGoSumWithoutChangingWorker(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := scaffold.Generate(context.Background(), scaffold.Config{
+		Name: "missing-sum-worker", Trigger: "POST /tickets", Model: "anthropic/claude-sonnet-4-6",
+		Dir: t.TempDir(), FrameworkDir: root,
+	})
+	if err != nil {
+		t.Fatalf("scaffold worker: %v", err)
+	}
+	goSumPath := filepath.Join(project.Dir, "go.sum")
+	if err := os.Remove(goSumPath); err != nil {
+		t.Fatalf("remove scaffolded go.sum: %v", err)
+	}
+	before, err := stableCandidateSourceSnapshot(project.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	report, err := NewAuditRunner().Run(ctx, project.Dir)
+	if err != nil {
+		t.Fatalf("audit worker without go.sum: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("audit worker without go.sum failed: %+v", report.Results)
+	}
+	artifact, err := (BuildCoordinator{}).Build(ctx, "missing-sum-session", project.Dir, "linux/amd64", ProgressWriter{})
+	if err != nil {
+		t.Fatalf("build worker without go.sum: %v", err)
+	}
+	if artifact.SourceSHA256 != before.SHA256 {
+		t.Fatalf("artifact source = %s, want %s", artifact.SourceSHA256, before.SHA256)
+	}
+	if _, err := os.Stat(goSumPath); !os.IsNotExist(err) {
+		t.Fatalf("sandboxed audit/build created live go.sum: %v", err)
+	}
+	after, err := stableCandidateSourceSnapshot(project.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("sandboxed audit/build changed worker: before=%+v after=%+v", before, after)
 	}
 }

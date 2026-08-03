@@ -106,7 +106,13 @@ func Build(ctx context.Context, cfg BuildConfig, out, errOut io.Writer, runner G
 	// -buildvcs=false avoids "error obtaining VCS status" when the project
 	// lives outside a git checkout (e.g. fresh `ouvrier new` output) or has
 	// no commits yet. We are not embedding VCS metadata anyway.
-	args := []string{"build", "-buildvcs=false", "-o", output}
+	// -mod=mod lets the Go tool restore missing go.sum entries before compiling.
+	// Fresh Ouvrier workers may legitimately start without go.sum (for example
+	// when scaffolded by an installed release that has no source checkout to
+	// copy it from). The Go tool still verifies downloaded modules through the
+	// configured checksum database; this only opts out of the implicit readonly
+	// mode that otherwise makes `ouvrier build` fail before it can repair sums.
+	args := []string{"build", "-mod=mod", "-buildvcs=false", "-o", output}
 	if cfg.Static {
 		args = append(args, "-ldflags", "-s -w")
 	}

@@ -286,7 +286,17 @@ func (s *auditSandbox) prepareVendor(ctx context.Context) error {
 		return err
 	}
 	dependencies = append(dependencies, auditSandboxMount{source: moduleCache, destination: "/gomodcache"})
-	_, stderr, err := s.run(ctx, true, dependencies, s.sandboxGoPath(), "mod", "vendor")
+	// Resolve the complete module graph in the disposable stage before
+	// vendoring. Tidy recreates a missing go.sum, including the transitive
+	// go.mod checksums that `go mod vendor` requires, from the already-populated
+	// module cache. This command remains networkless and sandboxed, and any
+	// go.mod/go.sum edits land only in the staged copy, preserving the
+	// source-bound live worker.
+	_, stderr, err := s.run(ctx, true, dependencies, s.sandboxGoPath(), "mod", "tidy")
+	if err != nil {
+		return fmt.Errorf("operate: resolve offline audit module sums: %s: %w", strings.TrimSpace(stderr), err)
+	}
+	_, stderr, err = s.run(ctx, true, dependencies, s.sandboxGoPath(), "mod", "vendor")
 	if err != nil {
 		return fmt.Errorf("operate: prepare offline audit dependencies: %s: %w", strings.TrimSpace(stderr), err)
 	}
