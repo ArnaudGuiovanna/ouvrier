@@ -288,6 +288,7 @@ func (m *wizardModel) buildConfig() scaffold.Config {
 		Dir:             m.parentDir,
 		FrameworkModule: m.frameworkModule,
 		FrameworkDir:    m.frameworkDir,
+		InitializeGit:   true,
 	}
 }
 

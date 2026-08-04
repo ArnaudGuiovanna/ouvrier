@@ -72,12 +72,9 @@ func (r *AgentRuntime) planSlash(text string) promptPlan {
 		names := r.Tools.Names()
 		return promptPlan{Assistant: "Available Ouvrier tools:\n- " + strings.Join(names, "\n- ")}
 	case "policy":
-		return promptPlan{Assistant: "Policy: Ouvrier-native tools are the only path for scaffold, review, audit, build, and transfer. Codex edits run through the configured Driver, session artifacts are JSONL/JSON, and Ouvrier stores no Codex subscription tokens."}
+		return promptPlan{Assistant: "Policy: Ouvrier-native tools are the only path for scaffold, review, audit, build, and transfer. Coding-agent edits run through the configured governed Driver, session artifacts are JSONL/JSON, and Ouvrier stores no Codex or Claude tokens."}
 	case "login":
-		if len(rest) == 0 || strings.EqualFold(rest[0], "codex") {
-			return promptPlan{Tools: []plannedTool{{Name: "login_codex"}}}
-		}
-		return promptPlan{Assistant: "Only /login codex is implemented in v0.5."}
+		return promptPlan{Assistant: "Agent readiness and saved local sessions are detected during cockpit startup. Restart Ouvrier to choose another ready agent; Ouvrier stores no credentials."}
 	case "new-worker", "create-worker":
 		opts := parseCommandOptions(rest)
 		spec := workerSpecFromOptions(opts, strings.Join(opts.positionals, " "))
@@ -436,7 +433,6 @@ func firstNonEmpty(values ...string) string {
 func operateSlashHelp() string {
 	return strings.Join([]string{
 		"Operate commands:",
-		"/login codex",
 		"/new worker <name> --trigger \"POST /tickets\" --model anthropic/claude-sonnet-4-6",
 		"/review [subject]",
 		"/fix [subject]",

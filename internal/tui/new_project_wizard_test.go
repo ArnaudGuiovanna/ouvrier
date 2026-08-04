@@ -254,6 +254,9 @@ func TestWizardReviewYInvokesGenerateAndStoresProject(t *testing.T) {
 	if captured.Name != "demo" || captured.Trigger != "POST /tickets" || captured.Model != defaultModel {
 		t.Fatalf("captured cfg = %+v, want demo/POST tickets/default model", captured)
 	}
+	if !captured.InitializeGit {
+		t.Fatal("wizard scaffold did not request a clean Git baseline")
+	}
 	if captured.Dir != "/tmp" {
 		t.Fatalf("captured.Dir = %q, want /tmp", captured.Dir)
 	}

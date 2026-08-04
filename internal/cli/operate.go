@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 
-	authpkg "github.com/ArnaudGuiovanna/ouvrier/internal/auth"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/tui"
 )
@@ -21,6 +21,7 @@ type RunOperateFunc func(ctx context.Context, in io.Reader, out io.Writer, opts 
 type operateConfig struct {
 	Dir       string
 	Agent     string
+	AgentBin  string
 	CodexMode string
 	Session   string
 	Goal      string
@@ -77,43 +78,83 @@ func (app *App) runOperateCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Agent == "auto" && cfg.Mode == "tui" && !cfg.Print && strings.TrimSpace(cfg.Prompt) == "" &&
+		app.interactive != nil && app.interactive(app.in, app.out) {
+		choices := agentChoices(app.discoverAgents(ctx))
+		selectedID, pickErr := app.runAgentPicker(ctx, app.in, app.out, choices)
+		if pickErr != nil {
+			if errors.Is(pickErr, tui.ErrNoReadyAgent) {
+				return fmt.Errorf("%w: no ready ACP coding agent was detected; open Codex or Claude once so its local session is available", ErrUsage)
+			}
+			return pickErr
+		}
+		cfg.Agent = selectedID
+	}
+	cfg, selected, err := app.resolveOperateAgent(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	driver, _, _, err := operateDriver(cfg)
 	if err != nil {
 		return err
 	}
-	model, modelID, err := resolveAgentModel(cfg.Model, cfg.CodexMode, cfg.Dir, app.signedIn)
+	model, modelID, err := resolveSelectedAgentModel(cfg.Agent, cfg.Model, cfg.CodexMode, cfg.Dir, func() bool {
+		return selected.ID == "codex" && selected.AuthState == "authed"
+	})
 	if err != nil {
 		return err
 	}
 	if cfg.Mode != "tui" || cfg.Print || strings.TrimSpace(cfg.Prompt) != "" {
 		return app.runOperatePromptMode(ctx, cfg, driver, model, modelID)
 	}
-	authState := "unauthed"
-	authAccount := ""
-	if app.signedIn != nil && app.signedIn() {
-		authState = "authed"
-		if _, acct := (&authpkg.Codex{}).Probe(ctx); acct != "" {
-			authAccount = acct
-		}
-	}
 	return app.runOperate(ctx, app.in, app.out, tui.OperateOptions{
-		Dir:         cfg.Dir,
-		Agent:       cfg.Agent,
-		CodexMode:   cfg.CodexMode,
-		Session:     cfg.Session,
-		Goal:        cfg.Goal,
-		Driver:      driver,
-		Env:         cfg.Env,
-		EnvFile:     cfg.EnvFile,
-		Target:      cfg.Target,
-		Keep:        cfg.Keep,
-		AllowFail:   cfg.AllowFail,
-		AutoSafe:    cfg.AutoSafe,
-		Model:       model,
-		ModelID:     modelID,
-		AuthState:   authState,
-		AuthAccount: authAccount,
+		Dir:            cfg.Dir,
+		Agent:          cfg.Agent,
+		CodexMode:      cfg.CodexMode,
+		Session:        cfg.Session,
+		Goal:           cfg.Goal,
+		Driver:         driver,
+		Env:            cfg.Env,
+		EnvFile:        cfg.EnvFile,
+		Target:         cfg.Target,
+		Keep:           cfg.Keep,
+		AllowFail:      cfg.AllowFail,
+		AutoSafe:       cfg.AutoSafe,
+		Model:          model,
+		ModelID:        modelID,
+		AgentTransport: selected.Transport,
+		AuthState:      selected.AuthState,
+		AuthAccount:    selected.AuthAccount,
 	})
+}
+
+func agentChoices(rows []agentStatus) []tui.AgentChoice {
+	choices := make([]tui.AgentChoice, 0, len(rows))
+	for _, row := range rows {
+		label := row.ID
+		switch row.ID {
+		case "codex":
+			label = "Codex"
+		case "claude":
+			label = "Claude Code"
+		}
+		choices = append(choices, tui.AgentChoice{
+			ID: row.ID, Label: label, Transport: row.Transport,
+			Auth: row.Auth, Ready: row.Ready, Detail: row.Detail,
+		})
+	}
+	return choices
+}
+
+func defaultInteractiveStreams(in io.Reader, out io.Writer) bool {
+	inFile, inOK := in.(*os.File)
+	outFile, outOK := out.(*os.File)
+	if !inOK || !outOK {
+		return false
+	}
+	inInfo, inErr := inFile.Stat()
+	outInfo, outErr := outFile.Stat()
+	return inErr == nil && outErr == nil && inInfo.Mode()&os.ModeCharDevice != 0 && outInfo.Mode()&os.ModeCharDevice != 0
 }
 
 func (app *App) runOperatePromptMode(ctx context.Context, cfg operateConfig, driver operate.Driver, model operate.AgentModel, modelID string) error {
@@ -452,6 +493,10 @@ func (app *App) runOperateReviewWorker(ctx context.Context, args []string) error
 	if err != nil {
 		return err
 	}
+	cfg, _, err = app.resolveOperateAgent(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	driver, driverID, codexMode, err := operateDriver(cfg)
 	if err != nil {
 		return err
@@ -501,6 +546,10 @@ func (app *App) runOperatePatch(ctx context.Context, args []string) error {
 	if strings.TrimSpace(cfg.Goal) == "" {
 		return fmt.Errorf("%w: operate patch requires --goal", ErrUsage)
 	}
+	cfg, _, err = app.resolveOperateAgent(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	driver, driverID, codexMode, err := operateDriver(cfg)
 	if err != nil {
 		return err
@@ -526,6 +575,10 @@ func (app *App) runOperatePatch(ctx context.Context, args []string) error {
 
 func (app *App) runOperateFixWorker(ctx context.Context, args []string) error {
 	cfg, err := parseOperateFlags(args)
+	if err != nil {
+		return err
+	}
+	cfg, _, err = app.resolveOperateAgent(ctx, cfg)
 	if err != nil {
 		return err
 	}

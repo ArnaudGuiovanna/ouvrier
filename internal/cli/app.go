@@ -20,6 +20,10 @@ import (
 // have to drive the Bubble Tea runtime.
 type RunNewFunc func(ctx context.Context, in io.Reader, out io.Writer, parentDir string) (*scaffold.Project, error)
 
+// RunAgentPickerFunc launches the startup coding-agent chooser. The seam is
+// injectable so CLI tests do not need a real terminal.
+type RunAgentPickerFunc func(ctx context.Context, in io.Reader, out io.Writer, choices []tui.AgentChoice) (string, error)
+
 var (
 	ErrUnknownCommand = errors.New("unknown command")
 	ErrUsage          = errors.New("usage error")
@@ -33,7 +37,9 @@ type App struct {
 	runNew  RunNewFunc
 	// runOperate launches the interactive v0.4 worker-builder cockpit. Tests
 	// substitute a fake implementation so they do not drive Bubble Tea.
-	runOperate RunOperateFunc
+	runOperate     RunOperateFunc
+	runAgentPicker RunAgentPickerFunc
+	interactive    func(io.Reader, io.Writer) bool
 	// runIDE launches the Ouvrier IDE TUI. Tests substitute a fake implementation
 	// so they do not drive Bubble Tea.
 	runIDE RunIDEFunc
@@ -42,7 +48,9 @@ type App struct {
 	keyscan deploy.KeyscanRunner
 	// signedIn probes whether a Codex subscription is active. Tests substitute
 	// a stub so they don't shell out to codex.
-	signedIn func() bool
+	signedIn   func() bool
+	claudeAuth claudeAuthProbe
+	agentPath  agentLookPath
 }
 
 type Option func(*App)
@@ -53,14 +61,18 @@ func New(version string, opts ...Option) *App {
 	}
 
 	app := &App{
-		version:    version,
-		in:         os.Stdin,
-		out:        os.Stdout,
-		errOut:     os.Stderr,
-		runNew:     defaultRunNew,
-		runOperate: defaultRunOperate,
-		runIDE:     defaultRunIDE,
-		signedIn:   codexSignedIn,
+		version:        version,
+		in:             os.Stdin,
+		out:            os.Stdout,
+		errOut:         os.Stderr,
+		runNew:         defaultRunNew,
+		runOperate:     defaultRunOperate,
+		runAgentPicker: tui.RunAgentPicker,
+		interactive:    defaultInteractiveStreams,
+		runIDE:         defaultRunIDE,
+		signedIn:       codexSignedIn,
+		claudeAuth:     defaultClaudeAuthProbe,
+		agentPath:      defaultAgentLookPath,
 	}
 	for _, opt := range opts {
 		opt(app)
@@ -84,6 +96,19 @@ func WithStreams(in io.Reader, out io.Writer, errOut io.Writer) Option {
 // func() bool { return false } so they don't shell out to codex.
 func WithSignedIn(fn func() bool) Option {
 	return func(app *App) { app.signedIn = fn }
+}
+
+// withAgentDiscovery is the test seam for Claude auth and ACP adapter
+// discovery. Production always uses the official CLI probe and PATH lookup.
+func withAgentDiscovery(probe claudeAuthProbe, lookPath agentLookPath) Option {
+	return func(app *App) {
+		if probe != nil {
+			app.claudeAuth = probe
+		}
+		if lookPath != nil {
+			app.agentPath = lookPath
+		}
+	}
 }
 
 func (app *App) Run(ctx context.Context, args []string) error {
@@ -125,10 +150,15 @@ func (app *App) run(ctx context.Context, args []string) error {
 		}
 		return app.runOperateCommand(ctx, rest)
 	}
+	if isRootOperateFlag(args[0]) {
+		return app.runOperateCommand(ctx, args)
+	}
 
 	switch args[0] {
 	case "version":
 		return app.runVersion(args[1:])
+	case "agents":
+		return app.runAgentsCommand(ctx, args[1:])
 	case "new":
 		return app.runNewCommand(ctx, args[1:])
 	case "add":
@@ -161,6 +191,16 @@ func (app *App) run(ctx context.Context, args []string) error {
 		return app.runStateCommand(ctx, args[1:])
 	default:
 		return fmt.Errorf("%w %q", ErrUnknownCommand, args[0])
+	}
+}
+
+func isRootOperateFlag(arg string) bool {
+	name, _, _ := strings.Cut(arg, "=")
+	switch name {
+	case "--agent", "--codex-mode", "--dir", "--session", "--goal", "--prompt", "--model", "--mode", "--json", "--print", "--auto-safe":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -203,6 +243,7 @@ func (app *App) runNewCommand(ctx context.Context, args []string) error {
 	if !yes {
 		return fmt.Errorf("%w: pass --yes to scaffold non-interactively, or run without flags for the TUI", ErrUsage)
 	}
+	cfg.InitializeGit = true
 
 	project, err := scaffold.Generate(ctx, cfg)
 	if err != nil {

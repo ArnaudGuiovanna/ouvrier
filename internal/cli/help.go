@@ -11,6 +11,7 @@ Usage:
   ouvrier              Open the agent cockpit (construct/review/audit/build)
   ouvrier -p "<goal>"  Run one agent prompt non-interactively
   ouvrier -c           Resume the latest session
+  ouvrier agents       Detect Codex and Claude readiness
   ouvrier ide          Review/edit/rebuild a worker in the IDE (gopls + Ouvrier snippets)
   ouvrier version      Print the ouvrier CLI version
 
@@ -21,6 +22,15 @@ workstream is paused.
 
 Advanced (CI/debug) subcommands remain available but are not the product
 surface; run "ouvrier <command> --help" for their details.
+`
+
+const agentsHelp = `Detect coding agents available to the Ouvrier cockpit.
+
+Usage: ouvrier agents [--json]
+
+Codex and Claude use ACP v1 through their canonical adapters. Interactive
+startup detects their existing local sessions and opens a chooser; Ouvrier
+never reads, copies, or stores their credentials.
 `
 
 const operateHelp = `Open the local agentic worker-builder cockpit.
@@ -40,18 +50,19 @@ Usage: ouvrier operate [flags]
 The interactive cockpit is a prompt-first agent harness specialized for
 manufacturing Ouvrier workers. Type a goal, review the visible tool transcript,
 let the harness scaffold/patch/audit/build, and keep workers as normal Go
-projects. Codex is used only as a local driver; Ouvrier never stores Codex
-credentials. Transfer remains an explicit compatibility command and is not a
-cockpit completion criterion while deployment development is paused.
+projects. Coding-agent authentication remains owned by the selected CLI;
+Ouvrier never reads or stores Codex or Claude credentials. Transfer remains an
+explicit compatibility command and is not a cockpit completion criterion while
+deployment development is paused.
 
 Options:
       --dir string          Worker/project directory (default ".")
-      --agent string        Agent driver for edits: codex or manual (default "codex")
-      --codex-mode string   Codex transport: auto/exec, or experimental
-                            app-server opt-in (default "auto")
-      --model string        provider/model for the tool-calling loop, e.g.
-                            anthropic/claude-sonnet-4-6 (needs the matching API
-                            key; falls back to the keyword planner if unset)
+	  --agent string        Agent: auto, codex, claude, or manual (default "auto")
+	                        interactive auto opens the detected-agent chooser
+	  --codex-mode string   Codex transport: ACP auto, explicit app-server, or
+	                        reduced legacy exec (default "auto")
+	  --model string        Optional provider/model override. Codex otherwise
+	                        uses its ACP account default; Claude edits use ACP.
       --session string      Resume a local operate session
       --goal string         Pre-fill the first builder prompt
       --prompt string       Run one prompt without opening the TUI
@@ -575,6 +586,10 @@ func printNewHelp(w io.Writer) {
 
 func printVersionHelp(w io.Writer) {
 	fmt.Fprint(w, versionHelp)
+}
+
+func printAgentsHelp(w io.Writer) {
+	fmt.Fprint(w, agentsHelp)
 }
 
 func printBuildHelp(w io.Writer) {

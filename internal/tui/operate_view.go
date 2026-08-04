@@ -13,7 +13,7 @@ import (
 )
 
 // render composes the full cockpit frame: scrolling transcript, optional slash
-// menu, multiline composer, and a status bar — the four Pi-style regions.
+// menu, multiline composer, and the single help affordance requested below it.
 func (m *operateModel) render() string {
 	if !m.ready {
 		return ""
@@ -39,16 +39,18 @@ func (m *operateModel) render() string {
 		sections = append(sections, m.renderApprovalCard(cw))
 	}
 	sections = append(sections,
-		m.renderRule(cw),
-		m.composer.View(),
-		m.renderStatusBar(cw),
+		m.renderComposer(cw),
 		m.renderHints(cw),
 	)
 	return strings.Join(sections, "\n")
 }
 
-func (m *operateModel) renderRule(width int) string {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(dimGreenHex)).Render(strings.Repeat("─", max(width, 1)))
+func (m *operateModel) renderComposer(width int) string {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(dimGreenHex)).
+		Padding(0, 1).
+		Render(m.composer.View())
 }
 
 // renderTranscript renders every block into the viewport content area.
@@ -91,11 +93,9 @@ func (m *operateModel) renderWelcome(width int) string {
 	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
 	lines := []string{
 		accent.Render("◢ Ouvrier Agent Cockpit"),
-		muted.Render("The terminal worker factory — prompt → plan → build → review → deploy."),
+		muted.Render("Describe the worker you want to build."),
 		"",
-		muted.Render("Try: ") + cyan.Render("create a worker that receives POST /tickets and triages it"),
-		muted.Render("Or:  ") + cyan.Render("/review") + muted.Render("  ") + cyan.Render("/audit") + muted.Render("  ") + cyan.Render("/build linux/amd64") + muted.Render("  ") + cyan.Render("/deploy staging"),
-		muted.Render("Type ") + cyan.Render("/") + muted.Render(" for commands, ") + cyan.Render("?") + muted.Render(" for help."),
+		muted.Render("Press ") + cyan.Render("?") + muted.Render(" for help and commands."),
 	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -288,9 +288,12 @@ func (m *operateModel) renderStatusBar(width int) string {
 	switch m.authState {
 	case "authed":
 		acct := shortAuthLabel(m.authAccount)
+		if acct == "" {
+			acct = m.opts.Agent
+		}
 		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(okHex)).Render("auth " + acct)
 	default:
-		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("sign in: /login codex")
+		authSeg = lipgloss.NewStyle().Foreground(lipgloss.Color(yellowHex)).Render("agent session unavailable")
 	}
 
 	modelLabel, modelValue := m.modelStatus()
@@ -317,43 +320,7 @@ func (m *operateModel) renderStatusBar(width int) string {
 func (m *operateModel) renderHints(width int) string {
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color(mutedHex))
 	key := lipgloss.NewStyle().Foreground(lipgloss.Color(cyanHex))
-	parts := []string{
-		key.Render("enter") + hint.Render(" send"),
-		key.Render("alt+enter") + hint.Render(" newline"),
-		key.Render("ctrl+e") + hint.Render(" edit"),
-		key.Render("ctrl+g") + hint.Render(" IDE"),
-		key.Render("ctrl+o") + hint.Render(" fold"),
-		key.Render("!cmd") + hint.Render(" shell"),
-		key.Render("/") + hint.Render(" cmds"),
-		key.Render("?") + hint.Render(" help"),
-		key.Render("ctrl+c") + hint.Render(" quit"),
-	}
-	if m.err != nil {
-		parts = []string{
-			key.Render("pgup/pgdn") + hint.Render(" scroll"),
-			key.Render("?") + hint.Render(" help"),
-			key.Render("ctrl+c") + hint.Render(" quit"),
-		}
-	}
-	if m.running {
-		parts = []string{
-			key.Render("esc") + hint.Render(" interrupt"),
-			key.Render("enter") + hint.Render(" queue follow-up"),
-			key.Render("pgup/pgdn") + hint.Render(" scroll"),
-			key.Render("ctrl+c") + hint.Render(" cancel+quit"),
-		}
-	}
-	if m.pendingApproval != nil {
-		parts = []string{
-			key.Render("enter/y") + hint.Render(" approve"),
-			key.Render("esc/n") + hint.Render(" deny"),
-			key.Render("ctrl+c") + hint.Render(" cancel+quit"),
-		}
-		if m.pendingApproval.Prod {
-			parts[0] = key.Render("type name+enter") + hint.Render(" approve")
-		}
-	}
-	return truncateANSI(strings.Join(parts, hint.Render("  ")), width)
+	return truncateANSI(key.Render("?")+hint.Render(" help & commands"), width)
 }
 
 func (m *operateModel) renderHelp() string {
@@ -364,6 +331,9 @@ func (m *operateModel) renderHelp() string {
 
 	lines := []string{
 		title.Render("Ouvrier Agent Cockpit — help"),
+		"",
+		title.Render("Current"),
+		m.renderStatusBar(max(m.width-12, 40)),
 		"",
 		title.Render("Keys"),
 		key.Render("  enter") + muted.Render("       send prompt / run selected command"),
@@ -698,8 +668,8 @@ func (m *operateModel) renderReview() string {
 	return box.Render(strings.Join(lines, "\n"))
 }
 
-// shortAuthLabel condenses a `codex login status` line into a concise badge for
-// the status bar, e.g. "Logged in using ChatGPT" -> "ChatGPT".
+// shortAuthLabel condenses an agent auth-probe label into a concise status-bar
+// badge, e.g. "Logged in using ChatGPT" -> "ChatGPT".
 func shortAuthLabel(account string) string {
 	account = strings.TrimSpace(account)
 	if account == "" {

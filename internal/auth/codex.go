@@ -23,6 +23,7 @@ const (
 	StateAuthed   AuthState = "authed"
 	StateUnauthed AuthState = "unauthed"
 	StateNoCodex  AuthState = "no_codex"
+	StateNoClaude AuthState = "no_claude"
 )
 
 const (

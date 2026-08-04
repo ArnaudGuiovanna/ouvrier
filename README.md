@@ -69,11 +69,12 @@ in Ouvrier workers. Deployment PaaS and web-console development are paused
 pending redesign. See [the current project direction](docs/project-direction.md)
 for the binding scope and dependency boundaries.
 
-Current `main` is an active stabilization line, not a declaration of a new
-stable release after `v0.5.5`. The stabilization behavior described below is
-implemented and under repository-wide verification; it becomes release
-evidence only when all required format, vet, static-analysis, test, race, and
-golden-worker gates pass.
+Current `main` contains the post-`v0.5.5` stabilization release candidate, not
+a newly tagged stable release. As of 2026-08-03, the required format, vet,
+static-analysis, test, race, build, cockpit-spike, and golden-worker gates pass
+on both `main` and `staging`. Independent acceptance, the final product-owner
+recipe, release notes, and a version tag still separate this candidate from a
+published release. Install `v0.5.5` when you need the latest released version.
 
 The public Go module path is:
 
@@ -81,14 +82,17 @@ The public Go module path is:
 module github.com/ArnaudGuiovanna/ouvrier
 ```
 
-Generated projects import the framework under that path. During local
-development before the repository is published, scaffolded projects add a
-`replace github.com/ArnaudGuiovanna/ouvrier => <local-checkout>` directive so
-they keep building against the working tree.
+Generated projects import the framework under that path. A CLI built inside a
+local checkout discovers that checkout from its executable and adds a `replace
+github.com/ArnaudGuiovanna/ouvrier => <local-checkout>` directive so the worker
+keeps building against the working tree. When no checkout is available, the
+scaffold pins the CLI's published module version (falling back to the latest
+released version) instead of emitting an unusable `v0.0.0` dependency.
 
-The CI gate (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`,
-`staticcheck`, `go test ./...`, race tests on concurrency-sensitive
-packages, and builds the `ouvrier` CLI on every push and pull request.
+The CI gate (`.github/workflows/ci.yml`) verifies module dependencies, runs
+`gofmt`, `go vet`, `staticcheck`, `go test ./...`, race tests on the root and
+concurrency-sensitive packages, verifies/tests/race-tests the isolated cockpit
+spike, and builds the `ouvrier` CLI on every push and pull request.
 
 What ships in the current codebase:
 
@@ -555,6 +559,7 @@ Current commands:
 
 ```sh
 ouvrier version
+ouvrier agents [--json]
 ouvrier new --yes --name NAME --trigger "POST /path" --model "provider/model"
 ouvrier new
 ouvrier add agent --name NAME --model "provider/model" [--goal TEXT]
@@ -567,14 +572,14 @@ ouvrier status [--url http://127.0.0.1:8080] [--token TOKEN]
 ouvrier logs   [--url URL] [--token TOKEN] [--last N]
 ouvrier trace  <exec-id> [--url URL] [--token TOKEN]
 ouvrier build  [--static] [--target os/arch] [--output PATH] [--dir .]
-ouvrier operate [--dir .] [--agent codex|manual] [--codex-mode auto|exec|app-server] [--auto-safe]
+ouvrier operate [--dir .] [--agent auto|codex|claude|manual] [--codex-mode auto|exec|app-server] [--auto-safe]
 ouvrier operate --print "create a worker that receives POST /tickets"
 ouvrier operate --mode json --prompt "review this worker"
 ouvrier operate --mode rpc
 ouvrier operate create-worker --yes --name NAME --trigger "POST /path" --model provider/model [--dir .]
-ouvrier operate patch --goal TEXT [--agent codex|manual] [--dir .]
-ouvrier operate review-worker [--scope whole_worker] [--agent codex|manual] [--dir .]
-ouvrier operate fix-worker [--session ID] [--agent codex|manual]
+ouvrier operate patch --goal TEXT [--agent auto|codex|claude|manual] [--dir .]
+ouvrier operate review-worker [--scope whole_worker] [--agent auto|codex|claude|manual] [--dir .]
+ouvrier operate fix-worker [--session ID] [--agent auto|codex|claude|manual]
 ouvrier operate audit [--session ID] [--dir .]
 ouvrier operate build [--session ID] [--target os/arch] [--allow-failed]
 ouvrier operate transfer --env ENV [--session ID] [--target os/arch] [--allow-failed]
@@ -592,12 +597,16 @@ ouvrier console [--addr 127.0.0.1:7333] [--fleet PATH] [--token TOKEN] [--no-ope
 `ouvrier operate` is the prompt-first local agent cockpit for manufacturing
 workers. Run it from a worker or from a parent factory directory, then type the
 worker you want: the cockpit can infer a plan, scaffold a normal Go worker,
-load Ouvrier API context, ask the configured Codex/manual driver to patch code,
-review findings, run audit gates, and build a verified local binary. The same
+load Ouvrier API context, ask the selected coding agent to patch code, review
+findings, run audit gates, and build a verified local binary. The same
 runtime powers the Bubble Tea UI, one-shot `--print` and `--mode json`, and
 JSONL `--mode rpc`. Transfer remains available for compatibility, but deploy
 is not part of the active cockpit acceptance journey while that workstream is
 paused.
+
+The cockpit composer is a large five-line input with a soft rounded border.
+Its shortcut footer intentionally exposes only `? help & commands`; open that
+help when you need the command catalog.
 
 Headless turns (`--print`, `--mode json`, `--mode rpc`, or a prompt supplied on
 the command line) default to the `manual` posture and fail closed when a tool
@@ -607,15 +616,41 @@ recorded. `--auto-safe` is the explicit opt-in that allows side-effecting tools
 in headless mode; it never bypasses a `requires_approval` floor, so a transfer
 still cannot auto-approve itself.
 
-Codex auth follows the Pi-style ownership boundary: `/login codex` probes or
-delegates to the local Codex CLI flow, while Ouvrier stores only profile
-metadata, never Codex subscription tokens. `--codex-mode auto` (the default)
-and `--codex-mode exec` use the legacy Codex CLI exec driver behind Ouvrier's
-deterministic governed planner. That text-only transport is never installed in
-the structured model/tool loop. The structured
-`--codex-mode app-server` transport is an explicit experimental opt-in; it is
-not the production default while confinement and event-parity release gates
-remain open.
+Run `ouvrier` in a terminal and the startup onboarding detects Codex and Claude,
+shows whether their saved local sessions and ACP adapters are ready, and lets
+you choose one. No Ouvrier sign-in command is part of the normal journey.
+`--agent codex` and `--agent claude` remain non-interactive overrides; headless
+`--agent auto` prefers ready Codex and then ready Claude.
+
+Both agents use ACP v1 over local stdio. Codex runs through `codex-acp`, and
+Claude through `claude-agent-acp`. Ouvrier discovers adapters on `PATH`, in its
+managed adapter directory, or in `OUVRIER_ACP_BIN_DIR`. A source installation
+can provision the canonical adapters with:
+
+```sh
+npm install -g @agentclientprotocol/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
+ouvrier agents
+ouvrier
+```
+
+ACP transports the session; it does not create a provider account. Codex and
+Claude still own initial sign-in, token refresh, billing, and account policy.
+Ouvrier only probes non-secret status and reuses a session that their own client
+already saved. If that session is absent or expired, reopen the corresponding
+vendor client once, complete its own sign-in, and restart Ouvrier. Ouvrier never
+reads or persists the token. Each ACP agent receives bounded, redacted worker
+context but no filesystem, terminal, shell, web, MCP, plugin, or subagent tool.
+It returns a strict full-file patch plan; Ouvrier validates
+paths and sizes (and normalizes the canonical adapter's tool-less full-file
+envelope when needed), applies it to a disposable staged Git copy,
+imports the observed diff, then runs its own audit/build gates.
+
+Generated workers ignore `.ouvrier/`; cockpit sessions, audit evidence, and
+local build artifacts therefore do not dirty the worker's Git worktree. CLI
+and cockpit scaffolds also create a hook-free local Git repository with a clean
+initial commit, so Codex/Claude staged patch import works immediately. Commit
+or stash a prior source edit before asking an external agent for the next one.
 
 The model-visible file tools stay inside the selected worker and refuse
 `.git`, `.ouvrier`, `.env*` (except `.env.example`), private-key material,
@@ -643,9 +678,11 @@ per step and 64 total, 1 MiB of assistant text or tool arguments, and 8 KiB per
 tool result returned to the model. The provider boundary independently caps
 JSON responses at 8 MiB and SSE at 64 MiB total / 1 MiB per frame. Codex exec
 caps stdout at 8 MiB and 100,000 lines, assistant text at 1 MiB, and stderr at
-64 KiB; app-server caps one protocol message at 8 MiB and accumulated text at
-1 MiB. Exceeding any of these limits cancels or fails the turn; loop exhaustion
-is never reported as a successful outcome.
+64 KiB; App Server caps one protocol message at 8 MiB and accumulated text at
+1 MiB. ACP caps one protocol line at 8 MiB, aggregate protocol input at 16 MiB,
+accumulated agent text at 8 MiB, and stderr at 64 KiB. Exceeding any of these
+limits cancels or fails the turn; loop exhaustion is never reported as a
+successful outcome.
 
 Interactive `!` and silent-display `!!` commands both use the model-hidden
 `run_shell` tool and require an explicit approval every time. On Linux the
@@ -769,21 +806,68 @@ internally, so callers see one span per logical operation.
 
 ## Development
 
-Run the default checks:
+For a quick local check while developing:
 
 ```sh
 go test ./...
 go vet ./...
 ```
 
-Run race tests when touching concurrency, state, events, tools, or subagents:
+To reproduce the release-candidate gates from a clean Linux checkout, use Go
+1.25 or newer, install `staticcheck` v0.7.0, and make Bubblewrap available with
+working user namespaces. Candidate-executing audit tests intentionally fail
+closed when that isolation is unavailable.
 
 ```sh
-GOCACHE=/tmp/go-build-cache go test -race ./...
+go mod verify
+gofmt -l .
+go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+go vet ./...
+staticcheck ./...
+go test -count=1 ./...
+go build -o "${TMPDIR:-/tmp}/ouvrier-candidate" ./cmd/ouvrier
+```
+
+`gofmt -l .` must print nothing. Set `OUVRIER_TEST_POSTGRES_DSN` to a disposable
+PostgreSQL 16 database to include the PostgreSQL-specific tests; those tests
+skip locally when the variable is absent. If the system `/tmp` is constrained,
+set `TMPDIR` and `GOCACHE` to spacious writable directories before running the
+Go and cockpit gates.
+
+Run the same focused race lane as CI:
+
+```sh
+go test -race -count=1 \
+  . \
+  ./internal/runtime/... \
+  ./internal/state/... \
+  ./internal/events/... \
+  ./internal/tools/... \
+  ./internal/harness/... \
+  ./internal/operate/... \
+  ./internal/cli/... \
+  ./internal/provider/... \
+  ./internal/tunnel/... \
+  ./internal/console/...
+```
+
+Verify the isolated ADK mechanics spike independently so it never enters the
+runtime module graph:
+
+```sh
+(
+  cd spikes/adk-cockpit
+  GOWORK=off go mod verify
+  GOWORK=off go vet ./...
+  GOWORK=off go test -count=1 ./...
+  GOWORK=off go test -race -count=1 ./...
+)
 ```
 
 Keep public behavior covered close to the owning package. Use small vertical
-slices that compile and can be demonstrated.
+slices that compile and can be demonstrated. For the manual cockpit, durable
+resume, audit, build, checksum, and health-check journey, follow the
+[release-candidate smoke test](docs/handbook.md#release-candidate-smoke-test).
 
 ## Security Model
 

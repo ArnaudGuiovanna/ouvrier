@@ -70,6 +70,20 @@ func runHardenedGit(ctx context.Context, dir, command string, args ...string) (s
 	return runPreparedGit(ctx, dir, prepared)
 }
 
+func runHardenedGitStatus(ctx context.Context, dir string) (string, string, error) {
+	return runHardenedGit(
+		ctx,
+		dir,
+		"status",
+		"--short",
+		"--untracked-files=all",
+		"--",
+		".",
+		":(exclude).ouvrier",
+		":(exclude).ouvrier/**",
+	)
+}
+
 func runPreparedGit(ctx context.Context, dir string, args []string) (string, string, error) {
 	return runPreparedGitWithLimit(ctx, dir, maxAuditStreamBytes, args)
 }

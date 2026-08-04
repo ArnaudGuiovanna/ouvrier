@@ -65,7 +65,7 @@ func NewToolRegistry() *ToolRegistry {
 	registry.Register(Tool{Name: "transfer_worker", Description: "Transfer/deploy the worker through Ouvrier's deploy engine.", Governance: GovRequiresApproval, Run: toolTransferWorker})
 	registry.Register(Tool{Name: "accept_risk", Description: "Record an explicit operator-approved risk rationale for gated transfer.", Governance: GovRequiresApproval, OperatorOnly: true, Run: toolAcceptRisk})
 	registry.Register(Tool{Name: "export_session", Description: "Export the transcript to Markdown.", Governance: GovReadOnly, Run: toolExportSession})
-	registry.Register(Tool{Name: "login_codex", Description: "Probe/delegate Codex authentication without storing Codex tokens.", Governance: GovSideEffecting, Run: toolLoginCodex})
+	registry.Register(Tool{Name: "login_codex", Description: "Probe Codex authentication and show the official CLI login command without storing tokens.", Governance: GovSideEffecting, Run: toolLoginCodex})
 	registry.Register(Tool{Name: "write_worker_file", Description: "Write one bounded UTF-8 source file inside the selected worker through Ouvrier governance.", Governance: GovSideEffecting, Run: toolWriteWorkerFile})
 	registry.Register(Tool{Name: "remove_worker_file", Description: "Remove one worker file or internal symlink with source-fingerprint evidence.", Governance: GovSideEffecting, Run: toolRemoveWorkerFile})
 	registry.Register(Tool{Name: "run_shell", Description: "Run one explicitly approved operator command in the isolated worker sandbox.", Governance: GovRequiresApproval, OperatorOnly: true, Run: toolRunShell})

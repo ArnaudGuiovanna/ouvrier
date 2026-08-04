@@ -134,7 +134,7 @@ func detectGitStrict(ctx context.Context, dir string) (GitInfo, error) {
 	if err != nil {
 		return GitInfo{}, fmt.Errorf("operate: inspect Git branch: %s: %w", strings.TrimSpace(branchErr), err)
 	}
-	status, statusErr, err := runHardenedGit(ctx, dir, "status", "--short", "--untracked-files=all")
+	status, statusErr, err := runHardenedGitStatus(ctx, dir)
 	if err != nil {
 		return GitInfo{}, fmt.Errorf("operate: inspect Git status: %s: %w", strings.TrimSpace(statusErr), err)
 	}

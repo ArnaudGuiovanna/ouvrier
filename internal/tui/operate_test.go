@@ -107,8 +107,9 @@ func TestOperateModelStreamsTurnIntoBlocks(t *testing.T) {
 	if !strings.Contains(out, "list_workers") {
 		t.Fatalf("rendered cockpit missing tool card name:\n%s", out)
 	}
-	if !strings.Contains(out, "ready") && !strings.Contains(out, "working") {
-		t.Fatalf("rendered cockpit missing status bar:\n%s", out)
+	plain := ansiRE.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "? help & commands") || strings.Contains(plain, "posture ") {
+		t.Fatalf("rendered cockpit footer is not reduced to help discovery:\n%s", out)
 	}
 }
 
@@ -159,6 +160,31 @@ func TestOperateDoesNotAdvertiseOrPerformCosmeticModelCycling(t *testing.T) {
 	}
 	if help := ansiRE.ReplaceAllString(m.renderHelp(), ""); strings.Contains(help, "cycle model") {
 		t.Fatalf("help still advertises cosmetic model switching:\n%s", help)
+	}
+}
+
+func TestOperateComposerIsLargeRoundedAndKeepsOnlyHelpHint(t *testing.T) {
+	dir := t.TempDir()
+	writeOperateWorker(t, dir, "ticket-triage")
+
+	m := newOperateModel(context.Background(), OperateOptions{Dir: dir, Agent: "manual", Driver: operate.ManualDriver{}}).(*operateModel)
+	t.Cleanup(func() { _ = m.runtime.Close() })
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	composer := ansiRE.ReplaceAllString(m.renderComposer(m.vp.Width()), "")
+	if !strings.Contains(composer, "╭") || !strings.Contains(composer, "╰") {
+		t.Fatalf("composer does not use a soft rounded border:\n%s", composer)
+	}
+	if got := ansiRE.ReplaceAllString(m.renderHints(200), ""); got != "? help & commands" {
+		t.Fatalf("composer hint = %q, want only help discovery", got)
+	}
+	welcome := ansiRE.ReplaceAllString(m.renderWelcome(m.vp.Width()), "")
+	if strings.Contains(welcome, "/review") || strings.Contains(welcome, "/audit") {
+		t.Fatalf("welcome still overloads the prompt with commands:\n%s", welcome)
+	}
+	full := ansiRE.ReplaceAllString(m.render(), "")
+	if strings.Contains(full, "posture ") || strings.Contains(full, "session ") {
+		t.Fatalf("main composer view still exposes the detailed status line:\n%s", full)
 	}
 }
 
@@ -269,8 +295,8 @@ func TestOperateStartupErrorIsNotShownAsReady(t *testing.T) {
 		t.Fatalf("startup error status is misleading: %q", status)
 	}
 	hints := ansiRE.ReplaceAllString(m.renderHints(200), "")
-	if strings.Contains(hints, "enter send") || !strings.Contains(hints, "ctrl+c quit") {
-		t.Fatalf("startup error footer advertises unavailable actions: %q", hints)
+	if hints != "? help & commands" {
+		t.Fatalf("startup error footer should keep only help discovery: %q", hints)
 	}
 }
 
@@ -350,9 +376,9 @@ func TestOperateAuthNoticeWhenSignedOut(t *testing.T) {
 	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
 	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}, AuthState: "unauthed"}).(*operateModel)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	out := m.render()
-	if !strings.Contains(out, "sign in") && !strings.Contains(out, "/login") {
-		t.Fatalf("expected sign-in hint in status/footer:\n%s", out)
+	out := m.renderHelp()
+	if !strings.Contains(out, "session unavailable") || strings.Contains(out, "codex login") || strings.Contains(out, "claude auth login") {
+		t.Fatalf("expected command-free session status:\n%s", out)
 	}
 }
 
@@ -361,7 +387,7 @@ func TestOperateAuthShowsAccountWhenSignedIn(t *testing.T) {
 	writeOperateWorker(t, filepath.Join(dir, "demo"), "demo")
 	m := newOperateModel(context.Background(), OperateOptions{Dir: filepath.Join(dir, "demo"), Agent: "manual", Driver: operate.ManualDriver{}, AuthState: "authed", AuthAccount: "Logged in using ChatGPT"}).(*operateModel)
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	out := m.render()
+	out := m.renderHelp()
 	if !strings.Contains(out, "ChatGPT") && !strings.Contains(out, "auth") {
 		t.Fatalf("expected signed-in account/auth in status bar:\n%s", out)
 	}

@@ -21,12 +21,13 @@ func (app *App) runOperateCreateWorker(ctx context.Context, args []string) error
 	if !yes {
 		return fmt.Errorf("%w: operate create-worker writes files; pass --yes or run `ouvrier new` for the interactive wizard", ErrUsage)
 	}
+	cfg.InitializeGit = true
 	project, err := scaffold.Generate(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("operate create-worker: %w", err)
 	}
 	fmt.Fprintf(app.out, "created %s\n", project.Dir)
-	fmt.Fprintf(app.out, "next: cd %s && ouvrier operate --agent codex\n", project.Dir)
+	fmt.Fprintf(app.out, "next: cd %s && ouvrier operate --agent auto\n", project.Dir)
 	return nil
 }
 

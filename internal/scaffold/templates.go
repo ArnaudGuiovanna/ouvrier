@@ -44,12 +44,19 @@ func main() {
 }
 
 func goMod(cfg Config) string {
+	version := cfg.FrameworkVersion
+	if version == "" {
+		version = fallbackFrameworkVersion
+	}
+	if cfg.FrameworkDir != "" {
+		version = "v0.0.0"
+	}
 	body := fmt.Sprintf(`module %s
 
 go 1.25.0
 
-require %s v0.0.0
-`, cfg.Name, cfg.FrameworkModule)
+require %s %s
+`, cfg.Name, cfg.FrameworkModule, version)
 	if requirements := frameworkRequireBlocks(cfg); requirements != "" {
 		body += "\n" + requirements
 	}
@@ -235,6 +242,7 @@ func gitignore() string {
 	// the committed .env.example template is explicitly re-included.
 	return `.env*
 !.env.example
+.ouvrier/
 bin/
 dist/
 *.log

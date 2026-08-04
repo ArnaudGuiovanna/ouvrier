@@ -3,6 +3,7 @@ package operate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,6 +111,40 @@ func TestWorkspaceGitInspectionSupportsLinkedWorktreeMetadata(t *testing.T) {
 	}
 	if !ws.Git.Present || ws.Git.Branch != "cockpit-linked-test" {
 		t.Fatalf("linked worktree Git info = %+v", ws.Git)
+	}
+}
+
+func TestGitInspectionExcludesLargeOperateStateBeforeBoundedCapture(t *testing.T) {
+	dir := writeWorkerFixture(t)
+	gitInitAndCommit(t, dir)
+	sessionDir := filepath.Join(dir, ".ouvrier", "operate", "sessions", "large")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatalf("mkdir operate state: %v", err)
+	}
+	for i := range 1_000 {
+		name := fmt.Sprintf("artifact-%04d-%s.json", i, strings.Repeat("x", 80))
+		if err := os.WriteFile(filepath.Join(sessionDir, name), []byte("{}\n"), 0o600); err != nil {
+			t.Fatalf("write operate artifact %d: %v", i, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() { println(\"candidate\") }\n"), 0o644); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+
+	ws, err := DetectWorkspace(dir)
+	if err != nil {
+		t.Fatalf("DetectWorkspace() error = %v", err)
+	}
+	if !ws.Git.Dirty || !strings.Contains(ws.Git.Status, "main.go") || strings.Contains(ws.Git.Status, ".ouvrier") {
+		t.Fatalf("Git info = %+v, want only the candidate change", ws.Git)
+	}
+
+	diff, err := ObserveCandidateDiff(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("ObserveCandidateDiff() error = %v", err)
+	}
+	if len(diff.ChangedFiles) != 1 || diff.ChangedFiles[0] != "main.go" {
+		t.Fatalf("changed files = %v, want [main.go]", diff.ChangedFiles)
 	}
 }
 

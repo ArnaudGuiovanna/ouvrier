@@ -137,8 +137,8 @@ func TestNormalizeJSONLMapsFinalAndCommandEvents(t *testing.T) {
 
 func TestMapCodexErrMentionsLoginForAuthFailures(t *testing.T) {
 	err := mapCodexErr(errors.New("exit status 1"), "Unauthorized: login required")
-	if err == nil || !strings.Contains(err.Error(), "codex login") {
-		t.Fatalf("error = %v, want codex login guidance", err)
+	if err == nil || !strings.Contains(err.Error(), "open Codex once") {
+		t.Fatalf("error = %v, want command-free Codex readiness guidance", err)
 	}
 }
 

@@ -23,29 +23,32 @@ import (
 
 // OperateOptions configure the local Ouvrier worker-factory cockpit.
 type OperateOptions struct {
-	Dir       string
-	Agent     string
-	CodexMode string
-	Session   string
-	Goal      string
-	Driver    operate.Driver
-	Env       string
-	EnvFile   string
-	Target    string
-	Keep      int
-	AllowFail bool
-	AutoSafe  bool
-	Redactor  operate.Redactor
+	Dir   string
+	Agent string
+	// AgentTransport identifies the negotiated coding-agent boundary, for
+	// example app-server or acp/v1.
+	AgentTransport string
+	CodexMode      string
+	Session        string
+	Goal           string
+	Driver         operate.Driver
+	Env            string
+	EnvFile        string
+	Target         string
+	Keep           int
+	AllowFail      bool
+	AutoSafe       bool
+	Redactor       operate.Redactor
 
 	// Model enables the Ouvrier-owned model tool-calling loop; ModelID is the
-	// provider/model id shown in the status bar and used for requests. When nil
-	// the cockpit falls back to the deterministic keyword planner.
+	// provider/model id shown in the status bar and used for requests. When nil,
+	// deterministic orchestration remains active and the selected external
+	// driver can still own governed edit/review turns.
 	Model   operate.AgentModel
 	ModelID string
 
-	// AuthState is the Codex authentication state ("authed", "unauthed",
-	// "no_codex"). AuthAccount is the human-readable account label returned by
-	// Probe when signed in.
+	// AuthState is the selected agent's authentication state. AuthAccount is a
+	// non-secret human-readable method/account label returned by its CLI probe.
 	AuthState   string
 	AuthAccount string
 }
@@ -154,7 +157,6 @@ var operateSlashCommands = []slashCmd{
 	{"/edit", "/edit main.go", "Open a worker file in the manual editor"},
 	{"/docs", "/docs <query>", "Search the Ouvrier docs & API"},
 	{"/workers", "/workers", "List detected workers"},
-	{"/login", "/login codex", "Probe/delegate Codex authentication"},
 	{"/accept-risk", "/accept-risk <rationale>", "Record an accepted risk"},
 	{"/clear", "/clear", "Clear the transcript view"},
 	{"/export", "/export", "Export the transcript to Markdown"},
@@ -268,11 +270,11 @@ func newOperateModel(ctx context.Context, opts OperateOptions) tea.Model {
 
 func newComposer() textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "Describe a worker to build, or run /review, /audit, /build, /deploy…"
+	ta.Placeholder = "Describe the Ouvrier worker you want to build…"
 	ta.Prompt = "❯ "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
-	ta.MaxHeight = 6
+	ta.MaxHeight = 5
 	// Enter submits the prompt; newlines are inserted explicitly.
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
 	styles := ta.Styles()
@@ -874,6 +876,9 @@ func (m *operateModel) selectCandidate(index int) (*operateModel, tea.Cmd) {
 
 func (m *operateModel) modelStatus() (label, value string) {
 	if m.opts.Model == nil {
+		if transport := strings.TrimSpace(m.opts.AgentTransport); transport != "" && m.opts.Agent != "manual" {
+			return "agent", m.opts.Agent + "/" + transport
+		}
 		return "planner", "deterministic"
 	}
 	if id := strings.TrimSpace(m.opts.ModelID); id != "" {
@@ -924,17 +929,16 @@ func (m *operateModel) resize() {
 	}
 	m.ready = true
 	cw := max(m.width-2, 40)
-	lines := strings.Count(m.composer.Value(), "\n") + 1
-	ch := clamp(lines, 1, 6)
-	m.composer.SetWidth(cw)
-	m.composer.SetHeight(ch)
+	const composerHeight = 5
+	m.composer.SetWidth(max(cw-4, 20))
+	m.composer.SetHeight(composerHeight)
 
 	slashH := 0
 	if m.slashActive {
 		slashH = clamp(len(m.slashMatches), 1, 6)
 	}
-	// rule(1) + composer(ch) + status(1) + hints(1) + slash menu.
-	used := 1 + ch + 1 + 1 + slashH
+	// Rounded composer (content + two border rows), help hint, and slash menu.
+	used := composerHeight + 2 + 1 + slashH
 	vh := max(m.height-used, 3)
 	m.vp.SetWidth(cw)
 	m.vp.SetHeight(vh)

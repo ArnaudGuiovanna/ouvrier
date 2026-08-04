@@ -27,10 +27,11 @@ func toolScaffoldWorker(ctx context.Context, env ToolEnv, input map[string]any) 
 		return ToolResult{}, err
 	}
 	project, err := scaffold.Generate(ctx, scaffold.Config{
-		Name:    name,
-		Trigger: trigger,
-		Model:   model,
-		Dir:     parent,
+		Name:          name,
+		Trigger:       trigger,
+		Model:         model,
+		Dir:           parent,
+		InitializeGit: true,
 	})
 	if err != nil {
 		return ToolResult{}, err
@@ -255,9 +256,9 @@ func toolLoginCodex(ctx context.Context, env ToolEnv, _ map[string]any) (ToolRes
 		}
 		summary = "Signed in to Codex — " + label + ". OpenAI models ready (uses your ~/.codex default model)."
 	case auth.StateNoCodex:
-		summary = "Codex CLI not found. Install it (npm i -g @openai/codex), then run `codex login`."
+		summary = "Codex CLI not found. Install or open the Codex client, then restart Ouvrier."
 	default:
-		summary = "Not signed in. Run `codex login` (or `codex login --device-auth` on a headless host), then retry."
+		summary = "Saved Codex session unavailable. Open Codex once to complete its own sign-in, then restart Ouvrier."
 	}
 	if data, err := json.MarshalIndent(profile, "", "  "); err == nil {
 		_ = writeAtomic(env.Session.AuthProfilePath, append(data, '\n'), 0o600)

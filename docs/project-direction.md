@@ -2,7 +2,7 @@
 
 **Decision date:** 2026-07-26
 
-**Implementation status update:** 2026-08-02
+**Implementation status update:** 2026-08-03
 
 **Status:** active project memory
 
@@ -40,27 +40,36 @@ The first implementation slices started on 2026-07-26:
   they do not authorize production adoption.
 
 Those initial slices have expanded into the stabilization baseline below. The
-remaining acceptance work is to keep closing defects and pass the full runtime,
-cockpit, race, static-analysis, and generated-worker gates; implementation on
-`main` is not itself a release declaration.
+full runtime, cockpit, race, static-analysis, build, and generated-worker gates
+now pass for the candidate carried by both `main` and `staging`. Passing those
+repository gates establishes a release candidate; implementation on `main` is
+not itself a release declaration. Independent QA acceptance, the final product
+owner recipe, release documentation, and a version tag remain required.
 
-## Current Stabilization Baseline (Gates Pending)
+## Current Stabilization Baseline (Repository Gates Passed)
 
-As of 2026-08-02, the following contracts are implemented on `main` and are the
-baseline under verification. They describe required behavior, not a claim that
-a post-`v0.5.5` stable release has already passed every gate.
+As of 2026-08-03, the following contracts are implemented on `main` and have
+passed the repository-wide verification gates on both active branches. They
+define the current release candidate. The latest tagged release remains
+`v0.5.5` until the candidate completes independent acceptance and receives a
+new version tag.
 
 - **Headless governance is fail-closed.** Prompt, print, JSON, and RPC turns
   start in the `manual` posture. Without an attached operator, read-only and
   idempotent tools may run, while side-effecting and `requires_approval` tools
   are denied and audited. `--auto-safe` is the explicit opt-in for
   side-effecting headless tools and never overrides `requires_approval`.
-- **Codex App Server is not the default.** `--codex-mode auto` and `exec` use
-  the legacy text-only Codex CLI driver behind Ouvrier's deterministic governed
-  planner; the text transport is never misrepresented as a tool-calling model.
-  Structured
-  `--codex-mode app-server` remains an explicit experimental opt-in until its
-  confinement, event mapping, resume, and tool-schema parity gates are proven.
+- **Coding-agent selection is explicit and real.** Interactive `--agent auto`
+  detects Codex and Claude, reports saved-session/adapter readiness, and opens a
+  Bubble Tea chooser; headless auto prefers ready Codex and then ready Claude.
+  `codex`, `claude`, and `manual` remain explicit choices, and `ouvrier agents`
+  exposes readiness without reading credentials. Both coding agents run through
+  their canonical ACP v1 stdio adapters by default. Each receives bounded
+  redacted source context and no agent-side tools, then returns a strict
+  full-file patch plan that Ouvrier applies to a disposable staged Git copy.
+  Native Codex App Server and legacy `exec` remain explicit compatibility/debug
+  modes. Agent CLIs retain ownership of initial authentication and token refresh;
+  the normal Ouvrier onboarding reuses their saved sessions and has no login command.
 - **Candidate-executing audit gates require real isolation.** Production audit
   runs `go test`, `go vet`, and the static Linux/amd64 build in a disposable
   Linux Bubblewrap sandbox. Network, ambient workspaces, proxies, inherited
@@ -86,11 +95,11 @@ a post-`v0.5.5` stable release has already passed every gate.
   transport all have explicit fail-closed ceilings. Torn-tail recovery may
   repair only the final interrupted JSONL record; middle corruption is never
   rewritten.
-- **Provider and Codex output is resource-bounded.** HTTP JSON bodies, SSE
-  streams/frames/text/tool calls, Codex exec stdout/lines/text/stderr, and
-  app-server messages/text/stderr have tested byte/count ceilings. Overflow
-  cancels or fails the operation, and bounded-loop exhaustion cannot become a
-  successful completion.
+- **Provider and coding-agent output is resource-bounded.** HTTP JSON bodies,
+  SSE streams/frames/text/tool calls, Codex exec stdout/lines/text/stderr, App
+  Server messages/text/stderr, and ACP lines/aggregate/text/stderr have tested
+  byte/count ceilings. Overflow cancels or fails the operation, and bounded-loop
+  exhaustion cannot become a successful completion.
 - **Operator shell and repository inspection stay governed.** The model cannot
   call the shell. Each interactive `!`/`!!` command requires approval and runs
   only in a Linux Bubblewrap workspace with fixed environment, no network, a
@@ -107,6 +116,14 @@ The shared generated-worker lane remains the narrow integration proof: a
 cockpit-created worker must compile against the current public `ovr` contract,
 pass runtime checks, pass the isolated deterministic audit, and yield a local
 artifact whose evidence can be independently recomputed.
+
+Before a release tag is created, the final acceptance recipe must also prove
+the human journey: construct or edit a worker through governed cockpit tools,
+inspect its isolated audit, build the source-bound artifact, verify its local
+health endpoint and checksum, close the cockpit process, resume the durable
+session in a distinct process, and complete a follow-up turn without losing or
+duplicating the earlier tool-call history. The executable repository gates and
+manual commands are documented in the README and handbook.
 
 ## Priority 0A: Runtime Stabilization
 

@@ -218,6 +218,36 @@ type redactionCandidate struct {
 
 func (r Redactor) stream() *redactionStream { return &redactionStream{redactor: r} }
 
+// RedactionStream incrementally redacts text that may split a credential
+// across transport chunks. It is exported from the internal operate package so
+// governed transport adapters can preserve the same no-secret event invariant
+// as the native model loop.
+type RedactionStream struct {
+	stream *redactionStream
+}
+
+// NewStream returns an independent incremental redactor.
+func (r Redactor) NewStream() *RedactionStream {
+	return &RedactionStream{stream: r.stream()}
+}
+
+// Push accepts one transport chunk and returns the safe prefix that can be
+// emitted immediately. A short suffix may be retained until a later chunk.
+func (s *RedactionStream) Push(chunk string) string {
+	if s == nil || s.stream == nil {
+		return ""
+	}
+	return s.stream.Push(chunk)
+}
+
+// Flush redacts and returns any suffix retained at the end of the stream.
+func (s *RedactionStream) Flush() string {
+	if s == nil || s.stream == nil {
+		return ""
+	}
+	return s.stream.Flush()
+}
+
 func (s *redactionStream) Push(chunk string) string {
 	if s == nil || chunk == "" {
 		return ""

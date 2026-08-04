@@ -18,8 +18,7 @@ const defaultCodexAuthProbeTimeout = 2 * time.Second
 
 // operateModelFromEnv builds the Ouvrier-owned tool-calling model transport for
 // `--model provider/id`, resolving the provider from the matching API-key env
-// var. It returns (nil, nil) when no model is requested so the cockpit falls
-// back to the deterministic keyword planner.
+// var. It returns (nil, nil) when no model is requested.
 func operateModelFromEnv(modelID string) (operate.AgentModel, error) {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -55,17 +54,51 @@ func operateModelFromEnv(modelID string) (operate.AgentModel, error) {
 
 // resolveAgentModel chooses the agent model transport, auth-first:
 //  1. an explicit --model provider/x when that provider's API key is present;
-//  2. an explicitly selected Codex app-server model when signed in;
-//  3. a signed-in Codex subscription using the deterministic Ouvrier planner
-//     plus the governed legacy edit/review driver for auto/exec mode. The
-//     legacy provider is text-only and must never be installed into the
-//     structured tool loop;
+//  2. a signed-in Codex subscription through the structured app-server when
+//     that compatibility mode is explicitly selected;
+//  3. the deterministic Ouvrier planner plus governed legacy edit/review
+//     driver only when exec mode is explicitly selected. The legacy provider
+//     is text-only and must never be installed into the structured tool loop;
 //  4. an API-key provider from env (anthropic/openai);
 //  5. nil (the cockpit shows the sign-in card; the planner remains the fallback).
 //
 // signedIn is injected so tests don't shell out to codex.
 func resolveAgentModel(modelID, codexMode, cwd string, signedIn func() bool) (operate.AgentModel, string, error) {
 	return resolveAgentModelWithFactory(modelID, codexMode, cwd, signedIn, operateModelFromEnv)
+}
+
+// resolveSelectedAgentModel keeps the selected coding-agent identity and the
+// conversational transport aligned. Codex can participate directly in the
+// Ouvrier-owned structured tool loop through App Server. Claude ACP owns its
+// external edit turns, while Ouvrier retains the deterministic planner and
+// governed tools around those turns. An explicit provider/model remains
+// available for either non-Codex driver when its API key is configured.
+func resolveSelectedAgentModel(agent, modelID, codexMode, cwd string, signedIn func() bool) (operate.AgentModel, string, error) {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	modelID = strings.TrimSpace(modelID)
+	if modelID != "" && modelID != "codex" && !strings.HasPrefix(modelID, "codex/") {
+		model, err := operateModelFromEnv(modelID)
+		if err != nil {
+			return nil, "", err
+		}
+		if model == nil {
+			return nil, "", fmt.Errorf("configure requested operate model %q: provider returned no model", modelID)
+		}
+		return model, modelID, nil
+	}
+	if agent == "codex" {
+		if strings.TrimSpace(codexMode) == "" || strings.EqualFold(strings.TrimSpace(codexMode), "auto") {
+			if strings.HasPrefix(modelID, "codex/") {
+				return nil, "", fmt.Errorf("%w: selecting a specific Codex model requires --codex-mode app-server; ACP uses the account default", ErrUsage)
+			}
+			return nil, "codex/acp", nil
+		}
+		return resolveAgentModel(modelID, codexMode, cwd, signedIn)
+	}
+	if agent == "claude" {
+		return nil, "claude/acp", nil
+	}
+	return nil, "", nil
 }
 
 type operateModelFactory func(modelID string) (operate.AgentModel, error)
@@ -97,7 +130,7 @@ func resolveAgentModelWithFactory(modelID, codexMode, cwd string, signedIn func(
 		if name != "" {
 			id = "codex/" + name
 		}
-		if codexMode == "app-server" {
+		if codexMode != "exec" {
 			p, err := newCodexAgentProvider(codexMode, name, cwd)
 			if err != nil {
 				return nil, "", err
@@ -105,7 +138,7 @@ func resolveAgentModelWithFactory(modelID, codexMode, cwd string, signedIn func(
 			return operate.NewProviderModel(p, id), id, nil
 		}
 		if modelID == "codex" || strings.HasPrefix(modelID, "codex/") {
-			return nil, "", fmt.Errorf("%w: --model %q needs the structured tool transport; pass --codex-mode app-server explicitly", ErrUsage, modelID)
+			return nil, "", fmt.Errorf("%w: --model %q needs the structured tool transport; use --codex-mode app-server", ErrUsage, modelID)
 		}
 		// codex exec cannot return provider.ToolCall values. Leave Model nil so
 		// free-form prompts use Ouvrier's deterministic governed plan; the
@@ -113,7 +146,7 @@ func resolveAgentModelWithFactory(modelID, codexMode, cwd string, signedIn func(
 		return nil, id, nil
 	}
 	if strings.HasPrefix(modelID, "codex/") || modelID == "codex" || codexMode == "app-server" || codexMode == "exec" {
-		return nil, "", fmt.Errorf("%w: the requested Codex transport needs a signed-in Codex CLI; run `codex login` first", ErrUsage)
+		return nil, "", fmt.Errorf("%w: the requested Codex transport needs an available saved Codex session", ErrUsage)
 	}
 	if env := firstEnvModel(); env != "" {
 		m, err := modelFromEnv(env)
@@ -130,9 +163,9 @@ func resolveAgentModelWithFactory(modelID, codexMode, cwd string, signedIn func(
 
 func newCodexAgentProvider(mode, model, cwd string) (provider.Provider, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "auto", "exec":
+	case "exec":
 		return codexprovider.New(model), nil
-	case "app-server":
+	case "", "auto", "app-server":
 		abs := strings.TrimSpace(cwd)
 		if abs != "" {
 			var err error

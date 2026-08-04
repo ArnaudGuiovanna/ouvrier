@@ -2,6 +2,7 @@ package operate
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
@@ -30,6 +31,14 @@ func TestSlashCommandBypassesModel(t *testing.T) {
 	}
 	if turn.Final == "" {
 		t.Fatal("expected /help to produce assistant help text")
+	}
+}
+
+func TestClaudeLoginSlashDelegatesToClaudeCLI(t *testing.T) {
+	runtime := &AgentRuntime{Tools: NewToolRegistry()}
+	plan := runtime.planSlash("/login claude")
+	if len(plan.Tools) != 0 || !strings.Contains(plan.Assistant, "detected during cockpit startup") || strings.Contains(plan.Assistant, " auth login") {
+		t.Fatalf("agent readiness plan = %+v", plan)
 	}
 }
 

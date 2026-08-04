@@ -205,7 +205,7 @@ func ObserveCandidateDiff(ctx context.Context, dir string) (CandidateDiff, error
 	if err != nil {
 		return CandidateDiff{}, fmt.Errorf("operate: capture candidate diff: %s: %w", strings.TrimSpace(stderr), err)
 	}
-	statusOut, statusErr, err := runHardenedGit(ctx, dir, "status", "--short", "--untracked-files=all")
+	statusOut, statusErr, err := runHardenedGitStatus(ctx, dir)
 	if err != nil {
 		return CandidateDiff{}, fmt.Errorf("operate: capture candidate status: %s: %w", strings.TrimSpace(statusErr), err)
 	}

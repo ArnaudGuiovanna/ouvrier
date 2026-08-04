@@ -24,19 +24,19 @@ func TestResolveAgentModelPrefersExplicitProvider(t *testing.T) {
 	}
 }
 
-func TestResolveAgentModelUsesGovernedPlannerForLegacyCodexWhenSignedIn(t *testing.T) {
+func TestResolveAgentModelUsesStructuredCodexByDefaultWhenSignedIn(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	m, id, err := resolveAgentModel("", "auto", t.TempDir(), func() bool { return true })
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if m != nil || id != "codex" {
-		t.Fatalf("expected deterministic planner plus Codex driver when signed in, got id=%q model=%T", id, m)
+	if m == nil || id != "codex" {
+		t.Fatalf("expected structured Codex model when signed in, got id=%q model=%T", id, m)
 	}
 }
 
-func TestResolveAgentModelUsesStructuredCodexOnlyWhenExplicit(t *testing.T) {
+func TestResolveAgentModelUsesStructuredCodexWhenExplicit(t *testing.T) {
 	m, id, err := resolveAgentModel("", "app-server", t.TempDir(), func() bool { return true })
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -53,10 +53,10 @@ func TestResolveAgentModelKeepsCodexDefaultIDCanonical(t *testing.T) {
 	}
 }
 
-func TestResolveAgentModelRejectsCodexModelOnTextOnlyTransport(t *testing.T) {
-	m, _, err := resolveAgentModel("codex/gpt-5.6-sol", "auto", t.TempDir(), func() bool { return true })
-	if err == nil || m != nil || !strings.Contains(err.Error(), "structured tool transport") {
-		t.Fatalf("resolveAgentModel() model/error = %T/%v", m, err)
+func TestResolveAgentModelAcceptsCodexModelOnAutoTransport(t *testing.T) {
+	m, id, err := resolveAgentModel("codex/gpt-5.6-sol", "auto", t.TempDir(), func() bool { return true })
+	if err != nil || m == nil || id != "codex/gpt-5.6-sol" {
+		t.Fatalf("resolveAgentModel() = %T, %q, %v", m, id, err)
 	}
 }
 
@@ -69,13 +69,13 @@ func TestResolveAgentModelNoneWhenNothingAvailable(t *testing.T) {
 	}
 }
 
-func TestCodexAgentProviderKeepsStructuredAppServerOptIn(t *testing.T) {
+func TestCodexAgentProviderUsesStructuredAppServerForAuto(t *testing.T) {
 	p, err := newCodexAgentProvider("auto", "", t.TempDir())
 	if err != nil {
 		t.Fatalf("newCodexAgentProvider(auto) error = %v", err)
 	}
-	if _, ok := p.(*codexprovider.Provider); !ok {
-		t.Fatalf("auto provider = %T, want proven legacy exec Provider", p)
+	if _, ok := p.(*codexprovider.AppServerProvider); !ok {
+		t.Fatalf("auto provider = %T, want structured AppServerProvider", p)
 	}
 
 	p, err = newCodexAgentProvider("app-server", "", t.TempDir())
@@ -85,13 +85,33 @@ func TestCodexAgentProviderKeepsStructuredAppServerOptIn(t *testing.T) {
 	if _, ok := p.(*codexprovider.AppServerProvider); !ok {
 		t.Fatalf("app-server provider = %T, want structured AppServerProvider", p)
 	}
+
+	p, err = newCodexAgentProvider("exec", "", t.TempDir())
+	if err != nil {
+		t.Fatalf("newCodexAgentProvider(exec) error = %v", err)
+	}
+	if _, ok := p.(*codexprovider.Provider); !ok {
+		t.Fatalf("exec provider = %T, want legacy exec Provider", p)
+	}
+}
+
+func TestResolveAgentModelKeepsLegacyExecOutOfStructuredLoop(t *testing.T) {
+	m, id, err := resolveAgentModel("", "exec", t.TempDir(), func() bool { return true })
+	if err != nil || m != nil || id != "codex" {
+		t.Fatalf("resolveAgentModel(exec) = %T, %q, %v", m, id, err)
+	}
+
+	m, id, err = resolveAgentModel("codex/gpt-5.6-sol", "exec", t.TempDir(), func() bool { return true })
+	if err == nil || m != nil || id != "" || !strings.Contains(err.Error(), "structured tool transport") {
+		t.Fatalf("resolveAgentModel(exec explicit model) = %T, %q, %v", m, id, err)
+	}
 }
 
 func TestResolveAgentModelExplicitAppServerRequiresCodexSignIn(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	m, _, err := resolveAgentModel("codex/gpt-5.6-sol", "app-server", t.TempDir(), func() bool { return false })
-	if err == nil || !strings.Contains(err.Error(), "signed-in Codex") {
+	if err == nil || !strings.Contains(err.Error(), "saved Codex session") {
 		t.Fatalf("resolveAgentModel() model/error = %T/%v, want explicit authentication error", m, err)
 	}
 }

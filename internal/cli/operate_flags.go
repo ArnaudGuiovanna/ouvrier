@@ -7,11 +7,12 @@ import (
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/deploy"
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
+	operateacp "github.com/ArnaudGuiovanna/ouvrier/internal/operate/acp"
 	operatecodex "github.com/ArnaudGuiovanna/ouvrier/internal/operate/codex"
 )
 
 func parseOperateFlags(args []string) (operateConfig, error) {
-	cfg := operateConfig{Dir: ".", Agent: "codex", CodexMode: "auto", Scope: string(operate.ReviewWholeWorker), Mode: "tui"}
+	cfg := operateConfig{Dir: ".", Agent: "auto", CodexMode: "auto", Scope: string(operate.ReviewWholeWorker), Mode: "tui"}
 	i := 0
 	for i < len(args) {
 		arg := args[i]
@@ -82,7 +83,7 @@ func parseOperateFlags(args []string) (operateConfig, error) {
 		cfg.Dir = "."
 	}
 	if cfg.Agent == "" {
-		cfg.Agent = "codex"
+		cfg.Agent = "auto"
 	}
 	cfg.Agent = strings.ToLower(strings.TrimSpace(cfg.Agent))
 	if cfg.CodexMode == "" {
@@ -163,10 +164,10 @@ func validateOperateMode(mode string) error {
 
 func validateOperateAgent(agent string) error {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "codex", "manual":
+	case "auto", "codex", "claude", "manual":
 		return nil
 	default:
-		return fmt.Errorf("%w: --agent must be codex or manual", ErrUsage)
+		return fmt.Errorf("%w: --agent must be auto, codex, claude, or manual", ErrUsage)
 	}
 }
 
@@ -184,12 +185,26 @@ func operateDriver(cfg operateConfig) (operate.Driver, string, string, error) {
 	case "manual":
 		return operate.ManualDriver{}, "manual", "", nil
 	case "codex":
-		// Patch/review/fix remain explicit operator-only compatibility actions
-		// implemented by the legacy coding driver. The normal model loop uses
-		// resolveAgentModel. Structured app-server is an explicit experimental
-		// mode until its production confinement gates are complete.
-		return operatecodex.New(), "codex", "exec-operator", nil
+		// The default cockpit boundary is ACP, matching every other selectable
+		// coding agent. Explicit legacy modes remain available for compatibility.
+		switch strings.ToLower(strings.TrimSpace(cfg.CodexMode)) {
+		case "", "auto":
+			bin := strings.TrimSpace(cfg.AgentBin)
+			if bin == "" {
+				bin = "codex-acp"
+			}
+			return operateacp.New("codex", bin), "codex", "acp/v1", nil
+		case "exec", "app-server":
+			return operatecodex.New(), "codex", "exec-operator", nil
+		}
+		return nil, "", "", fmt.Errorf("%w: unsupported Codex transport %q", ErrUsage, cfg.CodexMode)
+	case "claude":
+		bin := strings.TrimSpace(cfg.AgentBin)
+		if bin == "" {
+			bin = "claude-agent-acp"
+		}
+		return operateacp.New("claude", bin), "claude", "acp/v1", nil
 	default:
-		return nil, "", "", fmt.Errorf("%w: --agent must be codex or manual", ErrUsage)
+		return nil, "", "", fmt.Errorf("%w: resolve --agent auto before constructing a driver", ErrUsage)
 	}
 }

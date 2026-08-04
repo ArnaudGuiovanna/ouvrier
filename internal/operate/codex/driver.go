@@ -65,7 +65,7 @@ func (d *Driver) Probe(ctx context.Context) (operate.Capabilities, error) {
 	bin := d.bin()
 	path, err := r.LookPath(bin)
 	if err != nil {
-		return operate.Capabilities{}, fmt.Errorf("operate codex: %s not found on PATH; install Codex and run `codex login`", bin)
+		return operate.Capabilities{}, fmt.Errorf("operate codex: %s not found on PATH; install and open Codex once", bin)
 	}
 	caps := operate.Capabilities{Name: "codex", Transport: "exec", Authenticated: false}
 	cmd := r.CommandContext(ctx, path, "--version")
@@ -90,7 +90,7 @@ func (d *Driver) RunTurn(ctx context.Context, req operate.TurnRequest, sink oper
 	bin := d.bin()
 	path, err := r.LookPath(bin)
 	if err != nil {
-		return operate.TurnResult{}, fmt.Errorf("operate codex: %s not found on PATH; install Codex and run `codex login`", bin)
+		return operate.TurnResult{}, fmt.Errorf("operate codex: %s not found on PATH; install and open Codex once", bin)
 	}
 
 	prompt, err := codexPromptWithContext(req)
@@ -583,7 +583,7 @@ func normalizeJSONL(line string) (operate.Event, string) {
 func mapCodexErr(err error, output string) error {
 	lower := strings.ToLower(output)
 	if strings.Contains(lower, "auth") || strings.Contains(lower, "login") || strings.Contains(lower, "unauthorized") {
-		return fmt.Errorf("operate codex: authentication failed; run `codex login` or your organization-approved Codex login flow: %w", err)
+		return fmt.Errorf("operate codex: saved local session is unavailable; open Codex once to complete its own sign-in: %w", err)
 	}
 	return fmt.Errorf("operate codex: %w", err)
 }

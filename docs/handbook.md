@@ -15,9 +15,10 @@ commands.
 
 - Ouvrier version: current `main` includes the v0.1-v0.5 shipped work; the
   latest tagged release is `v0.5.5`.
-- Release status: post-`v0.5.5` changes on `main` are an active stabilization
-  line. They are not a new stable release until the complete repository gates
-  have passed.
+- Release status: post-`v0.5.5` stabilization changes on `main` form a release
+  candidate. As of 2026-08-03, the complete repository gates pass on `main`
+  and `staging`; independent acceptance, the final product-owner recipe,
+  release notes, and a version tag remain before publication.
 - Go version: Go 1.25 or newer.
 - Public module path: `github.com/ArnaudGuiovanna/ouvrier`.
 - Runtime package name: `ovr`.
@@ -788,6 +789,7 @@ session, LLM call, tool call, schema validation, and subagent task lifecycles.
 
 ```txt
 ouvrier version
+ouvrier agents [--json]
 ouvrier new
 ouvrier new --yes --name NAME --trigger "POST /path" --model provider/model
 ouvrier add agent --name NAME --model provider/model [--goal TEXT]
@@ -797,14 +799,14 @@ ouvrier add skill --name ticket-triage [--description TEXT]
 ouvrier show [--dir .] [--json]
 ouvrier dev [--dir .] [--addr :8080]
 ouvrier build [--dir .] [--output PATH] [--target linux/amd64] [--static]
-ouvrier operate [--dir .] [--agent codex|manual] [--codex-mode auto|exec|app-server] [--auto-safe]
+ouvrier operate [--dir .] [--agent auto|codex|claude|manual] [--codex-mode auto|exec|app-server] [--auto-safe]
 ouvrier operate --print "create a worker that receives POST /tickets"
 ouvrier operate --mode json --prompt "review this worker"
 ouvrier operate --mode rpc
 ouvrier operate create-worker --yes --name NAME --trigger "POST /path" --model provider/model [--dir .]
-ouvrier operate patch --goal TEXT [--dir .] [--agent codex|manual]
-ouvrier operate review-worker [--scope whole_worker] [--dir .] [--agent codex|manual]
-ouvrier operate fix-worker [--session ID] [--agent codex|manual]
+ouvrier operate patch --goal TEXT [--dir .] [--agent auto|codex|claude|manual]
+ouvrier operate review-worker [--scope whole_worker] [--dir .] [--agent auto|codex|claude|manual]
+ouvrier operate fix-worker [--session ID] [--agent auto|codex|claude|manual]
 ouvrier operate audit [--session ID] [--dir .]
 ouvrier operate build [--session ID] [--target linux/amd64] [--allow-failed]
 ouvrier operate transfer --env ENV [--session ID] [--target linux/amd64] [--allow-failed]
@@ -830,10 +832,14 @@ files.
 `ouvrier operate` is the prompt-first local construction cockpit for workers.
 It is a Bubble Tea interface, visually aligned with the terminal-first Pi
 workflow, but the workflow owner is Ouvrier: type a goal, let the cockpit
-scaffold or select a worker, load Ouvrier API context, prompt Codex/manual
-driver turns, review code, repair findings, run audit gates, and produce a
+scaffold or select a worker, load Ouvrier API context, prompt the selected
+coding agent, review code, repair findings, run audit gates, and produce a
 verified local artifact. Transfer remains as a compatibility command, but is
 outside the active cockpit acceptance path while deployment work is paused.
+
+The composer is a large five-line input with a soft rounded border. Its footer
+shows only `? help & commands`; the help view is the place to rediscover the
+command catalog.
 
 The main path is conversational:
 
@@ -863,17 +869,52 @@ ouvrier operate build --session <id>
 ouvrier operate transfer --session <id> --env staging
 ```
 
-Codex is accessed through the local Codex CLI driver (`--agent codex`), so
-authentication stays owned by Codex (`/login codex` in the cockpit, or
-`codex login` directly). Ouvrier stores only auth profile metadata, never Codex
-subscription tokens. `--codex-mode auto` (the default) and
-`--codex-mode exec` select the legacy Codex CLI exec driver behind Ouvrier's
-deterministic governed planner. Because that transport is text-only, Ouvrier
-never installs it as a structured model/tool loop. The structured
-`--codex-mode app-server` transport is experimental and must be selected
-explicitly; it is not a production default while its confinement and event
-parity are still being proven. `--agent manual` keeps the same sessions and
-gates without asking an agent to edit files.
+Launching `ouvrier` in an interactive terminal first detects Codex and Claude,
+checks their saved local session and canonical ACP adapter, then opens a chooser.
+No Ouvrier sign-in command is needed. `ouvrier agents` exposes the same
+non-secret readiness data for diagnostics. `--agent codex` and `--agent claude`
+remain explicit overrides; non-interactive `--agent auto` prefers ready Codex
+and then ready Claude. `--agent manual` keeps the same durable sessions and
+gates without asking an external agent to edit files.
+
+Both Codex and Claude use ACP v1 over newline-delimited JSON-RPC stdio. Codex
+uses `codex-acp`; Claude uses `claude-agent-acp`. Ouvrier checks `PATH`, its
+managed adapter directory, and `OUVRIER_ACP_BIN_DIR`. A source installation can
+provision both canonical adapters with:
+
+```sh
+npm install -g @agentclientprotocol/codex-acp
+npm install -g @agentclientprotocol/claude-agent-acp
+ouvrier agents
+ouvrier
+```
+
+The base vendor CLI and its ACP adapter are separate components. ACP does not
+replace the provider's initial account sign-in: it reuses the session already
+saved by that CLI. If the first ACP prompt reports an absent or expired session,
+reopen Codex or Claude Code once, complete the vendor's own sign-in, and restart
+Ouvrier. The explicit `--codex-mode app-server` and reduced `exec` modes remain
+compatibility/debug paths; default `auto` is ACP.
+
+New workers remain buildable in both installation modes. A development CLI
+built under an Ouvrier checkout writes a local `replace` directive; an
+installed CLI without that checkout pins its published framework version. It
+never leaves a standalone worker depending on unresolved `v0.0.0`.
+
+Both CLIs own credentials, refresh, billing, and account policy. Ouvrier runs
+only bounded status probes, never reads or copies their credential stores, and
+persists no tokens. The selected agent receives bounded redacted source context over ACP,
+while Ouvrier advertises no client terminal/filesystem capability and disables
+all agent filesystem, shell, web, MCP, plugin, and subagent tools. For mutation
+turns the selected agent returns a strict full-file patch plan. Ouvrier validates its paths,
+file count and byte limits, normalizes the canonical adapter's tool-less
+full-file envelope when necessary, applies it to the sanitized disposable Git
+stage, imports only the observed diff, and runs source-bound audit/build gates.
+Generated workers ignore the local `.ouvrier/` session/audit/build directory so
+these cockpit artifacts do not appear as source changes. CLI and cockpit
+scaffolds initialize a local `main` Git repository and a hook-free baseline
+commit, making the first staged Codex/Claude edit immediately usable. Commit or
+stash a prior source edit before starting another external-agent patch.
 
 Headless prompt, print, JSON, and RPC turns use the `manual` posture by default.
 Read-only and idempotent tools may run, but a side-effecting or
@@ -915,6 +956,7 @@ result, so it cannot erase an unresolved capability decision.
 | HTTP providers | 8 MiB non-streaming JSON response; SSE is capped at 64 MiB total and 1 MiB per frame, with at most 8 MiB assembled text. Tool-capable SSE parsers cap arguments at 1 MiB, identities at 256 bytes, and a response at 128 tool calls. |
 | Codex exec | 8 MiB / 100,000-line stdout, 1 MiB per line, 1 MiB accumulated assistant text, and 64 KiB stderr. |
 | Codex app-server | 8 MiB per protocol message, 1 MiB / 4,096 items of accumulated response text, and 64 KiB stderr. |
+| ACP v1 | 8 MiB per newline-delimited protocol message, 16 MiB aggregate protocol input, 8 MiB accumulated agent text, and 64 KiB stderr. |
 
 An over-limit model stream is cancelled and the turn fails. An exhausted
 16-step loop returns an explicit error rather than accepting the last partial
@@ -922,10 +964,10 @@ text. Resume may finish a valid final JSONL record that only lacks its newline,
 or discard an invalid unterminated final fragment and record that recovery in
 the durable transcript. It never repairs a corrupt middle record. Event
 subscription is read-only and returns the journal error without a partial
-replay. The automatic Codex signed-in check used for model selection has a
-two-second CLI deadline; other auth operations remain bounded by their caller
-context. Status/device-auth output capture is limited to 64 KiB and inherited
-output pipes have a 250 ms wait bound.
+replay. Automatic Codex and Claude signed-in checks used for agent selection
+have a two-second CLI deadline; other auth operations remain bounded by their
+caller context. Status/device-auth output capture is limited to 64 KiB and
+inherited output pipes have a 250 ms wait bound.
 
 #### Operator shell and repository inspection
 
@@ -998,6 +1040,98 @@ This keeps the worker runtime unchanged while giving the developer-operator
 one local interface for construction and local verification. Existing transfer
 and web-console surfaces are retained for compatibility and maintenance; they
 are not active cockpit-development requirements.
+
+### Release-Candidate Smoke Test
+
+Run the deterministic cockpit acceptance tests first. They use a scripted
+model, require no provider key, and prove governed construction, isolated
+audit, source-bound build, local health, and durable resume in a distinct
+runtime:
+
+```sh
+go test -count=1 ./internal/operate \
+  -run 'Test(GoldenLaneConstructsAuditsBuildsAndRunsWorker|NominalResumeCarriesCompletedToolTurnIntoNextModelRequest)$'
+```
+
+On Linux, the golden lane requires Bubblewrap and working user namespaces. A
+missing or unusable sandbox is a test failure, not permission to execute the
+candidate directly on the host.
+
+Then exercise the operator-visible path in a disposable parent directory:
+
+```sh
+smoke_root="$(mktemp -d)"
+candidate_cli="$smoke_root/ouvrier-candidate"
+go build -o "$candidate_cli" ./cmd/ouvrier
+
+"$candidate_cli" operate create-worker \
+  --yes \
+  --name smoke-worker \
+  --trigger "POST /tickets" \
+  --model "anthropic/claude-sonnet-4-6" \
+  --dir "$smoke_root"
+
+cd "$smoke_root/smoke-worker"
+"$candidate_cli" operate audit --dir .
+```
+
+`mktemp` honors `TMPDIR`; point it, together with `GOCACHE`, at spacious
+writable directories first when the system temporary filesystem is small.
+
+The audit must finish successfully and prints its session ID. A freshly
+generated non-Git workspace may report `skip` for `git diff --check`; the Go,
+manifest, secret-scan, source-immutability, and build gates must report `pass`.
+Use that exact session ID for the source-bound build:
+
+```sh
+"$candidate_cli" operate build \
+  --dir . \
+  --session <session-id>
+```
+
+The build prints the binary path and SHA-256. Start that binary on an unused
+loopback port, using the printed path in place of `<binary>`:
+
+```sh
+OUVRIER_ADDR=127.0.0.1:18082 \
+OUVRIER_ENV=production \
+OUVRIER_ADMIN_TOKEN=smoke-token \
+<binary>
+```
+
+From another terminal, the local health gate must return HTTP 200:
+
+```sh
+curl -fsS \
+  -H 'Authorization: Bearer smoke-token' \
+  http://127.0.0.1:18082/admin/health
+```
+
+For a live Codex resume check, verify that `ouvrier agents` reports Codex ready,
+make one read-only JSON-mode turn, stop the process, and invoke a second process
+with the returned session ID:
+
+```sh
+"$candidate_cli" operate \
+  --dir . \
+  --agent codex \
+  --mode json \
+  --prompt "List the worker files and summarize the trigger."
+
+"$candidate_cli" operate \
+  --dir . \
+  --agent codex \
+  --mode json \
+  --session <session-id> \
+  --prompt "Continue from the prior inspection and identify the typed outcome."
+```
+
+Both responses must carry the same session ID. Inspect
+`.ouvrier/operate/sessions/<session-id>/transcript.jsonl` and
+`tool-calls.jsonl`: the first completed tool call/result pair must remain in
+order exactly once, followed by the second turn. This live check exercises the
+real driver; the deterministic test above is the regression gate for exact
+message ordering and non-duplication.
 
 ## Build And Deploy
 

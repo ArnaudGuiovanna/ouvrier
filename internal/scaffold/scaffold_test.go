@@ -76,6 +76,7 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	assertFileContains(t, filepath.Join(project.Dir, ".gitignore"), []string{
 		".env*",
 		"!.env.example",
+		".ouvrier/",
 		"bin/",
 	})
 
@@ -84,6 +85,68 @@ func TestGenerateWritesMinimalProject(t *testing.T) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("generated project does not compile: %v\n%s", err, output)
+	}
+}
+
+func TestGoModPinsReleasedFrameworkWithoutLocalCheckout(t *testing.T) {
+	got := goMod(Config{
+		Name: "demo", FrameworkModule: "github.com/ArnaudGuiovanna/ouvrier",
+		FrameworkVersion: fallbackFrameworkVersion,
+	})
+	if !strings.Contains(got, "require github.com/ArnaudGuiovanna/ouvrier "+fallbackFrameworkVersion) {
+		t.Fatalf("go.mod did not pin the released framework:\n%s", got)
+	}
+	if strings.Contains(got, "replace ") || strings.Contains(got, " v0.0.0") {
+		t.Fatalf("go.mod emitted a development-only dependency without a checkout:\n%s", got)
+	}
+}
+
+func TestFindFrameworkDirFromBuiltBinaryLocation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module github.com/ArnaudGuiovanna/ouvrier\n\ngo 1.25.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	start := filepath.Join(root, "dist", "nested")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findFrameworkDir(start); got != root {
+		t.Fatalf("findFrameworkDir() = %q, want %q", got, root)
+	}
+}
+
+func TestGenerateCanInitializeCleanGitBaseline(t *testing.T) {
+	root := repoRoot(t)
+	project, err := Generate(context.Background(), Config{
+		Name: "git-ready", Trigger: "POST /tickets", Model: "anthropic/claude-sonnet-4-6",
+		Dir: t.TempDir(), FrameworkDir: root, InitializeGit: true,
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	for _, check := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"status", "--porcelain=v1", "--untracked-files=all"}, want: ""},
+		{args: []string{"log", "-1", "--format=%s"}, want: "chore: scaffold Ouvrier worker"},
+	} {
+		cmd := exec.Command("git", check.args...)
+		cmd.Dir = project.Dir
+		output, runErr := cmd.CombinedOutput()
+		if runErr != nil || strings.TrimSpace(string(output)) != check.want {
+			t.Fatalf("git %v = %q, %v; want %q", check.args, output, runErr, check.want)
+		}
+	}
+}
+
+func TestNormalizeConfigRejectsFrameworkVersionInjection(t *testing.T) {
+	_, err := normalizeConfig(Config{
+		Name: "demo", Trigger: "POST /tickets", Model: "anthropic/claude-sonnet-4-6",
+		FrameworkVersion: "v0.5.5-\nreplace example.com/evil => /tmp/evil",
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("normalizeConfig() error = %v, want ErrInvalidConfig", err)
 	}
 }
 

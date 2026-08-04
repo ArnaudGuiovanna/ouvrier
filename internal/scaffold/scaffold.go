@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/provider"
@@ -18,12 +20,14 @@ var (
 )
 
 type Config struct {
-	Name            string
-	Trigger         string
-	Model           string
-	Dir             string
-	FrameworkModule string
-	FrameworkDir    string
+	Name             string
+	Trigger          string
+	Model            string
+	Dir              string
+	FrameworkModule  string
+	FrameworkVersion string
+	FrameworkDir     string
+	InitializeGit    bool
 
 	// trigger holds the parsed trigger spec used by the templates. It is
 	// populated by normalizeConfig and never set by callers.
@@ -78,6 +82,11 @@ func Generate(ctx context.Context, cfg Config) (Project, error) {
 			return Project{}, err
 		}
 		if err := writeNewFile(filepath.Join(target, name), contents, 0o644); err != nil {
+			return Project{}, err
+		}
+	}
+	if normalized.InitializeGit {
+		if err := initializeGitBaseline(ctx, target); err != nil {
 			return Project{}, err
 		}
 	}
@@ -137,15 +146,24 @@ func normalizeConfig(cfg Config) (Config, error) {
 		}
 		frameworkDir = abs
 	}
+	frameworkVersion := strings.TrimSpace(cfg.FrameworkVersion)
+	if frameworkVersion == "" {
+		frameworkVersion = detectFrameworkVersion()
+	}
+	if !validFrameworkVersion(frameworkVersion) {
+		return Config{}, fmt.Errorf("%w: framework version %q is not a valid Go module version", ErrInvalidConfig, frameworkVersion)
+	}
 
 	return Config{
-		Name:            name,
-		Trigger:         spec.display,
-		Model:           model,
-		Dir:             filepath.Clean(dir),
-		FrameworkModule: module,
-		FrameworkDir:    frameworkDir,
-		trigger:         spec,
+		Name:             name,
+		Trigger:          spec.display,
+		Model:            model,
+		Dir:              filepath.Clean(dir),
+		FrameworkModule:  module,
+		FrameworkVersion: frameworkVersion,
+		FrameworkDir:     frameworkDir,
+		InitializeGit:    cfg.InitializeGit,
+		trigger:          spec,
 	}, nil
 }
 
@@ -258,21 +276,58 @@ func writeNewFile(path string, contents string, mode os.FileMode) error {
 }
 
 func detectFrameworkDir() string {
+	var starts []string
 	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return ""
+	if ok && filepath.IsAbs(file) {
+		starts = append(starts, filepath.Dir(file))
 	}
-	dir := filepath.Dir(file)
-	for {
-		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-		text := string(data)
-		if err == nil && (strings.HasPrefix(text, "module github.com/ArnaudGuiovanna/ouvrier\n") || strings.Contains(text, "\nmodule github.com/ArnaudGuiovanna/ouvrier\n")) {
-			return dir
+	if executable, err := os.Executable(); err == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil {
+			executable = resolved
 		}
-		next := filepath.Dir(dir)
-		if next == dir {
-			return ""
-		}
-		dir = next
+		starts = append(starts, filepath.Dir(executable))
 	}
+	return findFrameworkDir(starts...)
+}
+
+func findFrameworkDir(starts ...string) string {
+	seen := make(map[string]struct{}, len(starts))
+	for _, start := range starts {
+		dir := filepath.Clean(start)
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		for {
+			if _, duplicate := seen[dir]; duplicate {
+				break
+			}
+			seen[dir] = struct{}{}
+			data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+			text := string(data)
+			if err == nil && (strings.HasPrefix(text, "module github.com/ArnaudGuiovanna/ouvrier\n") || strings.Contains(text, "\nmodule github.com/ArnaudGuiovanna/ouvrier\n")) {
+				return dir
+			}
+			next := filepath.Dir(dir)
+			if next == dir {
+				break
+			}
+			dir = next
+		}
+	}
+	return ""
+}
+
+const fallbackFrameworkVersion = "v0.5.5"
+
+var frameworkVersionPattern = regexp.MustCompile(`^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
+
+func detectFrameworkVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && validFrameworkVersion(info.Main.Version) {
+		return info.Main.Version
+	}
+	return fallbackFrameworkVersion
+}
+
+func validFrameworkVersion(version string) bool {
+	return frameworkVersionPattern.MatchString(version)
 }

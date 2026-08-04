@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os/exec"
 	"testing"
 
 	"github.com/ArnaudGuiovanna/ouvrier/internal/operate"
@@ -11,7 +12,12 @@ import (
 )
 
 func TestRunEmptyArgsOpensCockpit(t *testing.T) {
-	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
+	app := New(
+		"test",
+		WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}),
+		WithSignedIn(func() bool { return true }),
+		withAgentDiscovery(nil, codexACPTestPath),
+	)
 	called := false
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, _ tui.OperateOptions) error {
 		called = true
@@ -65,7 +71,12 @@ func TestRunDashCResumesLatest(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	app := New("test", WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}), WithSignedIn(func() bool { return false }))
+	app := New(
+		"test",
+		WithStreams(bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}),
+		WithSignedIn(func() bool { return true }),
+		withAgentDiscovery(nil, codexACPTestPath),
+	)
 	var gotSession string
 	app.runOperate = func(_ context.Context, _ io.Reader, _ io.Writer, opts tui.OperateOptions) error {
 		gotSession = opts.Session
@@ -78,6 +89,13 @@ func TestRunDashCResumesLatest(t *testing.T) {
 	if gotSession != sess.ID {
 		t.Fatalf("resume session = %q, want %q", gotSession, sess.ID)
 	}
+}
+
+func codexACPTestPath(name string) (string, error) {
+	if name == "codex" || name == "codex-acp" {
+		return "/usr/bin/" + name, nil
+	}
+	return "", exec.ErrNotFound
 }
 
 func TestRootHelpIsAgentCentric(t *testing.T) {
